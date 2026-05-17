@@ -33,3 +33,39 @@ var SmWeights = [128]uint8{
 	18, 16, 15, 13, 12, 10, 9, 8,
 	7, 6, 6, 5, 5, 4, 4, 4,
 }
+
+// DrIntraDerivative is a verbatim port of dav1d_dr_intra_derivative
+// (dav1d/src/tables.c lines 719-749). Indexed by (angle >> 1) for the
+// AV1 directional intra prediction modes; entries marked 0 in the
+// table are never used by the spec because they sit between the
+// quantised angle steps.
+var DrIntraDerivative = [44]uint16{
+	0,
+	1023, 0,
+	547,
+	372, 0, 0,
+	273,
+	215, 0,
+	178,
+	151, 0,
+	132,
+	116, 0,
+	102, 0,
+	90,
+	80, 0,
+	71,
+	64, 0,
+	57,
+	51, 0,
+	45, 0,
+	40,
+	35, 0,
+	31,
+	27, 0,
+	23,
+	19, 0,
+	15, 0,
+	11, 0,
+	7,
+	3,
+}
