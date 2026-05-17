@@ -232,3 +232,16 @@ func (g *GetBits) BytePos() int {
 	}
 	return g.ptr
 }
+
+// State returns the unread bits currently held in the internal 64-bit
+// window, MSB-aligned. Callers use it to validate the spec's
+// trailing_bits() padding (all remaining bits in the active byte must be
+// zero); it is not meant for general bit-reading.
+func (g *GetBits) State() uint64 { return g.state }
+
+// RemainingBytes returns the bytes that have not yet been pulled into the
+// internal window. The returned slice aliases the input buffer; do not
+// mutate it. Combined with State(), it lets callers implement the AV1
+// trailing_bits() / byte_alignment() checks without exposing more of the
+// reader's internals.
+func (g *GetBits) RemainingBytes() []byte { return g.data[g.ptr:] }
