@@ -1,0 +1,41 @@
+run:
+  timeout: 5m
+  tests: true
+  go: "1.22"
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - misspell
+    - revive
+    - unconvert
+
+linters-settings:
+  goimports:
+    local-prefixes: github.com/zesun96/go-av1
+  revive:
+    rules:
+      - name: exported
+      - name: package-comments
+      - name: var-naming
+      - name: error-return
+      - name: error-naming
+
+issues:
+  exclude-dirs:
+    - test/conformance/vectors
+  exclude-rules:
+    # Permit TODO placeholders in skeleton code.
+    - linters: [revive, staticcheck]
+      text: "TODO"
+    # Skeleton command entry points start out trivial.
+    - path: cmd/.*\.go
+      linters: [revive]
+      text: "exported: comment on exported"

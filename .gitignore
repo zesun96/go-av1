@@ -1,0 +1,35 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+*.prof
+*.coverage
+
+# Generated assembly trampolines
+internal/dispatch/zz_generated_*.go
+
+# Test vectors and large media samples
+/test/conformance/vectors/
+/test/conformance/decoded/
+*.ivf
+*.obu
+*.y4m
+*.webm
+*.mp4
+*.yuv
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Go workspace files (per-developer)
+go.work
+go.work.sum
