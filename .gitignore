@@ -1,11 +1,13 @@
 # Build artifacts
 /bin/
 /dist/
+/logs/
 *.exe
 *.test
 *.out
 *.prof
 *.coverage
+*.log
 
 # Generated assembly trampolines
 internal/dispatch/zz_generated_*.go

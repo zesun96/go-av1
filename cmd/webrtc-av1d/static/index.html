@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebRTC AV1 Decode Test</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 24px 16px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+            color: #fff;
+        }
+
+        .subtitle {
+            font-size: 0.85rem;
+            color: #888;
+            margin-bottom: 24px;
+        }
+
+        .card {
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 12px;
+            padding: 20px;
+            width: 100%;
+            max-width: 700px;
+            margin-bottom: 16px;
+        }
+
+        .card h2 {
+            font-size: 1rem;
+            color: #aaa;
+            margin-bottom: 12px;
+        }
+
+        video {
+            width: 100%;
+            border-radius: 8px;
+            background: #000;
+            display: block;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 14px;
+        }
+
+        button {
+            padding: 9px 22px;
+            border: none;
+            border-radius: 7px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: opacity .15s;
+        }
+
+        button:disabled {
+            opacity: .4;
+            cursor: not-allowed;
+        }
+
+        #btnStart {
+            background: #3b82f6;
+            color: #fff;
+        }
+
+        #btnStop {
+            background: #ef4444;
+            color: #fff;
+        }
+
+        #btnStop:disabled {
+            background: #555;
+        }
+
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            background: #111;
+            border-radius: 8px;
+            margin-top: 14px;
+            font-size: 0.82rem;
+        }
+
+        .dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: #555;
+            flex-shrink: 0;
+        }
+
+        .dot.connected {
+            background: #22c55e;
+        }
+
+        .dot.connecting {
+            background: #f59e0b;
+            animation: blink 1s infinite;
+        }
+
+        .dot.failed {
+            background: #ef4444;
+        }
+
+        @keyframes blink {
+
+            0%,
+            100% {
+                opacity: 1
+            }
+
+            50% {
+                opacity: .3
+            }
+        }
+
+        #log {
+            background: #111;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 0.78rem;
+            font-family: monospace;
+            max-height: 200px;
+            overflow-y: auto;
+            color: #9ca3af;
+            line-height: 1.6;
+        }
+
+        #log .ts {
+            color: #4b5563;
+            margin-right: 6px;
+        }
+
+        #log .info {
+            color: #60a5fa;
+        }
+
+        #log .warn {
+            color: #f59e0b;
+        }
+
+        #log .error {
+            color: #f87171;
+        }
+
+        .codec-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 6px;
+        }
+
+        .codec-chip {
+            background: #252525;
+            border: 1px solid #333;
+            border-radius: 5px;
+            padding: 2px 9px;
+            font-size: 0.75rem;
+            color: #aaa;
+        }
+
+        .codec-chip.av1 {
+            border-color: #3b82f6;
+            color: #93c5fd;
+            background: #1e3a5f;
+        }
+
+        .codec-chip.unavail {
+            opacity: .45;
+        }
+
+        .warn-box {
+            background: #2d1b00;
+            border: 1px solid #713f12;
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 0.83rem;
+            color: #fbbf24;
+            margin-top: 12px;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>WebRTC AV1 Decode Test</h1>
+    <p class="subtitle">Camera → AV1 encode → WebRTC → server-side decode &amp; save IVF</p>
+
+    <!-- Local Preview -->
+    <div class="card">
+        <h2>Local Preview</h2>
+        <video id="localVideo" autoplay muted playsinline></video>
+
+        <div class="controls">
+            <button id="btnStart">Start Stream</button>
+            <button id="btnStop" disabled>Stop Stream</button>
+        </div>
+
+        <div class="status-bar">
+            <div class="dot" id="dot"></div>
+            <span id="statusText">Disconnected</span>
+        </div>
+
+        <div class="warn-box" id="warnBox"></div>
+    </div>
+
+    <!-- Codec Capabilities -->
+    <div class="card">
+        <h2>Browser AV1 Send Capability</h2>
+        <div class="codec-list" id="codecList">Detecting…</div>
+    </div>
+
+    <!-- Log -->
+    <div class="card">
+        <h2>Log</h2>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        // ─── Utilities ────────────────────────────────────────────────────────────────
+
+        function ts() {
+            const d = new Date();
+            return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+        }
+
+        function log(msg, level = 'info') {
+            const el = document.getElementById('log');
+            const line = document.createElement('div');
+            line.innerHTML = `<span class="ts">${ts()}</span><span class="${level}">${escHtml(msg)}</span>`;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+            console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](msg);
+        }
+
+        function escHtml(s) {
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function setStatus(text, cls) {
+            document.getElementById('statusText').textContent = text;
+            const dot = document.getElementById('dot');
+            dot.className = 'dot' + (cls ? ' ' + cls : '');
+        }
+
+        // ─── Codec Detection ─────────────────────────────────────────────────────────
+
+        function detectCodecs() {
+            const container = document.getElementById('codecList');
+            container.innerHTML = '';
+
+            if (!RTCRtpSender.getCapabilities) {
+                container.textContent = 'Browser does not support getCapabilities API';
+                return;
+            }
+
+            const caps = RTCRtpSender.getCapabilities('video');
+            if (!caps) {
+                container.textContent = 'Unable to get codec capabilities';
+                return;
+            }
+
+            const codecs = caps.codecs || [];
+            let hasAV1 = false;
+
+            codecs.forEach(c => {
+                const name = c.mimeType.split('/')[1].toUpperCase();
+                const chip = document.createElement('span');
+                chip.className = 'codec-chip';
+                chip.textContent = name + (c.sdpFmtpLine ? ' (' + c.sdpFmtpLine.slice(0, 30) + ')' : '');
+                if (name === 'AV1') {
+                    chip.classList.add('av1');
+                    hasAV1 = true;
+                }
+                container.appendChild(chip);
+            });
+
+            if (!hasAV1) {
+                const warn = document.getElementById('warnBox');
+                warn.textContent = '⚠️ This browser does not support AV1 WebRTC encoding (requires Chrome 112+ or Firefox 113+). The connection will still be established but may negotiate VP8/H264.';
+                warn.style.display = 'block';
+                log('Browser does not support AV1 send; fallback codec will be used', 'warn');
+            } else {
+                log('AV1 send capability detected');
+            }
+        }
+
+        detectCodecs();
+
+        // ─── WebRTC Streaming ────────────────────────────────────────────────────────
+
+        let pc = null;
+        let localStream = null;
+
+        document.getElementById('btnStart').addEventListener('click', startStream);
+        document.getElementById('btnStop').addEventListener('click', stopStream);
+
+        async function startStream() {
+            document.getElementById('btnStart').disabled = true;
+            setStatus('Accessing camera…', 'connecting');
+
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
+                    audio: false,
+                });
+            } catch (e) {
+                log('Camera access failed: ' + e.message, 'error');
+                setStatus('Camera error', 'failed');
+                document.getElementById('btnStart').disabled = false;
+                return;
+            }
+
+            document.getElementById('localVideo').srcObject = localStream;
+            log('Camera started');
+
+            // Build PeerConnection – only AV1 codec, matching the server.
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+            });
+
+            pc.oniceconnectionstatechange = () => {
+                const state = pc.iceConnectionState;
+                log('ICE state: ' + state);
+                if (state === 'connected' || state === 'completed') {
+                    setStatus('Connected', 'connected');
+                } else if (state === 'checking') {
+                    setStatus('Connecting…', 'connecting');
+                } else if (state === 'failed' || state === 'closed') {
+                    setStatus('Disconnected', 'failed');
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                log('Connection state: ' + pc.connectionState);
+            };
+
+            // Add video track.
+            const videoTrack = localStream.getVideoTracks()[0];
+            const sender = pc.addTrack(videoTrack, localStream);
+
+            // Prefer AV1 codec if available.
+            preferAV1(sender);
+
+            // ICE gathering – trickle=false: wait for all candidates.
+            setStatus('SDP negotiating…', 'connecting');
+
+            const offerOptions = { offerToReceiveVideo: false, offerToReceiveAudio: false };
+            const offer = await pc.createOffer(offerOptions);
+            await pc.setLocalDescription(offer);
+
+            // Wait for ICE gathering to finish.
+            await waitForGatheringComplete(pc);
+
+            log('Sending Offer SDP…');
+            let resp;
+            try {
+                resp = await fetch('/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+                });
+            } catch (e) {
+                log('Signaling request failed: ' + e.message, 'error');
+                setStatus('Signaling failed', 'failed');
+                document.getElementById('btnStart').disabled = false;
+                return;
+            }
+
+            if (!resp.ok) {
+                const text = await resp.text();
+                log('Server error: ' + text, 'error');
+                setStatus('Server error', 'failed');
+                document.getElementById('btnStart').disabled = false;
+                return;
+            }
+
+            const answer = await resp.json();
+            log('Answer SDP received');
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+            document.getElementById('btnStop').disabled = false;
+            log('WebRTC connected, streaming started');
+        }
+
+        function stopStream() {
+            log('Stopping stream');
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (localStream) {
+                localStream.getTracks().forEach(t => t.stop());
+                localStream = null;
+                document.getElementById('localVideo').srcObject = null;
+            }
+            setStatus('Disconnected');
+            document.getElementById('btnStart').disabled = false;
+            document.getElementById('btnStop').disabled = true;
+        }
+
+        // preferAV1 reorders codec preferences so AV1 comes first.
+        function preferAV1(sender) {
+            if (!RTCRtpSender.getCapabilities) return;
+            const caps = RTCRtpSender.getCapabilities('video');
+            if (!caps) return;
+
+            const av1Codecs = caps.codecs.filter(c => c.mimeType.toLowerCase() === 'video/av1');
+            const others = caps.codecs.filter(c => c.mimeType.toLowerCase() !== 'video/av1');
+            const ordered = [...av1Codecs, ...others];
+
+            try {
+                const params = sender.getParameters();
+                // setCodecPreferences is on transceiver, not sender.
+                const transceivers = pc.getTransceivers();
+                for (const tc of transceivers) {
+                    if (tc.sender === sender && tc.setCodecPreferences) {
+                        tc.setCodecPreferences(ordered);
+                        log('AV1 codec preference set');
+                        break;
+                    }
+                }
+            } catch (e) {
+                log('setCodecPreferences failed: ' + e.message, 'warn');
+            }
+        }
+
+        // waitForGatheringComplete returns a promise that resolves when ICE gathering is done.
+        function waitForGatheringComplete(pc) {
+            return new Promise(resolve => {
+                if (pc.iceGatheringState === 'complete') {
+                    resolve();
+                    return;
+                }
+                const handler = () => {
+                    if (pc.iceGatheringState === 'complete') {
+                        pc.removeEventListener('icegatheringstatechange', handler);
+                        resolve();
+                    }
+                };
+                pc.addEventListener('icegatheringstatechange', handler);
+                // Fallback timeout.
+                setTimeout(resolve, 8000);
+            });
+        }
+    </script>
+</body>
+
+</html>
