@@ -132,6 +132,55 @@ func TestInvDCT16_TX64Path(t *testing.T) {
 	// non-tx64 path.
 }
 
+func TestInvDCT32_DCOnly(t *testing.T) {
+	c := make([]int32, 32)
+	c[0] = 256
+	InvDCT32(c, 1, itxMin, itxMax)
+	want := int32((256*181 + 128) >> 8) // 181
+	for i, v := range c {
+		if v != want {
+			t.Fatalf("DCT32 DC: c[%d]=%d want %d", i, v, want)
+		}
+	}
+}
+
+func TestInvDCT32_TX64Path(t *testing.T) {
+	c := make([]int32, 32)
+	c[0] = 4096
+	c[1] = 4096
+	invDCT32Internal(c, 1, itxMin, itxMax, true)
+	// Validates tx64 branch runs without panic.
+}
+
+func TestInvDCT64_DCOnly(t *testing.T) {
+	c := make([]int32, 64)
+	c[0] = 256
+	InvDCT64(c, 1, itxMin, itxMax)
+	// DCT64 calls invDCT32Internal(c, 2, ...) for the even half,
+	// then the odd half with all zeros. DC input should produce a
+	// near-constant output scaled by the 64-point butterfly chain.
+	// Validate non-zero output and no panics.
+	nonzero := 0
+	for _, v := range c {
+		if v != 0 {
+			nonzero++
+		}
+	}
+	if nonzero == 0 {
+		t.Fatal("DCT64 DC: all outputs zero")
+	}
+}
+
+func TestInvDCT64_RandomSmoke(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	c := make([]int32, 64)
+	for i := range c {
+		c[i] = int32(rng.Intn(8192) - 4096)
+	}
+	InvDCT64(c, 1, itxMin, itxMax)
+	// Just ensure no panic / OOB.
+}
+
 // Round-trip via stride: verify that strided storage works correctly.
 func TestInvDCT4_Stride2(t *testing.T) {
 	// Place 4 inputs at stride=2 (so c has length 8 with garbage in the
@@ -352,9 +401,9 @@ func TestTx1dFnsDispatch(t *testing.T) {
 		{TX4x4, Tx1dIDENTITY, InvIdentity4, false},
 		{TX8x8, Tx1dDCT, InvDCT8, false},
 		{TX16x16, Tx1dADST, InvADST16, false},
+		{TX32x32, Tx1dDCT, InvDCT32, false},
 		{TX32x32, Tx1dIDENTITY, InvIdentity32, false},
-		{TX32x32, Tx1dDCT, nil, true}, // not implemented yet (M3.c.2)
-		{TX64x64, Tx1dDCT, nil, true},
+		{TX64x64, Tx1dDCT, InvDCT64, false},
 	}
 	for _, c := range cases {
 		got := Tx1dFns[c.size][c.ty]
@@ -368,7 +417,13 @@ func TestTx1dFnsDispatch(t *testing.T) {
 			t.Fatalf("[%d][%d] expected non-nil", c.size, c.ty)
 		}
 		// Run a smoke sample through the dispatched fn.
-		buf := make([]int32, 32)
+		bufSize := 4
+		if c.size >= TX32x32 {
+			bufSize = 64
+		} else if c.size >= TX8x8 {
+			bufSize = 16
+		}
+		buf := make([]int32, bufSize)
 		buf[0] = 256
 		got(buf, 1, itxMin, itxMax)
 	}

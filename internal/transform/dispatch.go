@@ -12,6 +12,27 @@ const (
 	NTxSizes
 )
 
+// AV1 rectangular transform-size enumeration. Indices match dav1d enum
+// RectTxfmSize. The square sizes share indices 0..4 with TxfmSize above;
+// the rectangular sizes start at NTxSizes.
+const (
+	RTX4x8 = NTxSizes + iota
+	RTX8x4
+	RTX8x16
+	RTX16x8
+	RTX16x32
+	RTX32x16
+	RTX32x64
+	RTX64x32
+	RTX4x16
+	RTX16x4
+	RTX8x32
+	RTX32x8
+	RTX16x64
+	RTX64x16
+	NRectTxSizes
+)
+
 // AV1 1D transform-type enumeration. Indices match dav1d enum Tx1dType.
 const (
 	Tx1dDCT = iota
@@ -72,7 +93,11 @@ var Tx1dFns = [NTxSizes][NTx1dTypes]Itx1dFn{
 		Tx1dIDENTITY: InvIdentity16,
 	},
 	TX32x32: {
+		Tx1dDCT:      InvDCT32,
 		Tx1dIDENTITY: InvIdentity32,
+	},
+	TX64x64: {
+		Tx1dDCT: InvDCT64,
 	},
 }
 
@@ -99,4 +124,41 @@ var Tx1dTypes = [NTxTypes][2]uint8{
 	H_ADST:            {Tx1dIDENTITY, Tx1dADST},
 	V_FLIPADST:        {Tx1dFLIPADST, Tx1dIDENTITY},
 	H_FLIPADST:        {Tx1dIDENTITY, Tx1dFLIPADST},
+}
+
+// TxfmDim holds dimension metadata for a transform size, mirroring
+// dav1d TxfmInfo. Width and height are expressed in units of 4 pixels
+// (w=1 → 4px, w=2 → 8px, etc.). Lw/Lh are log2(w). Min/Max are
+// the min/max of lw/lh. Sub is the next smaller square/rect size.
+// Ctx is the context index used in coefficient coding.
+type TxfmDim struct {
+	W, H     uint8 // width/height in 4px units
+	Lw, Lh   uint8 // log2 of w/h
+	Min, Max uint8 // min/max of lw/lh
+	Sub      uint8 // next smaller (Rect)TxfmSize
+	Ctx      uint8 // context index for coefficient coding
+}
+
+// TxfmDimensions mirrors dav1d_txfm_dimensions from dav1d/src/tables.c.
+// Indexed by (Rect)TxfmSize constant (TX4x4..TX64x64, RTX4x8..RTX64x16).
+var TxfmDimensions = [NRectTxSizes]TxfmDim{
+	TX4x4:    {W: 1, H: 1, Lw: 0, Lh: 0, Min: 0, Max: 0, Sub: 0, Ctx: 0},
+	TX8x8:    {W: 2, H: 2, Lw: 1, Lh: 1, Min: 1, Max: 1, Sub: TX4x4, Ctx: 1},
+	TX16x16:  {W: 4, H: 4, Lw: 2, Lh: 2, Min: 2, Max: 2, Sub: TX8x8, Ctx: 2},
+	TX32x32:  {W: 8, H: 8, Lw: 3, Lh: 3, Min: 3, Max: 3, Sub: TX16x16, Ctx: 3},
+	TX64x64:  {W: 16, H: 16, Lw: 4, Lh: 4, Min: 4, Max: 4, Sub: TX32x32, Ctx: 4},
+	RTX4x8:   {W: 1, H: 2, Lw: 0, Lh: 1, Min: 0, Max: 1, Sub: TX4x4, Ctx: 1},
+	RTX8x4:   {W: 2, H: 1, Lw: 1, Lh: 0, Min: 0, Max: 1, Sub: TX4x4, Ctx: 1},
+	RTX8x16:  {W: 2, H: 4, Lw: 1, Lh: 2, Min: 1, Max: 2, Sub: TX8x8, Ctx: 2},
+	RTX16x8:  {W: 4, H: 2, Lw: 2, Lh: 1, Min: 1, Max: 2, Sub: TX8x8, Ctx: 2},
+	RTX16x32: {W: 4, H: 8, Lw: 2, Lh: 3, Min: 2, Max: 3, Sub: TX16x16, Ctx: 3},
+	RTX32x16: {W: 8, H: 4, Lw: 3, Lh: 2, Min: 2, Max: 3, Sub: TX16x16, Ctx: 3},
+	RTX32x64: {W: 8, H: 16, Lw: 3, Lh: 4, Min: 3, Max: 4, Sub: TX32x32, Ctx: 4},
+	RTX64x32: {W: 16, H: 8, Lw: 4, Lh: 3, Min: 3, Max: 4, Sub: TX32x32, Ctx: 4},
+	RTX4x16:  {W: 1, H: 4, Lw: 0, Lh: 2, Min: 0, Max: 2, Sub: RTX4x8, Ctx: 1},
+	RTX16x4:  {W: 4, H: 1, Lw: 2, Lh: 0, Min: 0, Max: 2, Sub: RTX8x4, Ctx: 1},
+	RTX8x32:  {W: 2, H: 8, Lw: 1, Lh: 3, Min: 1, Max: 3, Sub: RTX8x16, Ctx: 2},
+	RTX32x8:  {W: 8, H: 2, Lw: 3, Lh: 1, Min: 1, Max: 3, Sub: RTX16x8, Ctx: 2},
+	RTX16x64: {W: 4, H: 16, Lw: 2, Lh: 4, Min: 2, Max: 4, Sub: RTX16x32, Ctx: 3},
+	RTX64x16: {W: 16, H: 4, Lw: 4, Lh: 2, Min: 2, Max: 4, Sub: RTX32x16, Ctx: 3},
 }
