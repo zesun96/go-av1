@@ -92,9 +92,10 @@ type Decoder interface {
 	Close() error
 }
 
-// NewDecoder constructs a Decoder. At milestone M0 it always returns
-// ErrNotImplemented; later milestones will wire up the internal pipeline.
+// NewDecoder constructs a Decoder backed by the M6 pipeline.
 func NewDecoder(opts DecoderOptions) (Decoder, error) {
-	_ = opts
-	return nil, ErrNotImplemented
+	if opts.InloopFilters == 0 {
+		opts.InloopFilters = InloopFilterAll
+	}
+	return newDecoderImpl(opts)
 }

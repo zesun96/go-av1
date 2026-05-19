@@ -1,6 +1,9 @@
 package av1
 
-import "io"
+import (
+	"errors"
+	"io"
+)
 
 // PictureFunc is invoked once per decoded picture by DecodeReader.
 //
@@ -8,19 +11,36 @@ import "io"
 // callee, either before returning or asynchronously.
 type PictureFunc func(p *Picture, err error) bool
 
-// DecodeReader is a convenience helper that decodes every picture in r and
-// invokes fn for each one.
-//
-// The Go 1.23 range-over-func iterator form will be added once the project's
-// minimum Go version is bumped; the callback shape is wire-compatible with a
-// future iter.Seq2[*Picture, error] adapter.
-//
-// At M0 the helper invokes fn exactly once with (nil, ErrNotImplemented) and
-// returns that error.
+// DecodeReader decodes all pictures in r and invokes fn for each one.
+// It uses a bulk ReadAll approach for M6; M8 will switch to streaming.
 func DecodeReader(r io.Reader, fn PictureFunc) error {
-	_ = r
-	if fn != nil {
-		fn(nil, ErrNotImplemented)
+	dec, err := NewDecoder(DecoderOptions{})
+	if err != nil {
+		return err
 	}
-	return ErrNotImplemented
+	defer dec.Close()
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	if err := dec.SendData(data); err != nil {
+		return err
+	}
+	for {
+		p, gerr := dec.GetPicture()
+		if errors.Is(gerr, ErrAgain) {
+			break
+		}
+		if fn != nil && !fn(p, gerr) {
+			break
+		}
+		if p != nil {
+			p.Release()
+		}
+		if gerr != nil {
+			return gerr
+		}
+	}
+	return dec.Flush()
 }
