@@ -60,15 +60,13 @@ func main() {
 
 ## Command-line tools
 
-```sh
-# Decoder: AV1 (IVF/Annex-B) -> Y4M.
-go install github.com/zesun96/go-av1/cmd/go-av1d@latest
-go-av1d -i input.ivf -o output.y4m
+| Tool | Description | Install |
+|---|---|---|
+| [`go-av1d`](cmd/go-av1d) | AV1 decoder — IVF/Annex-B → Y4M | `go install github.com/zesun96/go-av1/cmd/go-av1d@latest` |
+| [`go-av1enc`](cmd/go-av1enc) | AV1 encoder — Y4M → IVF *(planned)* | `go install github.com/zesun96/go-av1/cmd/go-av1enc@latest` |
+| [`webrtc-av1d`](cmd/webrtc-av1d) | WebRTC receiver — browser AV1 → IVF + decode | see [cmd/webrtc-av1d](cmd/webrtc-av1d/README.md) |
 
-# Encoder: Y4M -> AV1 (IVF).
-go install github.com/zesun96/go-av1/cmd/go-av1enc@latest
-go-av1enc -i input.y4m -o output.ivf
-```
+See [`cmd/README.md`](cmd/README.md) for full usage details.
 
 ## Documentation
 
