@@ -86,6 +86,15 @@ func InvTxfmAdd(dst []uint8, stride int, coeff []int32, eob int,
 	first1d := Tx1dFns[td.Lw][txtps[1]]
 	second1d := Tx1dFns[td.Lh][txtps[0]]
 
+	// Guard against unimplemented transform combinations (e.g. ADST for TX32/TX64).
+	// Fall back to DCT if the requested 1D function is nil.
+	if first1d == nil {
+		first1d = Tx1dFns[td.Lw][Tx1dDCT]
+	}
+	if second1d == nil {
+		second1d = Tx1dFns[td.Lh][Tx1dDCT]
+	}
+
 	// Clip bounds for intermediate values
 	var rowClipMin, rowClipMax, colClipMin, colClipMax int
 	if bitDepth == 8 {

@@ -2,8 +2,8 @@
 // package. It routes OBUs, manages the reference frame buffer, and applies
 // post-processing filters.
 //
-// Milestone: M6 (pipeline skeleton).
-// Tile group CABAC decode is a stub; M7 will fill it in.
+// Milestone: M7 (tile CABAC decode, intra frames).
+// Inter block motion compensation is a DC128 stub; M8 will wire up real MC.
 package av1
 
 import (
@@ -11,6 +11,7 @@ import (
 
 	"github.com/zesun96/go-av1/internal/header"
 	"github.com/zesun96/go-av1/internal/obu"
+	"github.com/zesun96/go-av1/internal/tile"
 )
 
 // ─── refEntry ─────────────────────────────────────────────────────────────────
@@ -28,6 +29,9 @@ type decoderImpl struct {
 	mu   sync.Mutex
 	opts DecoderOptions
 
+	// logf is the logging function derived from opts.Logger (never nil).
+	logf func(string, ...any)
+
 	// seq is the most-recently parsed SequenceHeader.
 	seq *header.SequenceHeader
 
@@ -37,12 +41,21 @@ type decoderImpl struct {
 	// outQ holds fully decoded pictures waiting to be consumed by GetPicture.
 	outQ []*Picture
 
+	// pending state for OBUFrameHeader + OBUTileGroup split mode.
+	pendingFhdr    *header.FrameHeader
+	pendingPic     *Picture
+	pendingFhdrRaw []byte // raw payload bytes of the pending frame header
+
 	closed bool
 }
 
 // newDecoderImpl constructs a decoderImpl and returns it as a Decoder.
 func newDecoderImpl(opts DecoderOptions) (Decoder, error) {
-	return &decoderImpl{opts: opts}, nil
+	logf := func(string, ...any) {} // no-op by default
+	if opts.Logger != nil {
+		logf = opts.Logger.Logf
+	}
+	return &decoderImpl{opts: opts, logf: logf}, nil
 }
 
 // ─── Decoder interface ────────────────────────────────────────────────────────
@@ -101,6 +114,7 @@ func (d *decoderImpl) Flush() error {
 			d.refs[i].fhdr = nil
 		}
 	}
+	d.discardPending()
 	return nil
 }
 
@@ -119,6 +133,8 @@ func (d *decoderImpl) Close() error {
 	}
 	d.outQ = nil
 
+	d.discardPending()
+
 	for i := range d.refs {
 		if d.refs[i].pic != nil {
 			d.refs[i].pic.Release()
@@ -128,12 +144,24 @@ func (d *decoderImpl) Close() error {
 	return nil
 }
 
+// discardPending releases any picture allocated for a pending frame header.
+// Must be called with d.mu held.
+func (d *decoderImpl) discardPending() {
+	if d.pendingPic != nil {
+		d.pendingPic.Release()
+		d.pendingPic = nil
+	}
+	d.pendingFhdr = nil
+	d.pendingFhdrRaw = nil
+}
+
 // ─── OBU routing ─────────────────────────────────────────────────────────────
 
 // routeOBU dispatches one parsed OBU to the appropriate handler.
 // Must be called with d.mu held.
 func (d *decoderImpl) routeOBU(o obu.OBU) error {
 	switch o.Header.Type {
+
 	case header.OBUSequenceHeader:
 		var seq header.SequenceHeader
 		if err := obu.ParseSequenceHeader(o.Payload, &seq, obu.ParseOptions{}); err != nil {
@@ -143,77 +171,111 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 
 	case header.OBUFrameHeader:
 		if d.seq == nil {
-			return nil // no seq header yet, skip
+			return nil
 		}
-		return d.decodeFrame(o.Payload)
+		// Discard any previously pending (incomplete) frame.
+		d.discardPending()
+
+		var fhdr header.FrameHeader
+		if err := obu.ParseFrameHeader(o.Payload, &fhdr, obu.FrameParseOptions{
+			SeqHeader: d.seq,
+			Refs:      d.obuRefs(),
+		}); err != nil {
+			// Best-effort: skip bad frame headers.
+			return nil
+		}
+
+		if fhdr.ShowExistingFrame != 0 {
+			// show_existing_frame: enqueue the referenced frame directly.
+			idx := fhdr.ExistingFrameIdx
+			if int(idx) < len(d.refs) && d.refs[idx].pic != nil {
+				d.outQ = append(d.outQ, d.refs[idx].pic.Retain())
+			}
+			return nil
+		}
+
+		// Allocate picture and wait for the matching OBUTileGroup.
+		fhdrCopy := fhdr
+		d.pendingFhdr = &fhdrCopy
+		d.pendingPic = d.allocPicture(&fhdrCopy)
+
+	case header.OBUTileGroup:
+		if d.pendingFhdr == nil || d.pendingPic == nil || d.seq == nil {
+			return nil
+		}
+		// Decode all tiles into the pending picture.
+		fb := picToFrameBuf(d.pendingPic)
+		tile.DecodeTileGroup(o.Payload, d.pendingFhdr, d.seq, fb, d.logf) //nolint:errcheck
+		d.finishFrame(d.pendingPic, d.pendingFhdr)
+		d.pendingFhdr = nil
+		d.pendingPic = nil
 
 	case header.OBUFrame:
-		// OBU_FRAME carries both frame header and tile data.
-		// M6: parse frame header only; tile payload is ignored (stub).
+		// OBU_FRAME carries frame_header_obu() + tile_group_obu() concatenated.
 		if d.seq == nil {
 			return nil
 		}
-		return d.decodeFrame(o.Payload)
+		d.discardPending()
 
-	case header.OBUTileGroup:
-		// Handled in M7 (CABAC tile decode).
-		return nil
+		var fhdr header.FrameHeader
+		consumed, err := obu.ParseFrameHeaderEx(o.Payload, &fhdr, obu.FrameParseOptions{
+			SeqHeader: d.seq,
+			Refs:      d.obuRefs(),
+		})
+		if err != nil {
+			return nil
+		}
+
+		if fhdr.ShowExistingFrame != 0 {
+			idx := fhdr.ExistingFrameIdx
+			if int(idx) < len(d.refs) && d.refs[idx].pic != nil {
+				d.outQ = append(d.outQ, d.refs[idx].pic.Retain())
+			}
+			return nil
+		}
+
+		pic := d.allocPicture(&fhdr)
+		tilePayload := frameOBUTilePayload(o.Payload, consumed)
+		fb := picToFrameBuf(pic)
+		tile.DecodeTileGroup(tilePayload, &fhdr, d.seq, fb, d.logf) //nolint:errcheck
+		d.finishFrame(pic, &fhdr)
 
 	case header.OBUTemporalDelimiter:
-		return nil
+		// Reset pending state at new temporal unit boundary.
+		d.discardPending()
 
 	default:
-		return nil
+		// All other OBU types (metadata, redundant frame header, etc.) silently ignored.
 	}
 	return nil
 }
 
-// ─── frame decode ─────────────────────────────────────────────────────────────
+// frameOBUTilePayload extracts the tile_group_obu() portion from an OBU_FRAME
+// payload. OBU_FRAME = frame_header_obu() (byte-aligned) + tile_group_obu().
+// frameHeaderBytes is the number of bytes consumed by the frame header,
+// as returned by obu.ParseFrameHeaderEx.
+func frameOBUTilePayload(payload []byte, frameHeaderBytes int) []byte {
+	if frameHeaderBytes >= len(payload) {
+		return nil
+	}
+	return payload[frameHeaderBytes:]
+}
 
-// decodeFrame parses the frame header, allocates a Picture, applies post
-// filters, updates the reference buffer, and enqueues showable frames.
+// ─── frame finalisation ───────────────────────────────────────────────────────
+
+// finishFrame applies post-filters, updates the reference buffer, and enqueues
+// the picture for output if it is displayable.
 // Must be called with d.mu held.
-func (d *decoderImpl) decodeFrame(payload []byte) error {
-	refs := d.obuRefs()
-
-	var fhdr header.FrameHeader
-	if err := obu.ParseFrameHeader(payload, &fhdr, obu.FrameParseOptions{
-		SeqHeader: d.seq,
-		Refs:      refs,
-	}); err != nil {
-		// Best-effort: non-fatal in M6.
-		return nil
-	}
-
-	if fhdr.ShowExistingFrame != 0 {
-		idx := fhdr.ExistingFrameIdx
-		if int(idx) < len(d.refs) && d.refs[idx].pic != nil {
-			d.outQ = append(d.outQ, d.refs[idx].pic.Retain())
-		}
-		return nil
-	}
-
-	// Allocate output picture (8-bit, 4:2:0, stride aligned to 16).
-	pic := d.allocPicture(&fhdr)
-
-	// Tile group decode stub: picture is zero-filled (black frame).
-	// TODO M7: MSAC + block reconstruction.
-
-	// Post-processing filters (all no-ops until M8 wires up parameters).
-	d.postFilter(pic, &fhdr)
-
-	// Update reference buffer.
-	d.updateRefs(pic, &fhdr)
-
-	// Enqueue if displayable.
+func (d *decoderImpl) finishFrame(pic *Picture, fhdr *header.FrameHeader) {
+	d.postFilter(pic, fhdr)
+	d.updateRefs(pic, fhdr)
 	if fhdr.ShowFrame != 0 || fhdr.ShowableFrame != 0 {
 		d.outQ = append(d.outQ, pic.Retain())
 	}
-
-	// Release the local reference; updateRefs retains for each refreshed slot.
 	pic.Release()
-	return nil
 }
+
+// ─── legacy helpers ───────────────────────────────────────────────────────────
 
 // obuRefs builds the FrameReference array expected by ParseFrameHeader.
 func (d *decoderImpl) obuRefs() *[header.NumRefFrames]obu.FrameReference {
@@ -222,6 +284,23 @@ func (d *decoderImpl) obuRefs() *[header.NumRefFrames]obu.FrameReference {
 		refs[i].FrameHdr = e.fhdr
 	}
 	return &refs
+}
+
+// picToFrameBuf wraps a *Picture as a tile.FrameBuf so the tile package does
+// not need to import pkg/av1 (which would create an import cycle).
+func picToFrameBuf(p *Picture) *tile.FrameBuf {
+	return &tile.FrameBuf{
+		Y:          p.Y,
+		StrideY:    p.StrideY,
+		Width:      p.Width,
+		Height:     p.Height,
+		U:          p.U,
+		V:          p.V,
+		StrideUV:   p.StrideUV,
+		ChromaW:    p.ChromaWidth(),
+		ChromaH:    p.ChromaHeight(),
+		Monochrome: p.Chroma == ChromaMonochrome,
+	}
 }
 
 // allocPicture creates a new Picture for the given frame header.
@@ -272,7 +351,7 @@ func (d *decoderImpl) updateRefs(pic *Picture, fhdr *header.FrameHeader) {
 // ─── post-filter stubs ───────────────────────────────────────────────────────
 
 // postFilter dispatches the three-stage in-loop post-processing chain.
-// Each stage is currently a no-op (M6 stub); M8 will wire up real parameters.
+// Each stage is currently a no-op (M7); M8 will wire up real parameters.
 func (d *decoderImpl) postFilter(pic *Picture, fhdr *header.FrameHeader) {
 	if d.opts.InloopFilters&InloopFilterDeblock != 0 {
 		d.applyLoopFilter(pic, fhdr)

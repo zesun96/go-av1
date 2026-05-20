@@ -54,11 +54,19 @@ var defaultWarpParams = header.WarpedMotionParams{
 // src/obu.c (lines 409-1152). It does not consume the trailing_one_bit; the
 // caller should invoke checkTrailingBits when this OBU stands alone.
 func ParseFrameHeader(payload []byte, out *header.FrameHeader, opts FrameParseOptions) error {
+	_, err := ParseFrameHeaderEx(payload, out, opts)
+	return err
+}
+
+// ParseFrameHeaderEx is like ParseFrameHeader but also returns the number of
+// bytes consumed by the frame header (after byte-alignment). For OBU_FRAME
+// payloads the tile_group_obu() starts at payload[bytesConsumed:].
+func ParseFrameHeaderEx(payload []byte, out *header.FrameHeader, opts FrameParseOptions) (bytesConsumed int, err error) {
 	if opts.SeqHeader == nil {
-		return ErrFrameHeaderRequiresSeq
+		return 0, ErrFrameHeaderRequiresSeq
 	}
 	if out == nil {
-		return ErrNilFrameHeaderOut
+		return 0, ErrNilFrameHeaderOut
 	}
 	*out = header.FrameHeader{}
 	gb := bitstream.NewGetBits(payload)
@@ -66,12 +74,18 @@ func ParseFrameHeader(payload []byte, out *header.FrameHeader, opts FrameParseOp
 	fp.hdr.TemporalID = opts.TemporalID
 	fp.hdr.SpatialID = opts.SpatialID
 	if err := fp.parse(); err != nil {
-		return err
+		return 0, err
 	}
 	if gb.Err() {
-		return ErrShortBuffer
+		return 0, ErrShortBuffer
 	}
-	return nil
+	// byte_alignment(): AV1 spec §5.3.5 — the frame header ends at a byte boundary.
+	// BitPos() is already byte-aligned after parse() because trailing_one_bit
+	// and zero_bit padding are consumed inside parse(). If not yet aligned,
+	// round up to the next byte.
+	bits := gb.BitPos()
+	bytesConsumed = int((bits + 7) / 8)
+	return bytesConsumed, nil
 }
 
 // frameParser carries per-call state across the many sub-parsers below. It is
