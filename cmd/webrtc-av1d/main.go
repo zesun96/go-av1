@@ -43,6 +43,7 @@ var staticFS embed.FS
 var (
 	flagPort = flag.Int("port", 8080, "HTTP listen port")
 	flagOut  = flag.String("out", "output.ivf", "output IVF file path")
+	flagYUV  = flag.String("yuv", "", "if non-empty, save decoded frames as raw YUV420 to this file (playable with ffplay -f rawvideo -pixel_format yuv420p -video_size WxH)")
 )
 
 // ─── main ────────────────────────────────────────────────────────────────────
@@ -55,6 +56,13 @@ func main() {
 	// Prepare IVF writer (lazy-init on first frame so we know the dimensions).
 	ivfw := &ivfWriter{path: *flagOut}
 
+	// Prepare YUV writer (optional).
+	var yuv *yuvWriter
+	if *flagYUV != "" {
+		yuv = &yuvWriter{path: *flagYUV}
+		log.Printf("YUV output will be written to: %s", *flagYUV)
+	}
+
 	// Prepare go-av1 decoder.
 	dec, err := av1.NewDecoder(av1.DecoderOptions{Threads: runtime.NumCPU()})
 	if err != nil {
@@ -66,6 +74,7 @@ func main() {
 	srv := &server{
 		dec:  dec,
 		ivfw: ivfw,
+		yuv:  yuv,
 	}
 
 	http.HandleFunc("/", srv.handleIndex)
@@ -83,6 +92,7 @@ func main() {
 type server struct {
 	dec  av1.Decoder
 	ivfw *ivfWriter
+	yuv  *yuvWriter
 
 	mu         sync.Mutex
 	frameCount int64
@@ -404,7 +414,19 @@ func (s *server) processTemporalUnit(payload []byte, pts uint64) {
 			break
 		}
 		n := atomic.AddInt64(&s.frameCount, 1)
-		log.Printf("frame %d decoded: %dx%d", n, pic.Width, pic.Height)
+
+		// Quick sanity check: compute mean luma value of the first row.
+		yMean := yuvMeanLuma(pic)
+		log.Printf("frame %d decoded: %dx%d chroma=%s yMean=%.1f",
+			n, pic.Width, pic.Height, pic.Chroma, yMean)
+
+		// Save to YUV file if requested.
+		if s.yuv != nil {
+			if err := s.yuv.WriteFrame(pic); err != nil {
+				log.Printf("yuv write: %v", err)
+			}
+		}
+
 		pic.Release()
 	}
 }
@@ -586,4 +608,112 @@ func (w *ivfWriter) Close() error {
 	err := w.f.Close()
 	w.f = nil
 	return err
+}
+
+// ─── YUV writer ──────────────────────────────────────────────────────────────
+
+// yuvWriter appends raw planar YUV frames to a file.  Each frame is written
+// as packed rows (stride padding is stripped) in Y-then-U-then-V order,
+// exactly what ffplay expects with -f rawvideo -pixel_format yuv420p.
+//
+// To play the resulting file:
+//
+//	ffplay -f rawvideo -pixel_format yuv420p -video_size WxH output.yuv
+type yuvWriter struct {
+	path string
+	mu   sync.Mutex
+	f    *os.File
+}
+
+func (w *yuvWriter) ensureOpen() error {
+	if w.f != nil {
+		return nil
+	}
+	f, err := os.Create(w.path)
+	if err != nil {
+		return err
+	}
+	w.f = f
+	log.Printf("YUV output opened: %s", w.path)
+	return nil
+}
+
+// WriteFrame writes one decoded picture as a packed planar YUV frame,
+// stripping any stride alignment padding so each row is exactly Width (or
+// ChromaWidth) bytes wide.
+func (w *yuvWriter) WriteFrame(pic *av1.Picture) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.ensureOpen(); err != nil {
+		return err
+	}
+
+	// Write Y plane row by row (strip stride padding).
+	for row := 0; row < pic.Height; row++ {
+		start := row * pic.StrideY
+		end := start + pic.Width
+		if end > len(pic.Y) {
+			end = len(pic.Y)
+		}
+		if _, err := w.f.Write(pic.Y[start:end]); err != nil {
+			return err
+		}
+	}
+
+	// Write U and V planes (chroma subsampled rows).
+	cw := pic.ChromaWidth()
+	ch := pic.ChromaHeight()
+	for row := 0; row < ch; row++ {
+		uStart := row * pic.StrideUV
+		uEnd := uStart + cw
+		if uEnd > len(pic.U) {
+			uEnd = len(pic.U)
+		}
+		if _, err := w.f.Write(pic.U[uStart:uEnd]); err != nil {
+			return err
+		}
+	}
+	for row := 0; row < ch; row++ {
+		vStart := row * pic.StrideUV
+		vEnd := vStart + cw
+		if vEnd > len(pic.V) {
+			vEnd = len(pic.V)
+		}
+		if _, err := w.f.Write(pic.V[vStart:vEnd]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Close flushes and closes the YUV file.
+func (w *yuvWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.f == nil {
+		return nil
+	}
+	err := w.f.Close()
+	w.f = nil
+	return err
+}
+
+// ─── Pixel verification helper ───────────────────────────────────────────────
+
+// yuvMeanLuma returns the mean luma (Y) value of the picture as a float.
+// A value well above 0 and below 255 indicates real decoded pixel content.
+func yuvMeanLuma(pic *av1.Picture) float64 {
+	if len(pic.Y) == 0 || pic.Width == 0 || pic.Height == 0 {
+		return 0
+	}
+	var sum uint64
+	count := uint64(pic.Width * pic.Height)
+	for row := 0; row < pic.Height; row++ {
+		base := row * pic.StrideY
+		for col := 0; col < pic.Width; col++ {
+			sum += uint64(pic.Y[base+col])
+		}
+	}
+	return float64(sum) / float64(count)
 }
