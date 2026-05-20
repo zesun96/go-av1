@@ -22,11 +22,11 @@ propagate to consumers of the core `github.com/zesun96/go-av1` library.
 cd cmd/webrtc-av1d
 
 # Run directly
-go run . -port 8080 -out output.ivf
+go run . -port 8080 -out output.ivf -yuv output.yuv
 
 # Or build first
 go build -o webrtc-av1d .
-./webrtc-av1d -port 8080 -out output.ivf
+./webrtc-av1d -port 8080 -out output.ivf -yuv output.yuv
 ```
 
 ## Flags
@@ -35,6 +35,7 @@ go build -o webrtc-av1d .
 |---|---|---|
 | `-port` | `8080` | HTTP listen port |
 | `-out` | `output.ivf` | Output IVF file path |
+| `-yuv` | `output.yuv` | Output YUV file path |
 
 ## Workflow
 

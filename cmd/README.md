@@ -93,6 +93,6 @@ See [`webrtc-av1d/README.md`](webrtc-av1d/README.md) for full details.
 
 ```sh
 cd cmd/webrtc-av1d
-go run . -port 8080 -out output.ivf
+go run . -port 8080 -out output.ivf -yuv output.yuv
 # Open http://localhost:8080 in Chrome, click "Start Stream"
 ```
