@@ -60,7 +60,7 @@ func WriteSequenceHeader(p *SeqParams) []byte {
 
 	// timing_info_present_flag = 0
 	bw.PutBit(0)
-	// initial_display_delay_present_flag = 0
+	// decoder_model_info_present_flag = 0
 	bw.PutBit(0)
 
 	// operating_points_cnt_minus_1 = 0
@@ -128,8 +128,9 @@ func WriteSequenceHeader(p *SeqParams) []byte {
 }
 
 // writeColorConfig writes the color_config() syntax.
+// AV1 spec section 5.5.2.
 func writeColorConfig(bw *bitwriter.BitWriter, p *SeqParams) {
-	// high_bitdepth
+	// high_bitdepth (1 bit)
 	if p.BitDepth > 8 {
 		bw.PutBit(1)
 		if p.BitDepth == 12 {
@@ -141,8 +142,9 @@ func writeColorConfig(bw *bitwriter.BitWriter, p *SeqParams) {
 		bw.PutBit(0) // 8-bit
 	}
 
-	// mono_chrome = 0 (profile 0 doesn't support mono)
-	// For seq_profile == 0, mono_chrome is not signaled; it's inferred as 0.
+	// mono_chrome (1 bit): only inferred for seq_profile==1; ALL other profiles must signal it.
+	// We always use mono_chrome=0 (chroma present).
+	bw.PutBit(0)
 
 	// color_description_present_flag = 0
 	bw.PutBit(0)
@@ -151,8 +153,9 @@ func writeColorConfig(bw *bitwriter.BitWriter, p *SeqParams) {
 	// color_range = 0 (studio/limited range)
 	bw.PutBit(0)
 
-	// For profile 0 (4:2:0): subsampling_x=1, subsampling_y=1 are inferred.
-	// chroma_sample_position = CSP_UNKNOWN (0)
+	// For seq_profile==0: subsampling_x=1, subsampling_y=1 are inferred (4:2:0).
+	// Since subsampling_x && subsampling_y, must write chroma_sample_position (2 bits).
+	// CSP_UNKNOWN = 0
 	bw.PutBits(0, 2)
 
 	// separate_uv_delta_q = 0
@@ -178,75 +181,94 @@ func WriteFrameOBU(p *SeqParams, qindex int, tileData []byte) []byte {
 }
 
 // writeUncompressedHeader writes frame_header_obu() / uncompressed_header().
+// Field order strictly follows dav1d parse_frame_hdr (src/obu.c).
 func writeUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex int) {
-	// show_existing_frame = 0
+	// show_existing_frame = 0  (dav1d line 419)
 	bw.PutBit(0)
-	// frame_type = KEY_FRAME (0)
+	// frame_type = KEY_FRAME (0)  (dav1d line 440)
 	bw.PutBits(0, 2)
-	// show_frame = 1
+	// show_frame = 1  (dav1d line 441)
 	bw.PutBit(1)
-	// For KEY_FRAME with show_frame=1: error_resilient_mode is inferred as 1.
+	// error_resilient_mode: KEY_FRAME+show_frame=1 → inferred = 1, NOT written.
 
-	// disable_cdf_update = 1 (crucial for M10: fixed CDFs)
+	// disable_cdf_update = 1  (dav1d line 457)
 	bw.PutBit(1)
-	// allow_screen_content_tools: if seq_choose_screen_content_tools=1,
-	// this is not present in bitstream (inferred as SELECT_SCREEN_CONTENT_TOOLS).
-	// force_integer_mv: similarly inferred.
 
-	// frame_size() - for key frame, uses full size from sequence header
-	// frame_size_override_flag = 0 (use sequence max dimensions)
+	// allow_screen_content_tools: seq.screen_content_tools==ADAPTIVE(2)
+	// so this is read from the bitstream (dav1d line 458-459).
+	// We set 0 (disabled).
+	bw.PutBit(0)
+	// force_integer_mv: not present when allow_screen_content_tools=0.
+
+	// frame_size_override_flag = 0  (dav1d line 471, not S_FRAME)
+	bw.PutBit(0)
+	// order_hint: not present (enable_order_hint=0 in seq header).
+	// primary_ref_frame: not present (error_resilient_mode=1).
+	// decoder_model_info_present=0: buffer_removal_time not present.
+
+	// IS_KEY_OR_INTRA: refresh_frame_flags inferred = 0xFF (KEY+show_frame),
+	// NOT written to bitstream.  (dav1d line 498-499)
+
+	// read_frame_size():
+	//   frame_size_override=0 → use seq max dimensions (no bits written).
+	//   enable_superres=0 → super_res.enabled = 0 (short-circuit, no bit read).
+	//   have_render_size = 0  (dav1d line 387)
 	bw.PutBit(0)
 
-	// render_and_frame_size_different = 0
+	// allow_intrabc: not present (allow_screen_content_tools=0).
+
+	// tile_info():
+	//   sbw = ceil(width / 64), sbh = ceil(height / 64)
+	//   For 176x144: sbw=3, sbh=3.
+	//   uniform_tile_spacing_flag = 1  (dav1d line 625)
+	bw.PutBit(1)
+	// uniform tile loop: write 0 to stop at log2_cols = min_log2_cols = 0.
+	// (loop reads bits while log2_cols < max_log2_cols; one read of 0 exits)
+	// For sbw=3: min_log2_cols=0, max_log2_cols=2; min=0 so loop reads one bit → write 0.
+	bw.PutBit(0)
+	// uniform row loop: write 0 to stop at log2_rows = min_log2_rows = 0.
+	bw.PutBit(0)
+	// log2_cols=0, log2_rows=0 → tiling.update + n_bytes NOT present.
+
+	// quantization_params() (dav1d line 692)
+	bw.PutBits(uint32(qindex), 8) // yac (base_q_idx)
+	bw.PutBit(0)                  // delta_q_ydc coded = 0
+	// !monochrome: check separate_uv_delta_q=0 → no diff_uv_delta bit
+	bw.PutBit(0) // delta_q_udc coded = 0
+	bw.PutBit(0) // delta_q_uac coded = 0
+	// separate_uv_delta_q=0 → vdc/vac inferred = udc/uac, not written.
+	// qm = 0  (dav1d line 718)
 	bw.PutBit(0)
 
-	// Since KEY_FRAME: refresh_frame_flags not needed for single-frame use,
-	// but spec requires it: all 8 bits set to allow subsequent frames to reference.
-	bw.PutBits(0xFF, 8) // refresh all reference frames
-
-	// quantization_params()
-	bw.PutBits(uint32(qindex), 8) // base_q_idx
-	bw.PutBit(0)                  // DeltaQYDc (delta_coded = 0, meaning delta = 0)
-	// For 4:2:0 with separate_uv_delta_q=0:
-	bw.PutBit(0) // DeltaQUDc = 0
-	bw.PutBit(0) // DeltaQUAc = 0
-	// No V deltas since separate_uv_delta_q = 0
-
-	// using_qmatrix = 0
+	// segmentation_enabled = 0  (dav1d line 731)
 	bw.PutBit(0)
 
-	// segmentation_enabled = 0
+	// delta_q_present = 0  (dav1d ~line 800)
 	bw.PutBit(0)
 
-	// delta_q_present = 0
-	bw.PutBit(0)
-
-	// loop_filter_params() - all zeros for no filtering
+	// loop_filter_params() (dav1d ~line 840)
 	bw.PutBits(0, 6) // loop_filter_level[0] = 0
 	bw.PutBits(0, 6) // loop_filter_level[1] = 0
-	// Since both levels are 0, no more loop filter params needed.
+	// Both LF levels = 0: no more lf params needed.
 
-	// cdef_params() - enable_cdef=0 in seq header, so not present
+	// cdef_params(): enable_cdef=0 in seq header → not present.
+	// lr_params(): enable_restoration=0 → not present.
 
-	// lr_params() - enable_restoration=0 in seq header, so not present
-
-	// read_tx_mode(): for KEY_FRAME with lossless=false
-	// tx_mode_select = 0 (TX_MODE_LARGEST, all 8x8 since our SB decomposition goes to 8x8)
+	// read_tx_mode(): lossless=false → tx_mode_select bit
+	// 0 = TX_MODE_LARGEST  (dav1d ~line 870)
 	bw.PutBit(0)
 
-	// frame_reference_mode(): not present for KEY_FRAME
+	// frame_reference_mode(): not present for KEY_FRAME (intra).
+	// skip_mode_params(): not present for KEY_FRAME.
+	// allow_warped_motion: not present (not inter frame).
 
-	// skip_mode_params(): not present for KEY_FRAME (no references)
-
-	// allow_warped_motion not present for KEY_FRAME
-	// reduced_tx_set = 1 (use reduced transform set)
+	// reduced_txtp_set = 1  (dav1d line 1005)
 	bw.PutBit(1)
 
-	// global_motion_params(): not present for KEY_FRAME
+	// global_motion_params(): not present for KEY_FRAME.
+	// film_grain_params(): film_grain_params_present=0 → not present.
 
-	// film_grain_params(): film_grain_params_present=0 in seq header, not present
-
-	// trailing_bits for frame header portion
+	// trailing_bits()
 	bw.TrailingBits()
 }
 

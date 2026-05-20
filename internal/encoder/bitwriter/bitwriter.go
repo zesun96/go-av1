@@ -25,17 +25,14 @@ func (w *BitWriter) Reset() {
 }
 
 // flush writes complete bytes from held to buf.
+// Bits in held are MSB-aligned: the first bit written occupies bit 63.
+// Each flush iteration takes the top byte (held>>56), outputs it, then
+// shifts held left by 8 to expose the next byte.
 func (w *BitWriter) flush() {
 	for w.bitsHeld >= 8 {
+		w.buf = append(w.buf, byte(w.held>>56))
+		w.held <<= 8
 		w.bitsHeld -= 8
-		w.buf = append(w.buf, byte(w.held>>(56-uint(64-8-w.bitsHeld))))
-	}
-	// Shift remaining bits to MSB position.
-	if w.bitsHeld > 0 {
-		w.held = (w.held << uint(64-w.bitsHeld)) >> uint(64-w.bitsHeld)
-		w.held <<= uint(64 - w.bitsHeld)
-	} else {
-		w.held = 0
 	}
 }
 
@@ -128,23 +125,14 @@ func (w *BitWriter) TrailingBits() {
 // Bytes returns the accumulated bytes. After calling Bytes the caller
 // must not write more bits without calling Reset first.
 func (w *BitWriter) Bytes() []byte {
-	// Flush any remaining bits (padded with trailing zeros).
+	// First flush any complete bytes still in the window.
+	w.flush()
+	// Then flush any remaining partial byte (pad with trailing zeros).
 	if w.bitsHeld > 0 {
+		// held is MSB-aligned; low bits are implicitly zero (padding).
 		w.buf = append(w.buf, byte(w.held>>56))
-		w.held <<= 8
-		w.bitsHeld -= 8
-		if w.bitsHeld < 0 {
-			w.bitsHeld = 0
-		}
-		// Recursively flush remaining.
-		for w.bitsHeld > 0 {
-			w.buf = append(w.buf, byte(w.held>>56))
-			w.held <<= 8
-			w.bitsHeld -= 8
-			if w.bitsHeld < 0 {
-				w.bitsHeld = 0
-			}
-		}
+		w.held = 0
+		w.bitsHeld = 0
 	}
 	return w.buf
 }
