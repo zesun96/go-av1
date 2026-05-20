@@ -1,5 +1,7 @@
 package av1
 
+import "github.com/zesun96/go-av1/internal/encoder"
+
 // EncoderOptions configures an Encoder. Field semantics will solidify during
 // the M10+ encoder phase; today this struct exists so external callers can
 // already write code against the type.
@@ -66,9 +68,57 @@ type Encoder interface {
 	Close() error
 }
 
-// NewEncoder constructs an Encoder. The encoder pipeline does not exist yet,
-// so this always returns ErrNotImplemented at M0.
+// NewEncoder constructs an Encoder. M10 implements a minimal intra-only encoder.
 func NewEncoder(opts EncoderOptions) (Encoder, error) {
-	_ = opts
-	return nil, ErrNotImplemented
+	impl, err := encoder.NewImpl(encoder.Options{
+		Width:        opts.Width,
+		Height:       opts.Height,
+		FrameRateNum: opts.FrameRateNum,
+		FrameRateDen: opts.FrameRateDen,
+		BitDepth:     opts.BitDepth,
+		CRF:          opts.CRF,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &encoderAdapter{impl: impl}, nil
+}
+
+// encoderAdapter wraps internal/encoder.Impl to implement the Encoder interface.
+type encoderAdapter struct {
+	impl *encoder.Impl
+}
+
+func (a *encoderAdapter) SendPicture(p *Picture) error {
+	rp := &encoder.RawPicture{
+		Y:      p.Y,
+		U:      p.U,
+		V:      p.V,
+		Width:  p.Width,
+		Height: p.Height,
+	}
+	return a.impl.SendPicture(rp)
+}
+
+func (a *encoderAdapter) ReceivePacket() (*EncodedPacket, error) {
+	pkt, err := a.impl.ReceivePacket()
+	if err != nil {
+		if err == encoder.ErrAgain {
+			return nil, ErrAgain
+		}
+		return nil, err
+	}
+	return &EncodedPacket{
+		Data:     pkt.Data,
+		PTS:      pkt.PTS,
+		Keyframe: pkt.Keyframe,
+	}, nil
+}
+
+func (a *encoderAdapter) Flush() error {
+	return a.impl.Flush()
+}
+
+func (a *encoderAdapter) Close() error {
+	return a.impl.Close()
 }
