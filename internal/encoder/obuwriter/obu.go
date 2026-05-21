@@ -247,15 +247,22 @@ func writeUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex int) 
 	bw.PutBit(0)
 
 	// loop_filter_params() (dav1d ~line 840)
+	// Reached only when !all_lossless && !allow_intrabc, which is our case
+	// (qindex>0). dav1d unconditionally reads loop_filter_sharpness (3 bits)
+	// and loop_filter_delta_enabled (1 bit) regardless of level_y values.
 	bw.PutBits(0, 6) // loop_filter_level[0] = 0
 	bw.PutBits(0, 6) // loop_filter_level[1] = 0
-	// Both LF levels = 0: no more lf params needed.
+	// !monochrome && (level_y[0] || level_y[1])==0 → no level_u/level_v.
+	bw.PutBits(0, 3) // loop_filter_sharpness = 0  (dav1d line 848)
+	// primary_ref_frame == PRIMARY_REF_NONE → mode_ref_deltas defaulted, no bits.
+	bw.PutBit(0) // loop_filter_delta_enabled = 0  (dav1d line 858)
+	// loop_filter_delta_enabled=0 → no mode_ref_delta_update / per-ref deltas.
 
 	// cdef_params(): enable_cdef=0 in seq header → not present.
 	// lr_params(): enable_restoration=0 → not present.
 
-	// read_tx_mode(): lossless=false → tx_mode_select bit
-	// 0 = TX_MODE_LARGEST  (dav1d ~line 870)
+	// read_tx_mode(): all_lossless=false → tx_mode_select bit
+	// 0 = TX_MODE_LARGEST  (dav1d line 928-929)
 	bw.PutBit(0)
 
 	// frame_reference_mode(): not present for KEY_FRAME (intra).
@@ -268,8 +275,13 @@ func writeUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex int) 
 	// global_motion_params(): not present for KEY_FRAME.
 	// film_grain_params(): film_grain_params_present=0 → not present.
 
-	// trailing_bits()
-	bw.TrailingBits()
+	// NOTE: For OBU_FRAME (type=6), the frame_header part is followed by
+	// byte_alignment() then tile_group_obu(); trailing_bits() must NOT be
+	// written here. Writing trailing_one_bit=1 would be misinterpreted by
+	// the decoder's byte_alignment() as a non-zero zero_bit, causing the
+	// dav1d/ffmpeg error: "zero_bit out of range: 1, but must be in [0,0]".
+	// See AV1 spec 5.10.1 frame_obu() and 5.9.5 byte_alignment().
+	// Caller (WriteFrameOBU) invokes bw.ByteAlign() right after this.
 }
 
 // WriteTemporalDelimiter writes a Temporal Delimiter OBU (empty payload, 2 bytes total).
