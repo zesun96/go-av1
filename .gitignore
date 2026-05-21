@@ -35,3 +35,8 @@ Thumbs.db
 # Go workspace files (per-developer)
 go.work
 go.work.sum
+
+# tmp file
+cov.txt
+cover
+/cmd/webrtc-av1d/*.png

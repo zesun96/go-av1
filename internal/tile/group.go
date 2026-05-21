@@ -32,8 +32,11 @@ func DecodeTileGroup(
 	}
 	logf("tile: ParseTileGroup → %d tiles", len(tiles))
 
+	// Allocate frame-level neighbour state (shared across tiles in raster order).
+	fs := NewFrameState(fb.Width, fb.Height)
+
 	for _, td := range tiles {
-		if err2 := DecodeTile(td, fhdr, seq, fb, logf); err2 != nil {
+		if err2 := DecodeTile(td, fhdr, seq, fb, fs, logf); err2 != nil {
 			logf("tile: DecodeTile row=%d col=%d: %v", td.Row, td.Col, err2)
 		}
 	}

@@ -9,6 +9,7 @@ package av1
 import (
 	"sync"
 
+	"github.com/zesun96/go-av1/internal/cdef"
 	"github.com/zesun96/go-av1/internal/header"
 	"github.com/zesun96/go-av1/internal/obu"
 	"github.com/zesun96/go-av1/internal/tile"
@@ -329,6 +330,18 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 		BitDepth: 8,
 		Chroma:   Chroma420,
 	}
+	// Seed planes with neutral grey so any block that fails to decode shows
+	// up as grey rather than pure-green (chroma=0 maps to bright green in
+	// YUV→RGB). Y=128, U=V=128 ⇒ mid-grey.
+	for i := range pic.Y {
+		pic.Y[i] = 128
+	}
+	for i := range pic.U {
+		pic.U[i] = 128
+	}
+	for i := range pic.V {
+		pic.V[i] = 128
+	}
 	pic.Retain() // initial reference
 	return pic
 }
@@ -351,26 +364,309 @@ func (d *decoderImpl) updateRefs(pic *Picture, fhdr *header.FrameHeader) {
 // ─── post-filter stubs ───────────────────────────────────────────────────────
 
 // postFilter dispatches the three-stage in-loop post-processing chain.
-// Each stage is currently a no-op (M7); M8 will wire up real parameters.
+// Each stage is wrapped in its own panic recovery: M7 post-filters are
+// best-effort and a crash in any of them must NOT prevent the picture
+// (already filled by the tile decoder) from reaching the output queue.
 func (d *decoderImpl) postFilter(pic *Picture, fhdr *header.FrameHeader) {
+	run := func(name string, fn func()) {
+		defer func() {
+			if r := recover(); r != nil {
+				d.logf("postFilter: %s recovered from panic: %v", name, r)
+			}
+		}()
+		fn()
+	}
 	if d.opts.InloopFilters&InloopFilterDeblock != 0 {
-		d.applyLoopFilter(pic, fhdr)
+		run("deblock", func() { d.applyLoopFilter(pic, fhdr) })
 	}
 	if d.opts.InloopFilters&InloopFilterCDEF != 0 {
-		d.applyCDEF(pic, fhdr)
+		run("cdef", func() { d.applyCDEF(pic, fhdr) })
 	}
 	if d.opts.InloopFilters&InloopFilterRestoration != 0 {
-		d.applyRestoration(pic, fhdr)
+		run("restoration", func() { d.applyRestoration(pic, fhdr) })
 	}
 }
 
-// applyLoopFilter is a stub.
-// TODO M8: call loopfilter.LoopFilterH/V per superblock.
-func (d *decoderImpl) applyLoopFilter(_ *Picture, _ *header.FrameHeader) {}
+// applyLoopFilter applies a simplified horizontal and vertical deblocking
+// filter across all 4-pixel-aligned block boundaries using the frame-level
+// loop filter levels from the frame header.
+// This is a best-effort implementation: it uses a constant filter width of 4
+// (narrow) and skips block-level adaptation, which is sufficient to reduce
+// block artefacts on intra-only keyframes without requiring per-block metadata.
+func (d *decoderImpl) applyLoopFilter(pic *Picture, fhdr *header.FrameHeader) {
+	levelY := int(fhdr.LoopFilter.LevelY[0])
+	if levelY == 0 {
+		return // loop filter disabled
+	}
+	// Clamp to [0,63].
+	if levelY > 63 {
+		levelY = 63
+	}
 
-// applyCDEF is a stub.
-// TODO M8: call cdef.FilterBlock per 64×64 CDEF unit.
-func (d *decoderImpl) applyCDEF(_ *Picture, _ *header.FrameHeader) {}
+	// Compute E and I from level (AV1 spec Table 7.18):
+	//   E = 2*(level+2) + sharpness  (simplified, sharpness=0)
+	//   I = level + 2                (simplified)
+	//   H = 0 (HEV threshold, simplified to 0 = no HEV boost)
+	sharpness := int(fhdr.LoopFilter.Sharpness)
+	eThresh := 2*(levelY+2) + sharpness
+	iThresh := levelY + 2
+	// Clamp thresholds to valid 8-bit range.
+	if eThresh > 255 {
+		eThresh = 255
+	}
+	if iThresh > 63 {
+		iThresh = 63
+	}
+
+	deblockPlane(pic.Y, pic.StrideY, pic.Width, pic.Height, 4, eThresh, iThresh)
+
+	levelU := int(fhdr.LoopFilter.LevelU)
+	levelV := int(fhdr.LoopFilter.LevelV)
+	if levelU == 0 {
+		levelU = levelY / 2
+	}
+	if levelV == 0 {
+		levelV = levelY / 2
+	}
+	cw := pic.ChromaWidth()
+	ch := pic.ChromaHeight()
+	eU := 2*(levelU+2) + sharpness
+	iU := levelU + 2
+	eV := 2*(levelV+2) + sharpness
+	iV := levelV + 2
+	if eU > 255 {
+		eU = 255
+	}
+	if eV > 255 {
+		eV = 255
+	}
+	deblockPlane(pic.U, pic.StrideUV, cw, ch, 4, eU, iU)
+	deblockPlane(pic.V, pic.StrideUV, cw, ch, 4, eV, iV)
+}
+
+// deblockPlane applies a simple 4-tap deblocking filter on all grid-aligned
+// edges (step=4 pixels) of a single plane in both H and V directions.
+func deblockPlane(plane []byte, stride, w, h, step, eThresh, iThresh int) {
+	if len(plane) == 0 {
+		return
+	}
+	// Horizontal edges (filter vertically across them).
+	for y := step; y < h; y += step {
+		for x := 0; x < w; x++ {
+			off := y*stride + x
+			offPrev := (y-1)*stride + x
+			if off >= len(plane) || offPrev < 0 {
+				continue
+			}
+			p1 := int(plane[(y-2)*stride+x])
+			p0 := int(plane[offPrev])
+			q0 := int(plane[off])
+			q1 := int(plane[(y+1)*stride+x])
+			if (y+1)*stride+x >= len(plane) {
+				continue
+			}
+			// Basic filter mask: |p1-p0|<=I && |q1-q0|<=I && |p0-q0|*2+|p1-q1|/2 <= E
+			absP1P0 := p1 - p0
+			if absP1P0 < 0 {
+				absP1P0 = -absP1P0
+			}
+			absQ1Q0 := q1 - q0
+			if absQ1Q0 < 0 {
+				absQ1Q0 = -absQ1Q0
+			}
+			absP0Q0 := p0 - q0
+			if absP0Q0 < 0 {
+				absP0Q0 = -absP0Q0
+			}
+			absP1Q1 := p1 - q1
+			if absP1Q1 < 0 {
+				absP1Q1 = -absP1Q1
+			}
+			if absP1P0 > iThresh || absQ1Q0 > iThresh || absP0Q0*2+absP1Q1/2 > eThresh {
+				continue
+			}
+			// Narrow filter.
+			f := 3*(q0-p0) + (p1 - q1)
+			const limit = 128
+			f = clampVal(f, -limit, limit-1)
+			f1 := clampVal(f+4, -limit, limit-1) >> 3
+			f2 := clampVal(f+3, -limit, limit-1) >> 3
+			plane[offPrev] = clampPixel(p0 + f2)
+			plane[off] = clampPixel(q0 - f1)
+		}
+	}
+	// Vertical edges (filter horizontally across them).
+	for y := 0; y < h; y++ {
+		for x := step; x < w; x += step {
+			off := y*stride + x
+			offPrev := y*stride + (x - 1)
+			if off >= len(plane) || offPrev < 0 {
+				continue
+			}
+			p1 := int(plane[y*stride+(x-2)])
+			p0 := int(plane[offPrev])
+			q0 := int(plane[off])
+			q1off := y*stride + (x + 1)
+			if q1off >= len(plane) {
+				continue
+			}
+			q1 := int(plane[q1off])
+			absP1P0 := p1 - p0
+			if absP1P0 < 0 {
+				absP1P0 = -absP1P0
+			}
+			absQ1Q0 := q1 - q0
+			if absQ1Q0 < 0 {
+				absQ1Q0 = -absQ1Q0
+			}
+			absP0Q0 := p0 - q0
+			if absP0Q0 < 0 {
+				absP0Q0 = -absP0Q0
+			}
+			absP1Q1 := p1 - q1
+			if absP1Q1 < 0 {
+				absP1Q1 = -absP1Q1
+			}
+			if absP1P0 > iThresh || absQ1Q0 > iThresh || absP0Q0*2+absP1Q1/2 > eThresh {
+				continue
+			}
+			f := 3*(q0-p0) + (p1 - q1)
+			const limit = 128
+			f = clampVal(f, -limit, limit-1)
+			f1 := clampVal(f+4, -limit, limit-1) >> 3
+			f2 := clampVal(f+3, -limit, limit-1) >> 3
+			plane[offPrev] = clampPixel(p0 + f2)
+			plane[off] = clampPixel(q0 - f1)
+		}
+	}
+}
+
+func clampVal(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func clampPixel(v int) byte {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return byte(v)
+}
+
+// applyCDEF applies CDEF per 8×8 block for luma and 4×4 for chroma.
+// It reads the primary and secondary strengths from the frame header.
+func (d *decoderImpl) applyCDEF(pic *Picture, fhdr *header.FrameHeader) {
+	if fhdr.CDEF.NBits == 0 {
+		return // CDEF disabled
+	}
+	// Use the first CDEF preset (index 0).
+	// In a full implementation we'd read the per-superblock CDEF index
+	// from the bitstream; here we apply a single global preset.
+	priY := int(fhdr.CDEF.YStrength[0])
+	secY := priY & 0x3 // lower 2 bits are secondary
+	priY >>= 2         // upper 4 bits are primary
+	priUV := int(fhdr.CDEF.UVStrength[0])
+	secUV := priUV & 0x3
+	priUV >>= 2
+	damping := int(fhdr.CDEF.Damping)
+
+	applyCDEFPlane(pic.Y, pic.StrideY, pic.Width, pic.Height, 8, priY, secY, damping)
+	if pic.Chroma != ChromaMonochrome && len(pic.U) > 0 {
+		cw := pic.ChromaWidth()
+		ch := pic.ChromaHeight()
+		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, priUV, secUV, damping)
+		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, priUV, secUV, damping)
+	}
+}
+
+// applyCDEFPlane applies CDEF block-by-block to one plane.
+func applyCDEFPlane(plane []byte, stride, w, h, blockSz, priStrength, secStrength, damping int) {
+	if len(plane) == 0 || (priStrength == 0 && secStrength == 0) {
+		return
+	}
+	for by := 0; by < h; by += blockSz {
+		for bx := 0; bx < w; bx += blockSz {
+			bw := blockSz
+			bh := blockSz
+			if bx+bw > w {
+				bw = w - bx
+			}
+			if by+bh > h {
+				bh = h - by
+			}
+			if bw <= 0 || bh <= 0 {
+				continue
+			}
+
+			// Build edge flags.
+			var edges cdef.EdgeFlags
+			if by > 0 {
+				edges |= cdef.HaveTop
+			}
+			if by+bh < h {
+				edges |= cdef.HaveBottom
+			}
+			if bx > 0 {
+				edges |= cdef.HaveLeft
+			}
+			if bx+bw < w {
+				edges |= cdef.HaveRight
+			}
+
+			// Build left [][2]uint8 (left 2 pixels, h rows).
+			left := make([][2]uint8, bh)
+			if bx >= 2 {
+				for row := 0; row < bh; row++ {
+					y := by + row
+					if y < h {
+						left[row][0] = plane[y*stride+(bx-2)]
+						left[row][1] = plane[y*stride+(bx-1)]
+					}
+				}
+			}
+
+			// Top row.
+			var top []byte
+			topBase := 0
+			if by > 0 {
+				top = plane[(by-1)*stride:]
+				topBase = bx
+			} else {
+				top = make([]byte, bw)
+			}
+
+			// Bottom row.
+			var bottom []byte
+			bottomBase := 0
+			if by+bh < h {
+				bottom = plane[(by+bh)*stride:]
+				bottomBase = bx
+			} else {
+				bottom = make([]byte, bw)
+			}
+
+			// Find direction.
+			dir, _ := cdef.FindDir(plane, by*stride+bx, stride)
+
+			cdef.FilterBlock(
+				plane, by*stride+bx, stride,
+				left,
+				top, topBase, stride,
+				bottom, bottomBase, stride,
+				priStrength, secStrength, dir, damping, bw, bh,
+				edges,
+			)
+		}
+	}
+}
 
 // applyRestoration is a stub.
 // TODO M8: call looprestoration.WienerFilter / SGR per restoration unit.

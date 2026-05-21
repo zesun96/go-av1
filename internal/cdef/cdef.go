@@ -334,7 +334,16 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 // returns it (0..7) along with a variance estimate.
 //
 // img is the source pixel slice, imgBase its starting offset, stride its row stride.
+// If the requested 8×8 region falls outside img, FindDir bails out with dir=0,
+// variance=0 instead of panicking — used by the M7 best-effort post-filter
+// pipeline to tolerate edge blocks on non-multiple-of-8 picture sizes.
 func FindDir(img []uint8, imgBase, stride int) (dir int, variance uint) {
+	if imgBase < 0 || stride <= 0 {
+		return 0, 0
+	}
+	if imgBase+7*stride+8 > len(img) {
+		return 0, 0
+	}
 	var partialSumHV [2][8]int
 	var partialSumDiag [2][15]int
 	var partialSumAlt [4][11]int

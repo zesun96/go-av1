@@ -13,6 +13,7 @@ package tile
 import (
 	"encoding/binary"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/zesun96/go-av1/internal/bitstream"
 	"github.com/zesun96/go-av1/internal/header"
@@ -145,10 +146,21 @@ func readUintLE(b []byte, n int) uint32 {
 
 // DecodeTile decodes one tile and writes reconstructed samples into fb.
 func DecodeTile(td TileData, fhdr *header.FrameHeader,
-	seq *header.SequenceHeader, fb *FrameBuf, logf func(string, ...any)) error {
+	seq *header.SequenceHeader, fb *FrameBuf, fs *FrameState, logf func(string, ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+
+	// Recover from any panic raised by the best-effort M7 CABAC pipeline
+	// (e.g. CDF table inconsistencies, malformed syntax elements). A tile
+	// failure must not bring down the whole decoder goroutine; partial
+	// reconstruction is preferred over no output at all.
+	defer func() {
+		if r := recover(); r != nil {
+			logf("tile: DecodeTile row=%d col=%d recovered from panic: %v\n%s",
+				td.Row, td.Col, r, debug.Stack())
+		}
+	}()
 
 	m := bitstream.NewMSAC(td.Data, fhdr.DisableCDFUpdate != 0)
 	ctx := NewTileCtx()
@@ -179,7 +191,7 @@ func DecodeTile(td TileData, fhdr *header.FrameHeader,
 			if sbx >= fb.Width || sby >= fb.Height {
 				continue
 			}
-			decodeSuperBlock(m, ctx, fhdr, seq, fb, sbx, sby, sbSz)
+			decodeSuperBlock(m, ctx, fs, fhdr, seq, fb, sbx, sby, sbSz)
 		}
 	}
 	return nil
@@ -190,7 +202,7 @@ func DecodeTile(td TileData, fhdr *header.FrameHeader,
 // ---------------------------------------------------------------------------
 
 // decodeSuperBlock starts the recursive partition tree at the superblock root.
-func decodeSuperBlock(m *bitstream.MSAC, ctx *TileCtx,
+func decodeSuperBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	fhdr *header.FrameHeader, seq *header.SequenceHeader,
 	fb *FrameBuf, sbx, sby, sbSz int) {
 
@@ -198,7 +210,7 @@ func decodeSuperBlock(m *bitstream.MSAC, ctx *TileCtx,
 	if sbSz == 128 {
 		bl = BL128X128
 	}
-	decodePartition(m, ctx, fhdr, seq, fb, sbx, sby, bl)
+	decodePartition(m, ctx, fs, fhdr, seq, fb, sbx, sby, bl)
 }
 
 // blkSizeFromLevel returns the luma block size in pixels for a given block
@@ -220,7 +232,7 @@ func blkSizeFromLevel(bl int) int {
 
 // decodePartition recursively decodes the partition tree.
 // bx/by are luma pixel coordinates; bl is block level (BL128…BL8x8).
-func decodePartition(m *bitstream.MSAC, ctx *TileCtx,
+func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	fhdr *header.FrameHeader, seq *header.SequenceHeader,
 	fb *FrameBuf, bx, by, bl int) {
 
@@ -233,29 +245,31 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx,
 
 	// At the leaf level (8×8), always decode as a single block.
 	if bl == BL8X8 {
-		decodeBlock(m, ctx, fhdr, seq, fb, bx, by, blSz, blSz)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, blSz)
 		return
 	}
 
 	// Select partition CDF and symbol count based on block level.
 	// AV1 spec: 128x128→8 syms, 64/32/16→10 syms, 8x8→4 syms.
+	// Context: partCtx = (hasAbove<<1) | hasLeft from FrameState.
+	partCtx := fs.PartCtx(bx, by)
 	var partCDF []uint16
 	var nPart int
 	switch bl {
 	case BL128X128:
-		partCDF = ctx.Partition128CDF[:]
+		partCDF = ctx.Partition128CDF[partCtx][:]
 		nPart = 8
 	case BL64X64:
-		partCDF = ctx.Partition64CDF[:]
+		partCDF = ctx.Partition64CDF[partCtx][:]
 		nPart = 10
 	case BL32X32:
-		partCDF = ctx.Partition32CDF[:]
+		partCDF = ctx.Partition32CDF[partCtx][:]
 		nPart = 10
 	case BL16X16:
-		partCDF = ctx.Partition16CDF[:]
+		partCDF = ctx.Partition16CDF[partCtx][:]
 		nPart = 10
 	default: // BL8X8
-		partCDF = ctx.Partition8CDF[:]
+		partCDF = ctx.Partition8CDF[partCtx][:]
 		nPart = 4
 	}
 
@@ -264,52 +278,52 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx,
 
 	switch part {
 	case PartitionNone:
-		decodeBlock(m, ctx, fhdr, seq, fb, bx, by, blSz, blSz)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, blSz)
 
 	case PartitionH:
-		decodeBlock(m, ctx, fhdr, seq, fb, bx, by, blSz, half)
-		decodeBlock(m, ctx, fhdr, seq, fb, bx, by+half, blSz, half)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, half)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by+half, blSz, half)
 
 	case PartitionV:
-		decodeBlock(m, ctx, fhdr, seq, fb, bx, by, half, blSz)
-		decodeBlock(m, ctx, fhdr, seq, fb, bx+half, by, half, blSz)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, half, blSz)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx+half, by, half, blSz)
 
 	case PartitionSplit:
-		decodePartition(m, ctx, fhdr, seq, fb, bx, by, bl+1)
-		decodePartition(m, ctx, fhdr, seq, fb, bx+half, by, bl+1)
-		decodePartition(m, ctx, fhdr, seq, fb, bx, by+half, bl+1)
-		decodePartition(m, ctx, fhdr, seq, fb, bx+half, by+half, bl+1)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by, bl+1)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by+half, bl+1)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by+half, bl+1)
 
 	case PartitionTTopSplit:
-		decodeBlock(m, ctx, fhdr, seq, fb, bx, by, blSz, half)
-		decodePartition(m, ctx, fhdr, seq, fb, bx, by+half, bl+1)
-		decodePartition(m, ctx, fhdr, seq, fb, bx+half, by+half, bl+1)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, half)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by+half, bl+1)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by+half, bl+1)
 
 	case PartitionTBottomSplit:
-		decodePartition(m, ctx, fhdr, seq, fb, bx, by, bl+1)
-		decodePartition(m, ctx, fhdr, seq, fb, bx+half, by, bl+1)
-		decodeBlock(m, ctx, fhdr, seq, fb, bx, by+half, blSz, half)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by, bl+1)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by+half, blSz, half)
 
 	case PartitionTLeftSplit:
-		decodeBlock(m, ctx, fhdr, seq, fb, bx, by, half, blSz)
-		decodePartition(m, ctx, fhdr, seq, fb, bx+half, by, bl+1)
-		decodePartition(m, ctx, fhdr, seq, fb, bx+half, by+half, bl+1)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, half, blSz)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by, bl+1)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by+half, bl+1)
 
 	case PartitionTRightSplit:
-		decodePartition(m, ctx, fhdr, seq, fb, bx, by, bl+1)
-		decodePartition(m, ctx, fhdr, seq, fb, bx, by+half, bl+1)
-		decodeBlock(m, ctx, fhdr, seq, fb, bx+half, by, half, blSz)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by+half, bl+1)
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx+half, by, half, blSz)
 
 	case PartitionH4:
 		q := blSz / 4
 		for i := 0; i < 4; i++ {
-			decodeBlock(m, ctx, fhdr, seq, fb, bx, by+i*q, blSz, q)
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by+i*q, blSz, q)
 		}
 
 	case PartitionV4:
 		q := blSz / 4
 		for i := 0; i < 4; i++ {
-			decodeBlock(m, ctx, fhdr, seq, fb, bx+i*q, by, q, blSz)
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx+i*q, by, q, blSz)
 		}
 	}
 }
@@ -319,7 +333,7 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx,
 // ---------------------------------------------------------------------------
 
 // decodeBlock decodes one coding block of size bw×bh (luma pixels) at (bx,by).
-func decodeBlock(m *bitstream.MSAC, ctx *TileCtx,
+func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	fhdr *header.FrameHeader, seq *header.SequenceHeader,
 	fb *FrameBuf, bx, by, bw, bh int) {
 
@@ -334,8 +348,36 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx,
 		bh = fb.Height - by
 	}
 
+	// --- Segment id (dav1d decode_b §5.11.9, intra-only path) ---
+	// When segmentation is disabled the spec mandates seg_id = 0 and no bits
+	// are read. When enabled but segmentation.update_map=0 the previous-frame
+	// segment map is used; for intra-only key-frames there is no previous
+	// map, so the predictor is the spatial neighbour minimum.
+	var segID uint8
+	if fhdr.Segmentation.Enabled != 0 && fhdr.Segmentation.UpdateMap != 0 {
+		pred := fs.SegIDFromNeighbours(bx, by)
+		segCtx := 0
+		haveAbove := by > 0
+		haveLeft := bx > 0
+		if haveAbove && haveLeft {
+			segCtx = 2
+		} else if haveAbove || haveLeft {
+			segCtx = 1
+		}
+		// Decode segment id delta from CDF; map back to absolute id.
+		delta := int(m.SymbolAdapt(ctx.SegIDCDF[segCtx][:], 7))
+		abs := int(pred) + delta
+		if abs < 0 {
+			abs = 0
+		}
+		if abs >= int(header.MaxSegments) {
+			abs = int(header.MaxSegments) - 1
+		}
+		segID = uint8(abs)
+	}
+
 	// --- Skip flag ---
-	skipCtx := 0 // simplified context (no neighbour state in M7)
+	skipCtx := fs.SkipCtx(bx, by)
 	skip := m.SymbolAdapt(ctx.SkipCDF[skipCtx][:], 2) != 0
 
 	// --- Intra vs Inter ---
@@ -344,22 +386,39 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx,
 
 	if !isIntra {
 		// Inter frame block: fill with DC128 and return.
+		fs.SetBlockSeg(bx, by, bw, bh, skip, DCPred, segID)
 		fillDC128(fb, bx, by, bw, bh)
 		return
 	}
 
 	// --- Intra luma mode ---
-	yMode := int(m.SymbolAdapt(ctx.IntraYModeCDF[:], NIntraPredModes))
+	// KFY mode context: [topMode][leftMode], from FrameState neighbour info.
+	topModeCtx := fs.TopModeCtx(bx, by)
+	leftModeCtx := fs.LeftModeCtx(bx, by)
+	yMode := int(m.SymbolAdapt(ctx.KFYModeCDF[topModeCtx][leftModeCtx][:], NIntraPredModes))
+	// Clamp yMode to valid range (defensive).
+	if yMode < 0 {
+		yMode = 0
+	} else if yMode >= NIntraPredModes {
+		yMode = NIntraPredModes - 1
+	}
 
 	// --- Intra UV mode ---
-	uvMode := int(m.SymbolAdapt(ctx.IntraUVModeCDF[:], NIntraPredModes+1))
+	// CFL is gated off for now: our CFL alpha decode does not match the
+	// dav1d MSAC contexts, so enabling CFL here produces large chroma
+	// excursions (green/magenta block artefacts). Until the alpha CDFs are
+	// wired up, force cflAllowed=0 so uvMode never resolves to CFL_PRED.
+	cflAllowed := 0
+	uvMode := int(m.SymbolAdapt(ctx.UVModeCDF[cflAllowed][yMode][:], NUVIntraModes))
 
 	// --- Transform size selection (M7: use largest fitting square tx) ---
 	txY := largestTx(bw, bh)
 	txUV := largestTx((bw+1)/2, (bh+1)/2)
 
 	// --- Dequant values from frame header ---
-	qidx := int(fhdr.Segmentation.QIdx[0])
+	qidx := int(fhdr.Segmentation.QIdx[segID])
+	qidxIsZero := qidx == 0
+	lossless := fhdr.Segmentation.Lossless[segID] != 0
 	dqY := [2]uint16{
 		transform.DqTbl[0][clampQIdx(qidx+int(fhdr.Quant.YDCDelta))][0],
 		transform.DqTbl[0][clampQIdx(qidx)][1],
@@ -376,7 +435,7 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx,
 	reducedTxtpSet := fhdr.ReducedTxtpSet != 0
 
 	// --- Luma plane ---
-	decodeIntraPlane(m, ctx, fb, 0, bx, by, bw, bh, txY, yMode, 0, dqY, skip, yMode, reducedTxtpSet, fhdr, seq)
+	decodeIntraPlane(m, ctx, fb, 0, bx, by, bw, bh, txY, yMode, 0, dqY, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
 
 	// --- Chroma planes (skip for monochrome) ---
 	if !fb.Monochrome && len(fb.U) > 0 {
@@ -394,14 +453,19 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx,
 		}
 
 		if uvMode == CFLPred {
-			// CFL prediction: uses luma AC residual.
-			decodeIntraPlane(m, ctx, fb, 1, cbx, cby, cbw, cbh, txUV, DCPred, int(cflAlphaU), dqU, skip, yMode, reducedTxtpSet, fhdr, seq)
-			decodeIntraPlane(m, ctx, fb, 2, cbx, cby, cbw, cbh, txUV, DCPred, int(cflAlphaV), dqV, skip, yMode, reducedTxtpSet, fhdr, seq)
+			// Build zero-mean luma AC buffer (4:2:0 subsampled from reconstructed Y).
+			acCfl := buildCflAc(fb, bx, by, bw, bh, cbw, cbh)
+			// CFL prediction: chroma = DC_chroma + (alpha*luma_AC + 32) >> 6.
+			decodeIntraPlaneCFL(m, ctx, fb, 1, cbx, cby, cbw, cbh, txUV, int(cflAlphaU), dqU, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless, acCfl)
+			decodeIntraPlaneCFL(m, ctx, fb, 2, cbx, cby, cbw, cbh, txUV, int(cflAlphaV), dqV, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless, acCfl)
 		} else {
-			decodeIntraPlane(m, ctx, fb, 1, cbx, cby, cbw, cbh, txUV, uvMode, 0, dqU, skip, yMode, reducedTxtpSet, fhdr, seq)
-			decodeIntraPlane(m, ctx, fb, 2, cbx, cby, cbw, cbh, txUV, uvMode, 0, dqV, skip, yMode, reducedTxtpSet, fhdr, seq)
+			decodeIntraPlane(m, ctx, fb, 1, cbx, cby, cbw, cbh, txUV, uvMode, 0, dqU, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
+			decodeIntraPlane(m, ctx, fb, 2, cbx, cby, cbw, cbh, txUV, uvMode, 0, dqV, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
 		}
 	}
+
+	// Record decoded block state for future neighbour context derivation.
+	fs.SetBlockSeg(bx, by, bw, bh, skip, yMode, segID)
 }
 
 // decodeCFLAlphas reads two CFL alpha values from the bitstream.
@@ -420,6 +484,177 @@ func decodeCFLAlphas(m *bitstream.MSAC) (int8, int8) {
 		alphaV = -alphaV
 	}
 	return alphaU, alphaV
+}
+
+// buildCflAc constructs a zero-mean luma AC buffer for CFL prediction by
+// 4:2:0-subsampling the reconstructed luma block at (bx,by,bw,bh) into a
+// cbw×cbh array, then subtracting the mean. The result is in row-major
+// layout, length cbw*cbh.
+func buildCflAc(fb *FrameBuf, bx, by, bw, bh, cbw, cbh int) []int16 {
+	ac := make([]int16, cbw*cbh)
+	if len(fb.Y) == 0 || cbw == 0 || cbh == 0 {
+		return ac
+	}
+	stride := fb.StrideY
+	planeW := fb.Width
+	planeH := fb.Height
+	var sum int32
+	for cy := 0; cy < cbh; cy++ {
+		for cx := 0; cx < cbw; cx++ {
+			lx := bx + cx*2
+			ly := by + cy*2
+			var s int32
+			n := 0
+			for dy := 0; dy < 2; dy++ {
+				yy := ly + dy
+				if yy >= planeH {
+					continue
+				}
+				for dx := 0; dx < 2; dx++ {
+					xx := lx + dx
+					if xx >= planeW {
+						continue
+					}
+					off := yy*stride + xx
+					if off < 0 || off >= len(fb.Y) {
+						continue
+					}
+					s += int32(fb.Y[off])
+					n++
+				}
+			}
+			var avg int32
+			if n > 0 {
+				// dav1d uses sum<<3/n for 4:2:0 (8x scale before subtraction).
+				avg = (s << 3) / int32(n)
+			}
+			ac[cy*cbw+cx] = int16(avg)
+			sum += avg
+		}
+	}
+	mean := int16(sum / int32(cbw*cbh))
+	for i := range ac {
+		ac[i] -= mean
+	}
+	return ac
+}
+
+// decodeIntraPlaneCFL decodes a chroma plane using CFL prediction. It is
+// a CFL-specialised variant of decodeIntraPlane: prediction is built via
+// PredCFL (DC base + alpha*ac), then chroma residual is added on top.
+func decodeIntraPlaneCFL(
+	m *bitstream.MSAC, ctx *TileCtx,
+	fb *FrameBuf,
+	plane, bx, by, bw, bh int,
+	tx uint8,
+	cflAlpha int,
+	dq [2]uint16,
+	skip bool,
+	yMode int,
+	reducedTxtpSet bool,
+	fhdr *header.FrameHeader,
+	seq *header.SequenceHeader,
+	qidxIsZero bool,
+	lossless bool,
+	ac []int16,
+) {
+	var planeBuf []byte
+	var stride, planeW, planeH int
+	if plane == 1 {
+		planeBuf = fb.U
+	} else {
+		planeBuf = fb.V
+	}
+	stride = fb.StrideUV
+	planeW = fb.ChromaW
+	planeH = fb.ChromaH
+
+	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
+		return
+	}
+	if bx+bw > planeW {
+		bw = planeW - bx
+	}
+	if by+bh > planeH {
+		bh = planeH - by
+	}
+
+	maxDim := bw
+	if bh > maxDim {
+		maxDim = bh
+	}
+	tlBuf := make([]byte, 4*maxDim+2)
+	tl := 2 * maxDim
+	fillTopleft(planeBuf, stride, planeW, planeH, bx, by, bw, bh, tlBuf, tl)
+
+	td := transform.TxfmDimensions[tx]
+	tw := int(td.W) * 4
+	th := int(td.H) * 4
+	if tw > bw {
+		tw = bw
+	}
+	if th > bh {
+		th = bh
+	}
+	predBuf := make([]byte, tw*th)
+
+	for tby := 0; tby < bh; tby += th {
+		for tbx := 0; tbx < bw; tbx += tw {
+			dstOff := (by+tby)*stride + (bx + tbx)
+			if dstOff >= len(planeBuf) {
+				continue
+			}
+			dst := planeBuf[dstOff:]
+
+			// CFL prediction: derive DC from neighbours, then add alpha*ac.
+			acSlice := cflAcSubBlock(ac, bw, bh, tbx, tby, tw, th)
+			intra.PredCFLBoth(predBuf, tw, tlBuf, tl, acSlice, tw, th, cflAlpha)
+
+			for row := 0; row < th; row++ {
+				dstRow := (by+tby+row)*stride + (bx + tbx)
+				if dstRow+tw > len(planeBuf) {
+					break
+				}
+				copy(planeBuf[dstRow:dstRow+tw], predBuf[row*tw:(row+1)*tw])
+			}
+
+			if !skip {
+				coeff, eob, txtp := decodeCoefficients(m, ctx, tx, plane, yMode, reducedTxtpSet, qidxIsZero, lossless)
+				if eob > 0 && len(coeff) > 0 {
+					tdFull := transform.TxfmDimensions[tx]
+					twFull := int(tdFull.W) * 4
+					thFull := int(tdFull.H) * 4
+					maxOff := (thFull-1)*stride + (twFull - 1)
+					if dstOff+maxOff < len(planeBuf) {
+						ReconBlock(dst, stride, coeff, eob, tx, txtp, dq, 8)
+					}
+				}
+			}
+			updateTopleft(planeBuf, stride, planeW, planeH, bx+tbx, by+tby, tw, th, tlBuf, tl)
+		}
+	}
+	_ = seq
+	_ = fhdr
+}
+
+// cflAcSubBlock extracts a tw×th tile (at offset tbx,tby) from a cbw×cbh
+// CFL AC buffer, copying it into a freshly-allocated row-major slice.
+func cflAcSubBlock(ac []int16, cbw, cbh, tbx, tby, tw, th int) []int16 {
+	out := make([]int16, tw*th)
+	for y := 0; y < th; y++ {
+		sy := tby + y
+		if sy >= cbh {
+			break
+		}
+		for x := 0; x < tw; x++ {
+			sx := tbx + x
+			if sx >= cbw {
+				break
+			}
+			out[y*tw+x] = ac[sy*cbw+sx]
+		}
+	}
+	return out
 }
 
 // decodeIntraPlane performs intra prediction + coefficient decode + reconstruction
@@ -442,6 +677,8 @@ func decodeIntraPlane(
 	reducedTxtpSet bool,
 	fhdr *header.FrameHeader,
 	seq *header.SequenceHeader,
+	qidxIsZero bool,
+	lossless bool,
 ) {
 	// Select plane buffer.
 	var planeBuf []byte
@@ -475,19 +712,20 @@ func decodeIntraPlane(
 	}
 
 	// Build topleft reference buffer for intra prediction.
-	// Layout (matches intra package convention):
-	//   topleft[tl-h..tl-1] = left samples (top-to-bottom)
-	//   topleft[tl]         = top-left sample
-	//   topleft[tl+1..tl+w] = top samples (left-to-right)
-	//   topleft[tl+w]       = right extension (for SMOOTH)
-	//   topleft[tl-h]       = bottom extension (for SMOOTH)
+	// Layout (matches intra package convention, with extension for Z1/Z3
+	// directional prediction which can index up to ~2*(w+h) samples):
+	//   topleft[tl-2*maxDim..tl-1] = left samples (top-to-bottom),
+	//                                extended past bh by replicating last
+	//   topleft[tl]                = top-left sample
+	//   topleft[tl+1..tl+2*maxDim] = top samples (left-to-right),
+	//                                extended past bw by replicating last
 	maxDim := bw
 	if bh > maxDim {
 		maxDim = bh
 	}
-	tlBufSize := 2*maxDim + 3 // enough for left+tl+top+ext
+	tlBufSize := 4*maxDim + 2 // extended for Z1/Z3 directional reach
 	tlBuf := make([]byte, tlBufSize)
-	tl := maxDim + 1 // index of the top-left sample
+	tl := 2 * maxDim // index of the top-left sample
 
 	fillTopleft(planeBuf, stride, planeW, planeH, bx, by, bw, bh, tlBuf, tl)
 
@@ -527,9 +765,18 @@ func decodeIntraPlane(
 
 			// 3. Decode and apply residual (if not skipped).
 			if !skip {
-				coeff, eob, txtp := decodeCoefficients(m, ctx, tx, plane, yMode, reducedTxtpSet)
+				coeff, eob, txtp := decodeCoefficients(m, ctx, tx, plane, yMode, reducedTxtpSet, qidxIsZero, lossless)
 				if eob > 0 && len(coeff) > 0 {
-					ReconBlock(dst, stride, coeff, eob, tx, txtp, dq, 8)
+					// Guard against partial tx blocks at plane edges:
+					// InvTxfmAdd writes dst[(th-1)*stride + (tw-1)] which would
+					// overrun planeBuf when the block straddles the bottom/right.
+					tdFull := transform.TxfmDimensions[tx]
+					twFull := int(tdFull.W) * 4
+					thFull := int(tdFull.H) * 4
+					maxOff := (thFull-1)*stride + (twFull - 1)
+					if dstOff+maxOff < len(planeBuf) {
+						ReconBlock(dst, stride, coeff, eob, tx, txtp, dq, 8)
+					}
 				}
 			}
 
@@ -561,163 +808,438 @@ func callIntraPred(mode int, dst []byte, stride int, topleft []byte, tl, width, 
 		intra.PredSmoothV(dst, stride, topleft, tl, width, height)
 	case SmoothHPred:
 		intra.PredSmoothH(dst, stride, topleft, tl, width, height)
+	case DiagDownLeftPred: // D45 — angle=45, Z1
+		intra.PredZ1(dst, stride, topleft, tl, width, height, 45)
+	case VertLeftPred: // D67 — angle=67, Z1
+		intra.PredZ1(dst, stride, topleft, tl, width, height, 67)
+	case VertRightPred: // D113 — angle=113, Z2
+		intra.PredZ2(dst, stride, topleft, tl, width, height, 113, width, height)
+	case DiagDownRightPred: // D135 — angle=135, Z2
+		intra.PredZ2(dst, stride, topleft, tl, width, height, 135, width, height)
+	case HorDownPred: // D157 — angle=157, Z2
+		intra.PredZ2(dst, stride, topleft, tl, width, height, 157, width, height)
+	case HorUpPred: // D203 — angle=203, Z3
+		intra.PredZ3(dst, stride, topleft, tl, width, height, 203)
 	default:
-		// Directional modes and unknown → use DC as safe fallback.
+		// CFL or unknown → DC fallback.
 		intra.PredDC(dst, stride, topleft, tl, width, height)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Coefficient decoding (Task 5)
+// Coefficient decoding (M8 Task 2 — dav1d-aligned)
+//
+// Mirrors dav1d/src/recon_tmpl.c decode_coefs(). Layout differences:
+//   - dav1d cf[rc] is in the (x<<shift)|y / transposed layout that its own
+//     itxfm consumes. Our ReconBlock currently expects row-major raster
+//     (y*W + x). Task 3 will switch ReconBlock to dav1d's layout; for now we
+//     translate (x,y) → row-major when storing tokens, so the dav1d-aligned
+//     CDF reads do not require any other downstream change.
+//   - dav1d's MSAC.SymbolAdapt returns 0..n_symbols (n_symbols+1 values) by
+//     using cdf[n_symbols] as a counter. Our Go MSAC.Symbol returns 0..n-1
+//     and requires cdf[n-1]=0 sentinel. So our CDF size is dav1d's + 1, and
+//     we pass n = (dav1d n_symbols) + 1.
 // ---------------------------------------------------------------------------
 
-// decodeCoefficients reads EOB, base tokens, high tokens and sign for one
-// transform block. Returns (coefficients, eob, txtp).
-func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, tx uint8, plane int, yMode int, reducedTxtpSet bool) ([]int32, int, uint8) {
-	td := transform.TxfmDimensions[tx]
-	n := int(td.W) * int(td.H) * 16 // number of coefficients
-	isLuma := plane == 0
+// readGolomb decodes a unary-prefixed value, mirroring dav1d's read_golomb.
+func readGolomb(m *bitstream.MSAC) uint32 {
+	length := 0
+	val := uint32(1)
+	for length < 32 {
+		if m.BoolEqui() != 0 {
+			break
+		}
+		length++
+	}
+	for ; length > 0; length-- {
+		val = (val << 1) | m.BoolEqui()
+	}
+	return val - 1
+}
 
-	// --- Transform type ---
-	// AV1 spec §7.12.3 / dav1d recon_tmpl.c:
-	// chroma: derived from UV mode, not coded in bitstream.
-	// luma, tx_max+1 >= TX_64X64 (i.e. td.Max >= 3): DCT_DCT, not coded.
-	// luma, otherwise: coded with reduced (4-sym) or full (6-sym) set.
+// getLoCtx2D mirrors dav1d get_lo_ctx for TX_CLASS_2D. Returns (ctx, hi_mag).
+func getLoCtx2D(levels []uint8, base int, stride int, ctxOff *[5][5]uint8, x, y int) (int, int) {
+	mag := int(levels[base+0*stride+1]) + int(levels[base+1*stride+0])
+	mag += int(levels[base+1*stride+1])
+	hiMag := mag
+	mag += int(levels[base+0*stride+2]) + int(levels[base+2*stride+0])
+	xi := x
+	yi := y
+	if xi > 4 {
+		xi = 4
+	}
+	if yi > 4 {
+		yi = 4
+	}
+	offset := int(ctxOff[yi][xi])
+	var add int
+	if mag > 512 {
+		add = 4
+	} else {
+		add = (mag + 64) >> 7
+	}
+	return offset + add, hiMag
+}
+
+// getLoCtx1D mirrors dav1d get_lo_ctx for TX_CLASS_H/V.
+func getLoCtx1D(levels []uint8, base, stride, y int) (int, int) {
+	mag := int(levels[base+0*stride+1]) + int(levels[base+1*stride+0])
+	mag += int(levels[base+0*stride+2])
+	hiMag := mag
+	mag += int(levels[base+0*stride+3]) + int(levels[base+0*stride+4])
+	var offset int
+	if y > 1 {
+		offset = 26 + 10
+	} else {
+		offset = 26 + y*5
+	}
+	var add int
+	if mag > 512 {
+		add = 4
+	} else {
+		add = (mag + 64) >> 7
+	}
+	return offset + add, hiMag
+}
+
+// decodeCoefficients reads txtp, EOB, base/hi tokens, dc_sign and golomb
+// extra-bits for one transform block. Returns (coefficients, eob, txtp).
+//
+// `qidxIsZero`: true iff frame_hdr.segmentation.qidx[seg_id] == 0
+// `lossless` :  true iff frame_hdr.segmentation.lossless[seg_id]
+func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, tx uint8, plane int,
+	yMode int, reducedTxtpSet bool, qidxIsZero bool, lossless bool,
+) ([]int32, int, uint8) {
+	td := transform.TxfmDimensions[tx]
+	chroma := 0
+	if plane > 0 {
+		chroma = 1
+	}
+	blockW := int(td.W) * 4
+	blockH := int(td.H) * 4
+	n := blockW * blockH
+
+	// --- Transform type ---------------------------------------------------
 	var txtp uint8
-	if !isLuma {
-		// UV txtp derived from UV mode via LUT (dav1d_txtp_from_uvmode).
+	switch {
+	case lossless:
+		// dav1d uses WHT_WHT here; transform pkg has none, fall back to DCT_DCT
+		// (visual quality picked up in Task 7).
+		txtp = transform.DCT_DCT
+	case int(td.Max) >= 3: // TX32/TX64: forced DCT_DCT
+		txtp = transform.DCT_DCT
+	case chroma == 1:
 		if yMode >= 0 && yMode < len(TxtpFromUVMode) {
 			txtp = TxtpFromUVMode[yMode]
 		}
-	} else if td.Max >= 3 {
-		// TX32 or larger: only DCT_DCT allowed (not coded).
+	case qidxIsZero:
+		// Implicit-lossless luma path (dav1d L361-L365).
 		txtp = transform.DCT_DCT
-	} else if reducedTxtpSet || td.Min >= 2 {
-		// Reduced tx set or TX16x16 min: 4-symbol Intra2 CDF.
-		idx := m.SymbolAdapt(ctx.TxTypeIntra2CDF[:], TxTypeIntra2Symbols)
-		if int(idx) < len(TxTypeIntra2Set) {
-			txtp = TxTypeIntra2Set[idx]
-		}
-	} else {
-		// Full tx set, TX4 or TX8 min: 6-symbol Intra1 CDF.
-		idx := m.SymbolAdapt(ctx.TxTypeIntra1CDF[:], TxTypeIntra1Symbols)
-		if int(idx) < len(TxTypeIntra1Set) {
-			txtp = TxTypeIntra1Set[idx]
+	default:
+		yModeCtx := clampInt(yMode, 0, NIntraPredModes-1)
+		if reducedTxtpSet || td.Min >= 2 {
+			txClassCtx := clampInt(int(td.Min), 0, 2)
+			idx := m.SymbolAdapt(ctx.TxTypeIntra2CDF[txClassCtx][yModeCtx][:], TxTypeIntra2Symbols)
+			if int(idx) < len(TxTypeIntra2Set) {
+				txtp = TxTypeIntra2Set[idx]
+			}
+		} else {
+			txClassCtx := clampInt(int(td.Min), 0, 1)
+			idx := m.SymbolAdapt(ctx.TxTypeIntra1CDF[txClassCtx][yModeCtx][:], TxTypeIntra1Symbols)
+			if int(idx) < len(TxTypeIntra1Set) {
+				txtp = TxTypeIntra1Set[idx]
+			}
 		}
 	}
-	// Safety clamp for large tx sizes (already handled above, but defensive).
 	txtp = clampTxType(txtp, td.Lw, td.Lh)
 
-	// --- EOB point ---
-	eobCtx := 0
-	if !isLuma {
-		eobCtx = 1
+	cls := DAV1DTxTypeClass[txtp]
+	is1d := uint8(0)
+	if cls != TxClass2D {
+		is1d = 1
 	}
-	eob := decodeEOB(m, ctx, tx, eobCtx)
+
+	// --- EOB --------------------------------------------------------------
+	slw := int(td.Lw)
+	if slw > 3 {
+		slw = 3
+	}
+	slh := int(td.Lh)
+	if slh > 3 {
+		slh = 3
+	}
+	tx2dszctx := slw + slh
+	var eob int
+	switch tx2dszctx {
+	case 0:
+		eob = int(m.SymbolAdapt(ctx.EobBin16Full[chroma][is1d][:], 4))
+	case 1:
+		eob = int(m.SymbolAdapt(ctx.EobBin32Full[chroma][is1d][:], 5))
+	case 2:
+		eob = int(m.SymbolAdapt(ctx.EobBin64Full[chroma][is1d][:], 6))
+	case 3:
+		eob = int(m.SymbolAdapt(ctx.EobBin128Full[chroma][is1d][:], 7))
+	case 4:
+		eob = int(m.SymbolAdapt(ctx.EobBin256Full[chroma][is1d][:], 8))
+	case 5:
+		eob = int(m.SymbolAdapt(ctx.EobBin512Full[chroma][:], 9))
+	default: // 6
+		eob = int(m.SymbolAdapt(ctx.EobBin1024Full[chroma][:], 10))
+	}
+	if eob > 1 {
+		eb := eob - 2
+		if eb < 0 {
+			eb = 0
+		} else if eb > 8 {
+			eb = 8
+		}
+		eobHiBit := int(m.BoolAdapt(ctx.EobHiBitFull[td.Ctx][chroma][eb][:]))
+		extra := uint32(0)
+		for k := 0; k < eb; k++ {
+			extra = (extra << 1) | m.BoolEqui()
+		}
+		eob = ((eobHiBit | 2) << uint(eb)) | int(extra)
+	}
 	if eob == 0 {
 		return nil, 0, txtp
 	}
+	if eob > n {
+		eob = n
+	}
 
+	// --- Token decode -----------------------------------------------------
 	coeff := make([]int32, n)
 
-	// Decode coefficients in reverse scan order (position eob-1 … 0).
-	// AV1 uses a zig-zag scan; for simplicity we decode in column-major
-	// order which matches the dequant/itxfm convention used by ReconBlock.
-	for i := eob - 1; i >= 0; i-- {
-		// Base token (0=zero, 1=one, 2=two, 3=three_plus).
-		baseCtx := clampInt(i*4/eob, 0, 3)
-		var base uint32
-		if i == eob-1 {
-			// EOB position: use EOB CDF (only 3 levels).
-			base = m.SymbolAdapt(ctx.CoeffBaseEobCDF[eobCtx][:], 3)
-			base++ // EOB token is 1-indexed
-		} else {
-			base = m.SymbolAdapt(ctx.CoeffBaseCDF[baseCtx][:], 4)
-		}
+	// levels buffer & strides per dav1d.
+	var stride, levelsLen int
+	var shift uint
+	var mask int
+	switch cls {
+	case TxClass2D:
+		stride = 4 << uint(slh)
+		levelsLen = stride * ((4 << uint(slw)) + 2)
+		shift = uint(slh + 2)
+		mask = (4 << uint(slh)) - 1
+	case TxClassH:
+		stride = 16
+		levelsLen = stride * ((4 << uint(slh)) + 2)
+		shift = uint(slh + 2)
+		mask = (4 << uint(slh)) - 1
+	default: // TxClassV
+		stride = 16
+		levelsLen = stride * ((4 << uint(slw)) + 2)
+		shift = uint(slw + 2)
+		mask = (4 << uint(slw)) - 1
+	}
+	levels := make([]uint8, levelsLen)
 
-		if base == 0 {
-			continue
+	// 2D shape index for lo_ctx_offsets.
+	var ctxOff *[5][5]uint8
+	if cls == TxClass2D {
+		shape := 0
+		if td.Lw > td.Lh {
+			shape = 1
+		} else if td.Lw < td.Lh {
+			shape = 2
 		}
+		ctxOff = &DAV1DLoCtxOffsets[shape]
+	}
 
-		var mag uint32
-		if base >= 3 {
-			// High token.
-			brCtx := clampInt(i*4/eob, 0, 3)
-			br := m.HiTok(ctx.CoeffBrCDF[brCtx][:])
-			mag = br + 3
-		} else {
-			mag = base
+	// 2D scan table (only used by TX_CLASS_2D).
+	var scan []uint16
+	if cls == TxClass2D {
+		scan = GetScan(td.Lw, td.Lh, cls)
+	}
+
+	txCtx := int(td.Ctx)
+	txCtxBr := txCtx
+	if txCtxBr > 3 {
+		txCtxBr = 3
+	}
+	eobCdf := &ctx.EobBaseTokFull[txCtx][chroma]
+	loCdf := &ctx.BaseTokFull[txCtx][chroma]
+	hiCdf := &ctx.BrTokFull[txCtxBr][chroma]
+
+	// rasterIdx maps dav1d (x, y) → col-major index used by
+	// transform.InvTxfmAdd (which reads coeff[y + x*sh]). Note: sh is the
+	// transform height (blockH); the column-major index is x*blockH + y.
+	rasterIdx := func(x, y int) int {
+		if x < 0 || x >= blockW || y < 0 || y >= blockH {
+			return -1
 		}
+		return x*blockH + y
+	}
 
-		// Sign.
+	// signCtx for DC — simplified to 0 (Task 7 will wire dav1d's
+	// get_dc_sign_ctx using above/left neighbour sign accumulation).
+	dcSignCtx := 0
+
+	// Helper that reads sign + golomb extra bits and stores the signed
+	// magnitude into coeff. Mirrors the per-coefficient bit-stream order of
+	// the previous M7 implementation (sign decoded immediately after the
+	// token), keeping byte alignment with the existing pipeline.
+	writeSignedCoeff := func(coeffIdx, tok int, isDC bool) {
+		if coeffIdx < 0 || tok == 0 {
+			return
+		}
 		var sign uint32
-		if i == 0 {
-			// DC sign uses dedicated CDF.
-			signCtx := 0
-			sign = m.BoolAdapt(ctx.DCSignCDF[signCtx][:])
+		if isDC {
+			sign = m.BoolAdapt(ctx.DCSignCDF[chroma][dcSignCtx][:])
 		} else {
 			sign = m.BoolEqui()
 		}
-
-		// Extra bits for large magnitudes (bypass coded).
-		var extra uint32
-		if mag >= 14 {
-			for k := 0; k < 14; k++ {
-				extra = (extra << 1) | m.BoolEqui()
-			}
-			mag += extra
+		mag := tok
+		if mag == 15 {
+			mag = int(readGolomb(m)) + 15
 		}
-
 		if sign != 0 {
-			coeff[i] = -int32(mag)
+			coeff[coeffIdx] = int32(-mag)
 		} else {
-			coeff[i] = int32(mag)
+			coeff[coeffIdx] = int32(mag)
 		}
 	}
+
+	// EOB position (i = eob-1)
+	var x, y, levelIdx int
+	if cls == TxClass2D {
+		if eob-1 >= len(scan) {
+			return coeff, eob, txtp
+		}
+		rcRaw := int(scan[eob-1])
+		x = rcRaw >> shift
+		y = rcRaw & mask
+		levelIdx = rcRaw
+	} else if cls == TxClassH {
+		x = (eob - 1) & mask
+		y = (eob - 1) >> shift
+		levelIdx = x*stride + y
+	} else {
+		x = (eob - 1) & mask
+		y = (eob - 1) >> shift
+		levelIdx = x*stride + y
+	}
+
+	bctx := 1
+	if eob > (2 << uint(tx2dszctx)) {
+		bctx++
+	}
+	if eob > (4 << uint(tx2dszctx)) {
+		bctx++
+	}
+	if bctx > 3 {
+		bctx = 3
+	}
+	eobTok := int(m.SymbolAdapt(eobCdf[bctx][:], 3)) // 0..2
+	tok := eobTok + 1
+	levelTok := tok * 0x41
+	if eobTok == 2 {
+		var hctx int
+		if cls == TxClass2D {
+			if (x | y) > 1 {
+				hctx = 14
+			} else {
+				hctx = 7
+			}
+		} else {
+			if y != 0 {
+				hctx = 14
+			} else {
+				hctx = 7
+			}
+		}
+		tok = int(m.HiTok(hiCdf[hctx][:]))
+		levelTok = tok + (3 << 6)
+	}
+	writeSignedCoeff(rasterIdx(x, y), tok, eob-1 == 0)
+	if levelIdx >= 0 && levelIdx < len(levels) {
+		levels[levelIdx] = uint8(levelTok)
+	}
+
+	// AC tokens: i = eob-2 .. 1
+	for i := eob - 2; i > 0; i-- {
+		var xi, yi, lvlIdx int
+		if cls == TxClass2D {
+			if i >= len(scan) {
+				continue
+			}
+			r := int(scan[i])
+			xi = r >> shift
+			yi = r & mask
+			lvlIdx = r
+		} else if cls == TxClassH {
+			xi = i & mask
+			yi = i >> shift
+			lvlIdx = xi*stride + yi
+		} else {
+			xi = i & mask
+			yi = i >> shift
+			lvlIdx = xi*stride + yi
+		}
+		var loCtx, hiMag int
+		if cls == TxClass2D {
+			loCtx, hiMag = getLoCtx2D(levels, lvlIdx, stride, ctxOff, xi, yi)
+		} else {
+			loCtx, hiMag = getLoCtx1D(levels, lvlIdx, stride, yi)
+		}
+		ytmp := yi
+		if cls == TxClass2D {
+			ytmp = yi | xi
+		}
+		toki := int(m.SymbolAdapt(loCdf[loCtx][:], 4)) // 0..3
+		if toki == 3 {
+			mag := uint(hiMag) & 63
+			var hctx int
+			yThresh := 0
+			if cls == TxClass2D {
+				yThresh = 1
+			}
+			if ytmp > yThresh {
+				hctx = 14
+			} else {
+				hctx = 7
+			}
+			if mag > 12 {
+				hctx += 6
+			} else {
+				hctx += int((mag + 1) >> 1)
+			}
+			toki = int(m.HiTok(hiCdf[hctx][:]))
+			if lvlIdx >= 0 && lvlIdx < len(levels) {
+				levels[lvlIdx] = uint8(toki + (3 << 6))
+			}
+		} else if lvlIdx >= 0 && lvlIdx < len(levels) {
+			levels[lvlIdx] = uint8(toki * 0x41)
+		}
+		writeSignedCoeff(rasterIdx(xi, yi), toki, false)
+	}
+
+	// DC token (i = 0)
+	var dcTok int
+	if cls == TxClass2D {
+		dcTok = int(m.SymbolAdapt(loCdf[0][:], 4))
+	} else {
+		dcCtx, _ := getLoCtx1D(levels, 0, stride, 0)
+		dcTok = int(m.SymbolAdapt(loCdf[dcCtx][:], 4))
+	}
+	if dcTok == 3 {
+		var dcMag uint
+		if cls == TxClass2D {
+			dcMag = uint(levels[0*stride+1]) + uint(levels[1*stride+0]) + uint(levels[1*stride+1])
+		} else {
+			dcMag = uint(levels[0*stride+1]) + uint(levels[0*stride+2]) + uint(levels[0*stride+3])
+		}
+		dcMag &= 63
+		var hctx int
+		if dcMag > 12 {
+			hctx = 6
+		} else {
+			hctx = int((dcMag + 1) >> 1)
+		}
+		dcTok = int(m.HiTok(hiCdf[hctx][:]))
+	}
+	writeSignedCoeff(rasterIdx(0, 0), dcTok, true)
 
 	return coeff, eob, txtp
-}
-
-// decodeEOB decodes the end-of-block position for a transform block.
-// Returns the 1-based EOB (0 means all-zero block).
-func decodeEOB(m *bitstream.MSAC, ctx *TileCtx, tx uint8, eobCtx int) int {
-	td := transform.TxfmDimensions[tx]
-	maxTx := int(td.Max) // log2 of max(w,h) in 4-px units
-
-	var eobPt int
-	switch maxTx {
-	case 0: // TX4x4: 2 symbols (pt=1..4)
-		eobPt = int(m.SymbolAdapt(ctx.EobPtCDF4[eobCtx][:], 2))
-	case 1: // TX8x8: 3 symbols (pt=1..8)
-		eobPt = int(m.SymbolAdapt(ctx.EobPtCDF8[eobCtx][:], 3))
-	case 2: // TX16x16: 5 symbols
-		eobPt = int(m.SymbolAdapt(ctx.EobPtCDF16[eobCtx][:], 5))
-	case 3: // TX32x32: 7 symbols
-		eobPt = int(m.SymbolAdapt(ctx.EobPtCDF32[eobCtx][:], 7))
-	default: // TX64x64+: 9 symbols
-		eobPt = int(m.SymbolAdapt(ctx.EobPtCDF64[eobCtx][:], 9))
-	}
-
-	// eobPt == 0 means EOB=1 (only DC), eobPt==1 means EOB ∈ [2,3], etc.
-	// Convert eob_pt to an EOB value via the standard mapping.
-	if eobPt == 0 {
-		return 1
-	}
-	// For eobPt >= 1, EOB is in range [2^(eobPt-1)+1 … 2^eobPt].
-	// Read (eobPt-1) extra bits.
-	base := 1 << uint(eobPt)
-	extra := 0
-	for k := eobPt - 1; k > 0; k-- {
-		extra = (extra << 1) | int(m.BoolEqui())
-	}
-	eob := base + extra
-	// Clamp to block size.
-	td2 := transform.TxfmDimensions[tx]
-	maxCoeff := int(td2.W) * int(td2.H) * 16
-	if eob > maxCoeff {
-		eob = maxCoeff
-	}
-	return eob
 }
 
 // clampTxType restricts txtp to the 1D transform types supported by the
@@ -756,31 +1278,22 @@ func clampTxType(txtp, lw, lh uint8) uint8 {
 // Helper utilities
 // ---------------------------------------------------------------------------
 
-// fillTopleft fills the topleft reference buffer for intra prediction.
-// Samples outside the frame or not-yet-reconstructed are seeded with a
-// position-derived pseudo-grey value (instead of the AV1-spec default 128).
-//
-// Rationale (M7): the M7 CABAC pipeline uses simplified CDF tables that do
-// not synchronise with a real AV1 encoder, so most blocks decode skip=1 or
-// eob=0 → residual ≈ 0. If we then default neighbours to a constant 128,
-// every intra-predicted pixel becomes 128 and the entire luma plane
-// collapses to a flat grey frame (yMean=128.0).
-// Seeding with a smooth gradient breaks that collapse: directional intra
-// prediction now propagates a varying signal across blocks, so the output
-// frame shows visible texture instead of a uniform colour. This is a
-// best-effort visualisation only; M8+ (full CABAC + motion compensation)
-// will replace this with proper reference samples.
+// fillTopleft fills the topleft reference buffer for intra prediction
+// from previously-reconstructed neighbours. Pixels outside the frame or
+// not yet reconstructed default to 128 (the AV1 spec value for missing
+// neighbours), matching dav1d's ipred_prepare behaviour.
 func fillTopleft(planeBuf []byte, stride, planeW, planeH, bx, by, bw, bh int,
 	tlBuf []byte, tl int) {
 
-	// Position-derived seed: smooth diagonal gradient in [64, 192].
-	// Using bx+by ensures neighbouring blocks see slightly different defaults.
-	seed := byte(64 + ((bx + by) & 0x7F))
-
-	// Default: fill everything with the seed value.
+	// Default to spec-defined 128 for unavailable neighbours.
 	for i := range tlBuf {
-		tlBuf[i] = seed
+		tlBuf[i] = 128
 	}
+
+	// dav1d's ipred_prepare extends the edge buffer past the block edge by
+	// replicating the last available sample, so directional predictors
+	// (PredZ1/Z2/Z3) can index up to ~2*(w+h) without reading default 128.
+	extent := tl // tl == 2*maxDim (ensures left/top each have 2*maxDim slots)
 
 	// Top-left sample.
 	if bx > 0 && by > 0 {
@@ -790,38 +1303,50 @@ func fillTopleft(planeBuf []byte, stride, planeW, planeH, bx, by, bw, bh int,
 		}
 	}
 
-	// Top row (left→right: tlBuf[tl+1..tl+bw]).
+	// Top row (left→right: tlBuf[tl+1..tl+extent]).
 	if by > 0 {
-		for x := 0; x < bw; x++ {
-			off := (by-1)*stride + (bx + x)
-			if off >= 0 && off < len(planeBuf) && bx+x < planeW {
-				tlBuf[tl+1+x] = planeBuf[off]
+		var lastTop byte = 128
+		haveLast := false
+		for x := 0; x < extent; x++ {
+			srcX := bx + x
+			if srcX >= planeW {
+				srcX = planeW - 1
 			}
-		}
-		// Right extension for SMOOTH.
-		lastX := bx + bw - 1
-		if lastX < planeW {
-			off := (by-1)*stride + lastX
+			off := (by-1)*stride + srcX
 			if off >= 0 && off < len(planeBuf) {
-				tlBuf[tl+bw] = planeBuf[off]
+				if x < bw && bx+x < planeW {
+					tlBuf[tl+1+x] = planeBuf[off]
+					lastTop = planeBuf[off]
+					haveLast = true
+				} else if haveLast {
+					tlBuf[tl+1+x] = lastTop
+				} else {
+					tlBuf[tl+1+x] = planeBuf[off]
+				}
 			}
 		}
 	}
 
-	// Left column (top→bottom: tlBuf[tl-1..tl-bh]).
+	// Left column (top→bottom: tlBuf[tl-1..tl-extent]).
 	if bx > 0 {
-		for y := 0; y < bh; y++ {
-			off := (by+y)*stride + (bx - 1)
-			if off >= 0 && off < len(planeBuf) && by+y < planeH {
-				tlBuf[tl-1-y] = planeBuf[off]
+		var lastLeft byte = 128
+		haveLast := false
+		for y := 0; y < extent; y++ {
+			srcY := by + y
+			if srcY >= planeH {
+				srcY = planeH - 1
 			}
-		}
-		// Bottom extension for SMOOTH.
-		lastY := by + bh - 1
-		if lastY < planeH {
-			off := lastY*stride + (bx - 1)
+			off := srcY*stride + (bx - 1)
 			if off >= 0 && off < len(planeBuf) {
-				tlBuf[tl-bh] = planeBuf[off]
+				if y < bh && by+y < planeH {
+					tlBuf[tl-1-y] = planeBuf[off]
+					lastLeft = planeBuf[off]
+					haveLast = true
+				} else if haveLast {
+					tlBuf[tl-1-y] = lastLeft
+				} else {
+					tlBuf[tl-1-y] = planeBuf[off]
+				}
 			}
 		}
 	}
