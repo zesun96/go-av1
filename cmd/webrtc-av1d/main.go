@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,7 +44,7 @@ var staticFS embed.FS
 var (
 	flagPort = flag.Int("port", 8080, "HTTP listen port")
 	flagOut  = flag.String("out", "output.ivf", "output IVF file path")
-	flagYUV  = flag.String("yuv", "", "if non-empty, save decoded frames as raw YUV420 to this file (playable with ffplay -f rawvideo -pixel_format yuv420p -video_size WxH)")
+	flagYUV  = flag.String("yuv", "output.y4m", "path to save decoded frames; *.y4m emits YUV4MPEG2 (playable directly with `ffplay`), any other suffix emits raw planar YUV420 (needs `ffplay -f rawvideo -pixel_format yuv420p -framerate 30 -video_size WxH`); empty disables")
 )
 
 // ─── main ────────────────────────────────────────────────────────────────────
@@ -612,17 +613,25 @@ func (w *ivfWriter) Close() error {
 
 // ─── YUV writer ──────────────────────────────────────────────────────────────
 
-// yuvWriter appends raw planar YUV frames to a file.  Each frame is written
-// as packed rows (stride padding is stripped) in Y-then-U-then-V order,
-// exactly what ffplay expects with -f rawvideo -pixel_format yuv420p.
+// yuvWriter appends decoded planar YUV frames to a file. Two output formats
+// are supported and selected automatically by file extension:
 //
-// To play the resulting file:
+//	*.y4m  →  YUV4MPEG2 container (carries width/height/fps), playable as:
+//	          ffplay output.y4m
 //
-//	ffplay -f rawvideo -pixel_format yuv420p -video_size WxH output.yuv
+//	other  →  raw planar YUV420 frames (no header), playable as:
+//	          ffplay -f rawvideo -pixel_format yuv420p \
+//	                 -framerate 30 -video_size WxH output.yuv
+//
+// Each frame is written as packed rows (stride padding is stripped) in
+// Y-then-U-then-V order, in 4:2:0 layout.
 type yuvWriter struct {
-	path string
-	mu   sync.Mutex
-	f    *os.File
+	path   string
+	mu     sync.Mutex
+	f      *os.File
+	isY4M  bool // true if output uses YUV4MPEG2 container
+	headOK bool // true after Y4M stream header has been emitted
+	wrote  int  // number of frames written so far
 }
 
 func (w *yuvWriter) ensureOpen() error {
@@ -634,19 +643,37 @@ func (w *yuvWriter) ensureOpen() error {
 		return err
 	}
 	w.f = f
-	log.Printf("YUV output opened: %s", w.path)
+	w.isY4M = strings.EqualFold(filepath.Ext(w.path), ".y4m")
+	log.Printf("YUV output opened: %s (format=%s)", w.path, map[bool]string{true: "Y4M", false: "raw"}[w.isY4M])
 	return nil
 }
 
-// WriteFrame writes one decoded picture as a packed planar YUV frame,
-// stripping any stride alignment padding so each row is exactly Width (or
-// ChromaWidth) bytes wide.
+// WriteFrame writes one decoded picture, stripping any stride alignment
+// padding so each row is exactly Width (or ChromaWidth) bytes wide.
+// For Y4M output, the first call also emits the stream header.
 func (w *yuvWriter) WriteFrame(pic *av1.Picture) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if err := w.ensureOpen(); err != nil {
 		return err
+	}
+
+	if w.isY4M && !w.headOK {
+		// Hard-coded 30 fps to match webrtc-av1d's IVF timebase. Aspect 1:1,
+		// progressive frames, 4:2:0 chroma — common defaults that ffplay
+		// accepts without further hints.
+		hdr := fmt.Sprintf("YUV4MPEG2 W%d H%d F30:1 Ip A1:1 C420\n",
+			pic.Width, pic.Height)
+		if _, err := w.f.WriteString(hdr); err != nil {
+			return err
+		}
+		w.headOK = true
+	}
+	if w.isY4M {
+		if _, err := w.f.WriteString("FRAME\n"); err != nil {
+			return err
+		}
 	}
 
 	// Write Y plane row by row (strip stride padding).
@@ -684,6 +711,7 @@ func (w *yuvWriter) WriteFrame(pic *av1.Picture) error {
 			return err
 		}
 	}
+	w.wrote++
 	return nil
 }
 
