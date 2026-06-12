@@ -243,16 +243,10 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 
 	blSz := blkSizeFromLevel(bl) // full block size in luma px
 
-	// At the leaf level (8×8), always decode as a single block.
-	if bl == BL8X8 {
-		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, blSz)
-		return
-	}
-
 	// Select partition CDF and symbol count based on block level.
 	// AV1 spec: 128x128→8 syms, 64/32/16→10 syms, 8x8→4 syms.
 	// Context: partCtx = (hasAbove<<1) | hasLeft from FrameState.
-	partCtx := fs.PartCtx(bx, by)
+	partCtx := fs.PartCtx(bx, by, bl)
 	var partCDF []uint16
 	var nPart int
 	switch bl {
@@ -273,8 +267,44 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		nPart = 4
 	}
 
-	part := int(m.SymbolAdapt(partCDF, nPart))
 	half := blSz / 2
+	haveHSplit := fb.Width > bx+half
+	haveVSplit := fb.Height > by+half
+	if bl == BL8X8 && (!haveHSplit || !haveVSplit) {
+		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, blSz)
+		fs.SetPartition(bx, by, bl, PartitionNone, blSz)
+		return
+	}
+	if !haveHSplit && !haveVSplit {
+		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+		return
+	}
+	if !haveVSplit {
+		isSplit := m.Bool(gatherTopPartitionProb(partCDF, bl))
+		if isSplit != 0 {
+			decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+			decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by, bl+1)
+			fs.SetPartition(bx, by, bl, PartitionSplit, blSz)
+		} else {
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, half)
+			fs.SetPartition(bx, by, bl, PartitionH, blSz)
+		}
+		return
+	}
+	if !haveHSplit {
+		isSplit := m.Bool(gatherLeftPartitionProb(partCDF, bl))
+		if isSplit != 0 {
+			decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+			decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by+half, bl+1)
+			fs.SetPartition(bx, by, bl, PartitionSplit, blSz)
+		} else {
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, half, blSz)
+			fs.SetPartition(bx, by, bl, PartitionV, blSz)
+		}
+		return
+	}
+
+	part := int(m.SymbolAdapt(partCDF, nPart))
 
 	switch part {
 	case PartitionNone:
@@ -289,10 +319,17 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx+half, by, half, blSz)
 
 	case PartitionSplit:
-		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
-		decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by, bl+1)
-		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by+half, bl+1)
-		decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by+half, bl+1)
+		if bl == BL8X8 {
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, half, half)
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx+half, by, half, half)
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by+half, half, half)
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx+half, by+half, half, half)
+		} else {
+			decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+			decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by, bl+1)
+			decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by+half, bl+1)
+			decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by+half, bl+1)
+		}
 
 	case PartitionTTopSplit:
 		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, half)
@@ -326,6 +363,40 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx+i*q, by, q, blSz)
 		}
 	}
+
+	if part != PartitionSplit || bl == BL8X8 {
+		fs.SetPartition(bx, by, bl, part, blSz)
+	}
+}
+
+func gatherLeftPartitionProb(cdf []uint16, bl int) uint32 {
+	out := int(cdf[PartitionH-1]) - int(cdf[PartitionH])
+	out += int(cdf[PartitionSplit-1]) - int(cdf[PartitionTLeftSplit])
+	if bl != BL128X128 {
+		out += int(cdf[PartitionH4-1]) - int(cdf[PartitionH4])
+	}
+	if out < 0 {
+		return 0
+	}
+	if out > 32768 {
+		return 32768
+	}
+	return uint32(out)
+}
+
+func gatherTopPartitionProb(cdf []uint16, bl int) uint32 {
+	out := int(cdf[PartitionV-1]) - int(cdf[PartitionTTopSplit])
+	out += int(cdf[PartitionTLeftSplit-1])
+	if bl != BL128X128 {
+		out += int(cdf[PartitionV4-1]) - int(cdf[PartitionTRightSplit])
+	}
+	if out < 0 {
+		return 0
+	}
+	if out > 32768 {
+		return 32768
+	}
+	return uint32(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -354,42 +425,58 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	// segment map is used; for intra-only key-frames there is no previous
 	// map, so the predictor is the spatial neighbour minimum.
 	var segID uint8
-	if fhdr.Segmentation.Enabled != 0 && fhdr.Segmentation.UpdateMap != 0 {
-		pred := fs.SegIDFromNeighbours(bx, by)
-		segCtx := 0
-		haveAbove := by > 0
-		haveLeft := bx > 0
-		if haveAbove && haveLeft {
-			segCtx = 2
-		} else if haveAbove || haveLeft {
-			segCtx = 1
-		}
-		// Decode segment id delta from CDF; map back to absolute id.
-		delta := int(m.SymbolAdapt(ctx.SegIDCDF[segCtx][:], 7))
-		abs := int(pred) + delta
-		if abs < 0 {
-			abs = 0
-		}
-		if abs >= int(header.MaxSegments) {
-			abs = int(header.MaxSegments) - 1
-		}
-		segID = uint8(abs)
+	if fhdr.Segmentation.Enabled != 0 && fhdr.Segmentation.UpdateMap == 0 {
+		segID = 0
+	}
+	if fhdr.Segmentation.Enabled != 0 &&
+		fhdr.Segmentation.UpdateMap != 0 &&
+		fhdr.Segmentation.SegData.PreSkip != 0 {
+		segID = readSegmentID(m, ctx, fs, fhdr, bx, by)
 	}
 
 	// --- Skip flag ---
 	skipCtx := fs.SkipCtx(bx, by)
 	skip := m.SymbolAdapt(ctx.SkipCDF[skipCtx][:], 2) != 0
 
+	if fhdr.Segmentation.Enabled != 0 &&
+		fhdr.Segmentation.UpdateMap != 0 &&
+		fhdr.Segmentation.SegData.PreSkip == 0 {
+		if skip {
+			segID = fs.SegIDFromNeighbours(bx, by)
+		} else {
+			segID = readSegmentID(m, ctx, fs, fhdr, bx, by)
+		}
+	}
+
+	// --- CDEF index ---
+	// dav1d reads the per-64x64 CDEF strength index immediately after seg_id
+	// for the first non-skip block touching that CDEF unit. The actual filter
+	// application can still be approximate, but these raw bits must be consumed
+	// here or all following intra syntax is decoded from the wrong position.
+	if !skip {
+		readCDEFIndex(m, fs, fhdr, bx, by, bw, bh)
+	}
+	readDeltaQLF(m, ctx, fhdr, seq, bx, by, bw, bh, skip)
+
 	// --- Intra vs Inter ---
 	isIntra := fhdr.FrameType.IsIntra()
 	// For inter frames, treat every block as intra DC128 (M7 stub).
 
 	if !isIntra {
-		// Inter frame block: fill with DC128 and return.
+		// Inter frame block: first-stage MC fallback. Full inter syntax and
+		// MV decoding land next; until then, copy the same-position block from
+		// the first available reference instead of painting grey.
 		fs.SetBlockSeg(bx, by, bw, bh, skip, DCPred, segID)
-		fillDC128(fb, bx, by, bw, bh)
+		if !copyInterRefBlock(fb, bx, by, bw, bh) {
+			fillDC128(fb, bx, by, bw, bh)
+		}
 		return
 	}
+
+	hasChroma := blockHasChroma(seq, fb, bx, by, bw, bh)
+	qidx := blockQIdx(ctx, fhdr, segID)
+	qidxIsZero := qidx == 0
+	lossless := fhdr.Segmentation.Lossless[segID] != 0
 
 	// --- Intra luma mode ---
 	// KFY mode context: [topMode][leftMode], from FrameState neighbour info.
@@ -403,22 +490,117 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		yMode = NIntraPredModes - 1
 	}
 
+	// --- Angle-delta luma (A6: bit consume only) ---
+	// dav1d decode_b L1060-L1069: when bw4*bh4 >= 4 (i.e. not 4x4/4x8/8x4)
+	// and y_mode is in [VERT_PRED..VERT_LEFT_PRED], read a 7-symbol delta.
+	// We currently only consume the bits to keep the bitstream aligned;
+	// directional predictors continue to use their nominal angles.
+	var yAngleDelta int
+	if yMode >= VertPred && yMode <= VertLeftPred && (bw>>2)*(bh>>2) >= 4 {
+		v := int(m.SymbolAdapt(ctx.AngleDeltaCDF[yMode-VertPred][:], 7))
+		yAngleDelta = v - 3
+	}
+	_ = yAngleDelta
+
 	// --- Intra UV mode ---
-	// CFL is gated off for now: our CFL alpha decode does not match the
-	// dav1d MSAC contexts, so enabling CFL here produces large chroma
-	// excursions (green/magenta block artefacts). Until the alpha CDFs are
-	// wired up, force cflAllowed=0 so uvMode never resolves to CFL_PRED.
 	cflAllowed := 0
-	uvMode := int(m.SymbolAdapt(ctx.UVModeCDF[cflAllowed][yMode][:], NUVIntraModes))
+	uvMode := DCPred
+	if hasChroma {
+		uvModeSyms := NIntraPredModes
+		if cflAllowed != 0 {
+			uvModeSyms = NUVIntraModes
+		}
+		uvMode = int(m.SymbolAdapt(ctx.UVModeCDF[cflAllowed][yMode][:], uvModeSyms))
+	}
+
+	// --- Angle-delta chroma (A6: bit consume only) ---
+	// dav1d decode_b L1107-L1113: when uv_mode is not CFL_PRED, the same
+	// gating as luma applies and a chroma angle delta is read.
+	var uvAngleDelta int
+	if hasChroma && uvMode >= VertPred && uvMode <= VertLeftPred && (bw>>2)*(bh>>2) >= 4 {
+		v := int(m.SymbolAdapt(ctx.AngleDeltaCDF[uvMode-VertPred][:], 7))
+		uvAngleDelta = v - 3
+	}
+	_ = uvAngleDelta
+
+	// --- Palette flags (A2: bit consume only) ---
+	// dav1d decode_b L1116-L1140 reads use_palette_y / use_palette_uv when
+	// allow_screen_content_tools is enabled and the block is mid-sized
+	// (max(bw4,bh4) <= 16, bw4+bh4 >= 4). webrtc captured streams typically
+	// have allow_screen_content_tools=0 so this branch is not exercised, but
+	// the gate is wired in so SCT-enabled streams stop drifting at this
+	// position. Full pal_sz / palette_colors / palette_indices decode is
+	// deferred (dav1d_read_pal_plane / read_pal_indices) — when use_pal=1 the
+	// remainder of the bitstream will desynchronise; the surrounding tile
+	// recover() in DecodeTile prevents a crash.
+	var palSzY, palSzUV int
+	if fhdr.AllowScreenContentTools != 0 && bw <= 64 && bh <= 64 && (bw+bh) >= 16 {
+		szCtx := palSzCtx(bw, bh)
+		if yMode == DCPred {
+			// pal_ctx = (above pal>0) + (left pal>0); we have no palette
+			// neighbour tracking yet, so use the conservative pal_ctx=0.
+			palCtx := 0
+			if m.BoolAdapt(ctx.PaletteYCDF[szCtx][palCtx][:]) != 0 {
+				palSzY = -1 // marker: not implemented; bitstream will drift
+			}
+		}
+		if hasChroma && uvMode == DCPred {
+			palCtx := 0
+			if palSzY > 0 {
+				palCtx = 1
+			}
+			if m.BoolAdapt(ctx.PaletteUVCDF[palCtx][:]) != 0 {
+				palSzUV = -1 // marker: not implemented
+			}
+		}
+	}
+	_ = palSzUV
+
+	// --- Filter-intra (A1: bit consume only) ---
+	// dav1d decode_b L1142-L1155: when seq.FilterIntra is enabled,
+	// y_mode==DC_PRED, no Y palette, and max(b_dim[2],b_dim[3]) <= 3 (i.e.
+	// max(bw,bh) <= 32), read use_filter_intra (binary). On 1, read a 5-mode
+	// filter intra mode. We currently only consume these bits to keep the
+	// rest of the bitstream aligned; prediction still falls back to DC.
+	if seq.FilterIntra && yMode == DCPred && palSzY == 0 && bw <= 32 && bh <= 32 {
+		bs := bsizeFromDim(bw, bh)
+		if bs >= 0 {
+			useFI := m.BoolAdapt(ctx.UseFilterIntraCDF[bs][:])
+			if useFI != 0 {
+				_ = m.SymbolAdapt(ctx.FilterIntraModeCDF[:], 5)
+			}
+		}
+	}
 
 	// --- Transform size selection (M7: use largest fitting square tx) ---
 	txY := largestTx(bw, bh)
 	txUV := largestTx((bw+1)/2, (bh+1)/2)
 
-	// --- Dequant values from frame header ---
-	qidx := int(fhdr.Segmentation.QIdx[segID])
-	qidxIsZero := qidx == 0
-	lossless := fhdr.Segmentation.Lossless[segID] != 0
+	// --- Tx-size depth (A3: bit consume only) ---
+	// dav1d decode_b L1185-L1206: when txfm_mode==SWITCHABLE && t_dim.max>TX_4x4
+	// and not lossless, read a depth symbol from txsz[max-1][tctx] with
+	// imin(max,2)+1 symbols. Each unit of depth subdivides tx by one level
+	// (tx = t_dim.Sub). webrtc captured streams typically use TxfmModeLargest
+	// (mode=1) so this branch is not exercised; we wire it in for SWITCHABLE
+	// streams to stop drifting at this position.
+	if !lossless && fhdr.TxfmMode == header.TxfmModeSwitchable {
+		tDim := transform.TxfmDimensions[txY]
+		if tDim.Max > 0 { // > TX_4x4
+			// tctx = (above tx < txw) + (left tx < txh); we have no above/left
+			// tx tracking yet, conservative tctx=0.
+			tctx := 0
+			nSyms := int(tDim.Max)
+			if nSyms > 2 {
+				nSyms = 2
+			}
+			nSyms++ // imin(max,2) + 1
+			depth := int(m.SymbolAdapt(ctx.TxSzCDF[tDim.Max-1][tctx][:], nSyms))
+			for d := 0; d < depth; d++ {
+				txY = tDim.Sub
+				tDim = transform.TxfmDimensions[txY]
+			}
+		}
+	}
 	dqY := [2]uint16{
 		transform.DqTbl[0][clampQIdx(qidx+int(fhdr.Quant.YDCDelta))][0],
 		transform.DqTbl[0][clampQIdx(qidx)][1],
@@ -438,7 +620,7 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	decodeIntraPlane(m, ctx, fb, 0, bx, by, bw, bh, txY, yMode, 0, dqY, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
 
 	// --- Chroma planes (skip for monochrome) ---
-	if !fb.Monochrome && len(fb.U) > 0 {
+	if hasChroma && len(fb.U) > 0 {
 		// Chroma block position/size (4:2:0 subsampling).
 		cbx := bx / 2
 		cby := by / 2
@@ -449,7 +631,7 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 
 		if uvMode == CFLPred {
 			// Decode CFL alpha signs and magnitudes.
-			cflAlphaU, cflAlphaV = decodeCFLAlphas(m)
+			cflAlphaU, cflAlphaV = decodeCFLAlphas(m, ctx)
 		}
 
 		if uvMode == CFLPred {
@@ -468,22 +650,225 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	fs.SetBlockSeg(bx, by, bw, bh, skip, yMode, segID)
 }
 
-// decodeCFLAlphas reads two CFL alpha values from the bitstream.
-// Simplified: decode sign (1 bit each) then magnitude (3 bits each), clamped to [-16,16].
-func decodeCFLAlphas(m *bitstream.MSAC) (int8, int8) {
-	signU := m.BoolEqui()
-	magU := m.Bools(3)
-	signV := m.BoolEqui()
-	magV := m.Bools(3)
-	alphaU := int8(magU)
-	alphaV := int8(magV)
+func blockHasChroma(seq *header.SequenceHeader, fb *FrameBuf, bx, by, bw, bh int) bool {
+	if fb.Monochrome || len(fb.U) == 0 {
+		return false
+	}
+	bw4 := (bw + 3) >> 2
+	bh4 := (bh + 3) >> 2
+	bx4 := bx >> 2
+	by4 := by >> 2
+	ssHor := int(seq.SsHor)
+	ssVer := int(seq.SsVer)
+	return (bw4 > ssHor || (bx4&1) != 0) && (bh4 > ssVer || (by4&1) != 0)
+}
+
+func cflAllowedForBlock(seq *header.SequenceHeader, bw, bh int, lossless bool) bool {
+	bw4 := (bw + 3) >> 2
+	bh4 := (bh + 3) >> 2
+	cbw4 := (bw4 + int(seq.SsHor)) >> int(seq.SsHor)
+	cbh4 := (bh4 + int(seq.SsVer)) >> int(seq.SsVer)
+	if lossless {
+		return cbw4 == 1 && cbh4 == 1
+	}
+	bs := bsizeFromDim(bw, bh)
+	switch bs {
+	case BS32x32, BS32x16, BS32x8,
+		BS16x32, BS16x16, BS16x8, BS16x4,
+		BS8x32, BS8x16, BS8x8, BS8x4,
+		BS4x16, BS4x8, BS4x4:
+		return true
+	default:
+		return false
+	}
+}
+
+func readSegmentID(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, fhdr *header.FrameHeader, bx, by int) uint8 {
+	pred := int(fs.SegIDFromNeighbours(bx, by))
+	segCtx := 0
+	haveAbove := by > 0
+	haveLeft := bx > 0
+	if haveAbove && haveLeft {
+		segCtx = 2
+	} else if haveAbove || haveLeft {
+		segCtx = 1
+	}
+	diff := int(m.SymbolAdapt(ctx.SegIDCDF[segCtx][:], int(header.MaxSegments)))
+	maxSeg := int(fhdr.Segmentation.SegData.LastActiveSegID) + 1
+	if maxSeg <= 0 || maxSeg > int(header.MaxSegments) {
+		maxSeg = int(header.MaxSegments)
+	}
+	segID := negDeinterleave(diff, pred, maxSeg)
+	if segID < 0 || segID >= maxSeg {
+		return 0
+	}
+	return uint8(segID)
+}
+
+func readCDEFIndex(m *bitstream.MSAC, fs *FrameState, fhdr *header.FrameHeader, bx, by, bw, bh int) {
+	if fhdr.CDEF.NBits == 0 || fs.W64 <= 0 || len(fs.CDEFIndex) == 0 {
+		return
+	}
+	col64Start := bx / 64
+	row64Start := by / 64
+	if col64Start < 0 || row64Start < 0 || col64Start >= fs.W64 {
+		return
+	}
+	idx := row64Start*fs.W64 + col64Start
+	if idx < 0 || idx >= len(fs.CDEFIndex) || fs.CDEFIndex[idx] != -1 {
+		return
+	}
+
+	v := int8(m.Bools(int(fhdr.CDEF.NBits)))
+	col64End := (bx + bw + 63) / 64
+	row64End := (by + bh + 63) / 64
+	for r := row64Start; r < row64End; r++ {
+		for c := col64Start; c < col64End && c < fs.W64; c++ {
+			i := r*fs.W64 + c
+			if i >= 0 && i < len(fs.CDEFIndex) {
+				fs.CDEFIndex[i] = v
+			}
+		}
+	}
+}
+
+func readDeltaQLF(m *bitstream.MSAC, ctx *TileCtx, fhdr *header.FrameHeader, seq *header.SequenceHeader, bx, by, bw, bh int, skip bool) {
+	if !ctx.LastQIdxValid {
+		ctx.LastQIdx = int(fhdr.Quant.YAC)
+		ctx.LastQIdxValid = true
+	}
+
+	bx4 := bx >> 2
+	by4 := by >> 2
+	mask := 15
+	root := 64
+	if seq.SB128 {
+		mask = 31
+		root = 128
+	}
+	if ((bx4 | by4) & mask) != 0 {
+		return
+	}
+
+	haveDeltaQ := fhdr.Delta.Q.Present != 0 && (bw != root || bh != root || !skip)
+	if !haveDeltaQ {
+		return
+	}
+
+	deltaQ := readDeltaSymbol(m, ctx.DeltaQCDF[:])
+	if deltaQ != 0 {
+		deltaQ <<= fhdr.Delta.Q.ResLog2
+	}
+	ctx.LastQIdx = clampInt(ctx.LastQIdx+deltaQ, 1, 255)
+
+	if fhdr.Delta.LF.Present == 0 {
+		return
+	}
+	nLFs := 1
+	if fhdr.Delta.LF.Multi != 0 {
+		nLFs = 2
+		if !seq.Monochrome {
+			nLFs = 4
+		}
+	}
+	for i := 0; i < nLFs; i++ {
+		cdfIdx := i
+		if fhdr.Delta.LF.Multi != 0 {
+			cdfIdx = i + 1
+		}
+		deltaLF := readDeltaSymbol(m, ctx.DeltaLFCDF[cdfIdx][:])
+		if deltaLF != 0 {
+			deltaLF <<= fhdr.Delta.LF.ResLog2
+		}
+		ctx.LastDeltaLF[i] = int8(clampInt(int(ctx.LastDeltaLF[i])+deltaLF, -63, 63))
+	}
+}
+
+func readDeltaSymbol(m *bitstream.MSAC, cdf []uint16) int {
+	delta := int(m.SymbolAdapt(cdf, 4))
+	if delta == 3 {
+		nBits := 1 + int(m.Bools(3))
+		delta = int(m.Bools(nBits)) + 1 + (1 << nBits)
+	}
+	if delta != 0 && m.BoolEqui() != 0 {
+		delta = -delta
+	}
+	return delta
+}
+
+func blockQIdx(ctx *TileCtx, fhdr *header.FrameHeader, segID uint8) int {
+	qidx := int(fhdr.Segmentation.QIdx[segID])
+	if !ctx.LastQIdxValid {
+		return qidx
+	}
+	segDelta := qidx - int(fhdr.Quant.YAC)
+	return clampQIdx(ctx.LastQIdx + segDelta)
+}
+
+func negDeinterleave(diff, ref, max int) int {
+	if max <= 0 {
+		return 0
+	}
+	if ref < 0 {
+		ref = 0
+	}
+	if ref >= max {
+		ref = max - 1
+	}
+	if ref == 0 {
+		return diff
+	}
+	if ref >= max-1 {
+		return max - diff - 1
+	}
+	if 2*ref < max {
+		if diff <= 2*ref {
+			if diff&1 != 0 {
+				return ref + ((diff + 1) >> 1)
+			}
+			return ref - (diff >> 1)
+		}
+		return diff
+	}
+	if diff <= 2*(max-ref-1) {
+		if diff&1 != 0 {
+			return ref + ((diff + 1) >> 1)
+		}
+		return ref - (diff >> 1)
+	}
+	return max - (diff + 1)
+}
+
+// decodeCFLAlphas reads CFL alpha syntax using dav1d's sign and alpha CDFs.
+func decodeCFLAlphas(m *bitstream.MSAC, ctx *TileCtx) (int8, int8) {
+	sign := int(m.SymbolAdapt(ctx.CFLSignCDF[:], 7)) + 1
+	signU := sign * 0x56 >> 8
+	signV := sign - signU*3
+
+	var alphaU, alphaV int
 	if signU != 0 {
-		alphaU = -alphaU
+		c := 0
+		if signU == 2 {
+			c = 3
+		}
+		c += signV
+		alphaU = int(m.SymbolAdapt(ctx.CFLAlphaCDF[c][:], 15)) + 1
+		if signU == 1 {
+			alphaU = -alphaU
+		}
 	}
 	if signV != 0 {
-		alphaV = -alphaV
+		c := 0
+		if signV == 2 {
+			c = 3
+		}
+		c += signU
+		alphaV = int(m.SymbolAdapt(ctx.CFLAlphaCDF[c][:], 15)) + 1
+		if signV == 1 {
+			alphaV = -alphaV
+		}
 	}
-	return alphaU, alphaV
+	return int8(alphaU), int8(alphaV)
 }
 
 // buildCflAc constructs a zero-mean luma AC buffer for CFL prediction by
@@ -1415,6 +1800,65 @@ func fillPlaneConst(plane []byte, stride, pw, ph, bx, by, bw, bh int, fill byte)
 		for i := off; i < end; i++ {
 			plane[i] = fill
 		}
+	}
+}
+
+// copyInterRefBlock copies a same-position block from the first available
+// reference frame. This is a temporary zero-MV predictor used to connect the
+// reference buffer to inter-frame reconstruction before full MV syntax support.
+func copyInterRefBlock(fb *FrameBuf, bx, by, bw, bh int) bool {
+	ref := firstAvailableRef(fb)
+	if ref == nil || len(ref.Y) == 0 {
+		return false
+	}
+	copyPlaneBlock(fb.Y, fb.StrideY, fb.Width, fb.Height, ref.Y, ref.StrideY, ref.Width, ref.Height, bx, by, bw, bh)
+	if fb.Monochrome || ref.Monochrome {
+		return true
+	}
+	cbx := bx >> 1
+	cby := by >> 1
+	cbw := (bw + 1) >> 1
+	cbh := (bh + 1) >> 1
+	copyPlaneBlock(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.U, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh)
+	copyPlaneBlock(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.V, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh)
+	return true
+}
+
+func firstAvailableRef(fb *FrameBuf) *PlaneBuf {
+	for _, ref := range fb.Refs {
+		if ref != nil {
+			return ref
+		}
+	}
+	return nil
+}
+
+func copyPlaneBlock(dst []byte, dstStride, dstW, dstH int, src []byte, srcStride, srcW, srcH int, x, y, w, h int) {
+	if len(dst) == 0 || len(src) == 0 || x >= dstW || y >= dstH || x >= srcW || y >= srcH {
+		return
+	}
+	if x+w > dstW {
+		w = dstW - x
+	}
+	if y+h > dstH {
+		h = dstH - y
+	}
+	if x+w > srcW {
+		w = srcW - x
+	}
+	if y+h > srcH {
+		h = srcH - y
+	}
+	if w <= 0 || h <= 0 {
+		return
+	}
+	for row := 0; row < h; row++ {
+		dstOff := (y+row)*dstStride + x
+		srcOff := (y+row)*srcStride + x
+		if dstOff < 0 || srcOff < 0 || dstOff+w > len(dst) || srcOff+w > len(src) {
+			continue
+		}
+		copy(dst[dstOff:dstOff+w], src[srcOff:srcOff+w])
 	}
 }
 

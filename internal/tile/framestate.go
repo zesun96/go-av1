@@ -29,6 +29,13 @@ type FrameState struct {
 	// LeftPresent[row4] — 1 if there is a decoded block to the left of row4.
 	LeftPresent []uint8
 
+	AbovePartition []uint8
+	LeftPartition  []uint8
+
+	// CDEFIndex stores the decoded per-64x64 CDEF strength index. A value of
+	// -1 means no non-skip block has read the index for that CDEF unit yet.
+	CDEFIndex []int8
+
 	// AboveSegID[col4] / LeftSegID[row4] — segment_id of decoded neighbour
 	// blocks (0..MaxSegments-1). Used by SegIDFromNeighbours for predicting
 	// the current block's segment id when segmentation is enabled.
@@ -37,23 +44,39 @@ type FrameState struct {
 
 	// Frame dimensions in 4-px units.
 	W4, H4 int
+	W8, H8 int
+	W64    int
 }
 
 // NewFrameState allocates a FrameState for a frame of size (w×h) luma pixels.
 func NewFrameState(w, h int) *FrameState {
 	w4 := (w + 3) / 4
 	h4 := (h + 3) / 4
+	w8 := (w + 7) / 8
+	h8 := (h + 7) / 8
+	w64 := (w + 63) / 64
+	h64 := (h + 63) / 64
+	cdefIndex := make([]int8, w64*h64)
+	for i := range cdefIndex {
+		cdefIndex[i] = -1
+	}
 	return &FrameState{
-		AboveSkip:    make([]uint8, w4),
-		LeftSkip:     make([]uint8, h4),
-		AboveMode:    make([]uint8, w4),
-		LeftMode:     make([]uint8, h4),
-		AbovePresent: make([]uint8, w4),
-		LeftPresent:  make([]uint8, h4),
-		AboveSegID:   make([]uint8, w4),
-		LeftSegID:    make([]uint8, h4),
-		W4:           w4,
-		H4:           h4,
+		AboveSkip:      make([]uint8, w4),
+		LeftSkip:       make([]uint8, h4),
+		AboveMode:      make([]uint8, w4),
+		LeftMode:       make([]uint8, h4),
+		AbovePresent:   make([]uint8, w4),
+		LeftPresent:    make([]uint8, h4),
+		AbovePartition: make([]uint8, w8),
+		LeftPartition:  make([]uint8, h8),
+		CDEFIndex:      cdefIndex,
+		AboveSegID:     make([]uint8, w4),
+		LeftSegID:      make([]uint8, h4),
+		W4:             w4,
+		H4:             h4,
+		W8:             w8,
+		H8:             h8,
+		W64:            w64,
 	}
 }
 
@@ -61,18 +84,36 @@ func NewFrameState(w, h int) *FrameState {
 // pixels based on whether there is a decoded block above and to the left.
 //
 //	partCtx = (hasAbove << 1) | hasLeft
-func (fs *FrameState) PartCtx(bx, by int) int {
-	col4 := bx / 4
-	row4 := by / 4
-	hasAbove := 0
-	if row4 > 0 && col4 < fs.W4 && fs.AbovePresent[col4] != 0 {
-		hasAbove = 1
+func (fs *FrameState) PartCtx(bx, by, bl int) int {
+	col8 := bx / 8
+	row8 := by / 8
+	shift := 4 - bl
+	if shift < 0 {
+		shift = 0
 	}
-	hasLeft := 0
-	if col4 > 0 && row4 < fs.H4 && fs.LeftPresent[row4] != 0 {
-		hasLeft = 1
+	top := 0
+	if row8 > 0 && col8 < fs.W8 {
+		top = int((fs.AbovePartition[col8] >> uint(shift)) & 1)
 	}
-	return (hasAbove << 1) | hasLeft
+	left := 0
+	if col8 > 0 && row8 < fs.H8 {
+		left = int((fs.LeftPartition[row8] >> uint(shift)) & 1)
+	}
+	return top + (left << 1)
+}
+
+func (fs *FrameState) SetPartition(bx, by, bl, bp, size int) {
+	col8Start := bx / 8
+	row8Start := by / 8
+	units := (size + 7) / 8
+	topVal := alPartCtx[0][bl][bp]
+	leftVal := alPartCtx[1][bl][bp]
+	for c := col8Start; c < col8Start+units && c < fs.W8; c++ {
+		fs.AbovePartition[c] = topVal
+	}
+	for r := row8Start; r < row8Start+units && r < fs.H8; r++ {
+		fs.LeftPartition[r] = leftVal
+	}
 }
 
 // SkipCtx returns the skip context (0-2) for a block at (bx,by) pixels.
@@ -196,34 +237,35 @@ func (fs *FrameState) SetBlockSeg(bx, by, bw, bh int, skip bool, yMode int, segI
 }
 
 // intraToKFYCtx maps an AV1 intra prediction mode to the 5-category
-// KFY-mode context used by dav1d (matches dav1d's kfymode_b[] LUT):
+// KFY-mode context used by dav1d. The mapping mirrors dav1d's
+// `dav1d_intra_mode_context[N_INTRA_PRED_MODES]` LUT in tables.c:
 //
-//	0 = DC_PRED
-//	1 = VERT_PRED   (V)
-//	2 = HOR_PRED    (H)
-//	3 = D45_PRED … D135_PRED … (all diagonal/directional)
-//	4 = SMOOTH*
-//
-// The exact mapping is:
-//
-//	DC_PRED   → 0
-//	V_PRED    → 1
-//	H_PRED    → 2
-//	D45..D135 → 3  (modes 3-8, i.e. all directional except V and H)
-//	PAETH     → 3  (mode 9)
-//	SMOOTH*   → 4  (modes 10-12)
+//	DC_PRED        → 0
+//	VERT_PRED      → 1
+//	HOR_PRED       → 2
+//	D45  (DiagDL)  → 3
+//	D135 (DiagDR)  → 4
+//	D113 (VertR)   → 4
+//	D157 (HorD)    → 4
+//	D203 (HorU)    → 4
+//	D67  (VertL)   → 3
+//	SMOOTH         → 0
+//	SMOOTH_V       → 1
+//	SMOOTH_H       → 2
+//	PAETH          → 0
 func intraToKFYCtx(mode int) int {
 	switch mode {
-	case DCPred:
+	case DCPred, SmoothPred, PaethPred:
 		return 0
-	case VertPred:
+	case VertPred, SmoothVPred:
 		return 1
-	case HorPred:
+	case HorPred, SmoothHPred:
 		return 2
-	case SmoothPred, SmoothVPred, SmoothHPred:
+	case DiagDownLeftPred, VertLeftPred:
+		return 3
+	case DiagDownRightPred, VertRightPred, HorDownPred, HorUpPred:
 		return 4
 	default:
-		// Directional (D45/D135/D113/D157/D203/D67) and Paeth → 3
-		return 3
+		return 0
 	}
 }

@@ -159,6 +159,21 @@ var SkipCDFDefault = [3][3]uint16{
 }
 
 // ---------------------------------------------------------------------------
+// Delta-q / delta-lf CDFs.
+// Source: dav1d m.delta_q and m.delta_lf, CDF3(28160, 32120, 32677).
+// ---------------------------------------------------------------------------
+
+var DeltaQCDFDefault = [5]uint16{4608, 648, 91, 0, 0}
+
+var DeltaLFCDFDefault = [5][5]uint16{
+	{4608, 648, 91, 0, 0},
+	{4608, 648, 91, 0, 0},
+	{4608, 648, 91, 0, 0},
+	{4608, 648, 91, 0, 0},
+	{4608, 648, 91, 0, 0},
+}
+
+// ---------------------------------------------------------------------------
 // TX type intra CDFs (full context: [tx_size_class][y_mode])
 // txtp_intra1[2][13][7]  — 6 symbols + counter
 // txtp_intra2[3][13][5]  — 4 symbols + counter
@@ -418,4 +433,161 @@ var SegIDCDFDefault = [3][8]uint16{
 	{27146, 24875, 16675, 14535, 4959, 4395, 235, 0},
 	{18494, 14538, 10211, 7833, 2788, 1917, 424, 0},
 	{5241, 4281, 4045, 3878, 371, 121, 89, 0},
+}
+
+// ---------------------------------------------------------------------------
+// Filter-intra CDFs (M8 / A1)
+//
+// use_filter_intra: per block size (NBlockSizes=22) binary CDF — read after
+// y_mode == DC_PRED on small blocks to indicate the FILTER_INTRA fallback.
+// filter_intra: 5-mode CDF read when use_filter_intra=1, selecting one of
+// {DC, VERT, HOR, DIAG_DOWN, PAETH} filter intra predictors.
+//
+// Source: dav1d/src/cdf.c .use_filter_intra and .filter_intra. Entries are
+// stored in the inverse-CDF form (32768 - dav1d v) used by all other tables
+// in this file. Indices follow the Go BlockSize enum order in levels.go
+// (BS128x128 = 0, ..., BS4x4 = 21), which matches dav1d's BS_* enum.
+// ---------------------------------------------------------------------------
+
+// UseFilterIntraCDFDefault [NBlockSizes][2]: prob slot + counter slot.
+// Block sizes that the spec disallows for filter_intra (max(bw,bh) > 32 px,
+// i.e. >= BS_32x64) keep dav1d's default 16384 placeholder; they are never
+// actually read (decodeBlock gates the read on bw<=32 && bh<=32).
+var UseFilterIntraCDFDefault = [NBlockSizes][2]uint16{
+	BS128x128: {16384, 0},
+	BS128x64:  {16384, 0},
+	BS64x128:  {16384, 0},
+	BS64x64:   {16384, 0},
+	BS64x32:   {16384, 0},
+	BS64x16:   {16384, 0},
+	BS32x64:   {16384, 0},
+	BS32x32:   {10425, 0}, // dav1d CDF1(22343)
+	BS32x16:   {20012, 0}, // dav1d CDF1(12756)
+	BS32x8:    {14667, 0}, // dav1d CDF1(18101)
+	BS16x64:   {16384, 0},
+	BS16x32:   {18467, 0}, // dav1d CDF1(14301)
+	BS16x16:   {20360, 0}, // dav1d CDF1(12408)
+	BS16x8:    {23374, 0}, // dav1d CDF1(9394)
+	BS16x4:    {22400, 0}, // dav1d CDF1(10368)
+	BS8x32:    {12539, 0}, // dav1d CDF1(20229)
+	BS8x16:    {20217, 0}, // dav1d CDF1(12551)
+	BS8x8:     {24902, 0}, // dav1d CDF1(7866)
+	BS8x4:     {26875, 0}, // dav1d CDF1(5893)
+	BS4x16:    {19998, 0}, // dav1d CDF1(12770)
+	BS4x8:     {26025, 0}, // dav1d CDF1(6743)
+	BS4x4:     {28147, 0}, // dav1d CDF1(4621)
+}
+
+// FilterIntraModeCDFDefault [6]: 5 mode probs (cdf[4]=0 sentinel) + counter.
+// Source: dav1d CDF4(8949, 12776, 17211, 29558).
+var FilterIntraModeCDFDefault = [6]uint16{
+	23819, 19992, 15557, 3210, 0, 0,
+}
+
+// ---------------------------------------------------------------------------
+// Palette CDFs (A2 — palette flag bit consume only).
+//
+// dav1d/src/decode.c L1116-L1140 reads two binary palette flags inside the
+// intra block when frame_hdr.allow_screen_content_tools is set:
+//   - use_palette_y  : pal_y[sz_ctx][pal_ctx]   (only when y_mode  == DC_PRED)
+//   - use_palette_uv : pal_uv[pal_ctx]          (only when uv_mode == DC_PRED)
+// Indices use sz_ctx = log2(bw4) + log2(bh4) - 2 (range 0..6) and a 0/1/2
+// pal_ctx derived from the above/left palette neighbour state.
+//
+// Source: dav1d/src/cdf.c .pal_y and .pal_uv default tables, stored in the
+// inverse-CDF form (32768 - dav1d v) used by all other tables in this file.
+// ---------------------------------------------------------------------------
+
+// PaletteYCDFDefault [sz_ctx=7][pal_ctx=3][2]: binary CDF + counter.
+// Source: dav1d default_cdf.pal_y.
+var PaletteYCDFDefault = [7][3][2]uint16{
+	{{1092, 0}, {29349, 0}, {31507, 0}}, // sz_ctx=0 (8x8)
+	{{856, 0}, {29909, 0}, {31788, 0}},  // sz_ctx=1 (8x16/16x8)
+	{{945, 0}, {29368, 0}, {31987, 0}},  // sz_ctx=2 (16x16)
+	{{738, 0}, {29207, 0}, {31864, 0}},  // sz_ctx=3 (16x32/32x16)
+	{{459, 0}, {25431, 0}, {31306, 0}},  // sz_ctx=4 (32x32)
+	{{503, 0}, {28753, 0}, {31247, 0}},  // sz_ctx=5 (32x64/64x32)
+	{{318, 0}, {24822, 0}, {32639, 0}},  // sz_ctx=6 (64x64)
+}
+
+// PaletteUVCDFDefault [pal_ctx=2][2]: binary CDF + counter.
+// Source: dav1d default_cdf.pal_uv.
+var PaletteUVCDFDefault = [2][2]uint16{
+	{307, 0},   // pal_ctx=0: dav1d CDF1(32461)
+	{11280, 0}, // pal_ctx=1: dav1d CDF1(21488)
+}
+
+// ---------------------------------------------------------------------------
+// Tx-size depth CDFs (A3 — intra block tx_size depth bit consume).
+//
+// dav1d/src/decode.c L1193-L1203 reads a depth symbol when
+//   frame_hdr.txfm_mode == TX_SWITCHABLE && t_dim.max > TX_4x4
+// from txsz[t_dim.max - 1][tctx] with imin(t_dim.max, 2) + 1 symbols.
+// tctx = (a.tx[bx4] < txw) + (l.tx[by4] < txh) (range 0..2).
+//
+// Source: dav1d/src/cdf.c .txsz, stored in the inverse-CDF form
+// (32768 - dav1d v) shared by all other tables in this file.
+// ---------------------------------------------------------------------------
+
+// TxSzCDFDefault [tx_max-1=4][tctx=3][n_syms+1=4].
+// Layout per row:
+//
+//	max=1 (TX_8x8)   : 2 syms → cdf[0]=p, cdf[1]=0 sentinel, cdf[2]=counter.
+//	max=2..4         : 3 syms → cdf[0..1]=p, cdf[2]=0 sentinel, cdf[3]=counter.
+var TxSzCDFDefault = [4][3][4]uint16{
+	// max=1 (TX_8x8): CDF1(19968), CDF1(19968), CDF1(24320)
+	{
+		{12800, 0, 0, 0},
+		{12800, 0, 0, 0},
+		{8448, 0, 0, 0},
+	},
+	// max=2 (TX_16x16): CDF2(12272,30172) twice, CDF2(18677,30848)
+	{
+		{20496, 2596, 0, 0},
+		{20496, 2596, 0, 0},
+		{14091, 1920, 0, 0},
+	},
+	// max=3 (TX_32x32): CDF2(12986,15180) twice, CDF2(24302,25602)
+	{
+		{19782, 17588, 0, 0},
+		{19782, 17588, 0, 0},
+		{8466, 7166, 0, 0},
+	},
+	// max=4 (TX_64x64): CDF2(5782,11475) twice, CDF2(16803,22759)
+	{
+		{26986, 21293, 0, 0},
+		{26986, 21293, 0, 0},
+		{15965, 10009, 0, 0},
+	},
+}
+
+// ---------------------------------------------------------------------------
+// Angle-delta CDFs (A6 — directional intra angle delta bit consume).
+//
+// dav1d/src/decode.c L1060-L1069 / L1107-L1113 reads a 7-symbol delta from
+// angle_delta[mode-VERT_PRED] when the block is at least 4 4x4 units in area
+// (b_dim[2]+b_dim[3] >= 2, equivalently bw4*bh4 >= 4) and y_mode/uv_mode is
+// in [VERT_PRED..VERT_LEFT_PRED]. The decoded value (0..6) maps to delta
+// = value - 3 (range -3..+3).
+//
+// Source: dav1d/src/cdf.c .angle_delta (8 directional modes, CDF6 each).
+// Storage form is dav1d's inverse-CDF (32768 - x) shared across this file.
+// dav1d declares angle_delta[8][8] (6 explicit CDF entries + 0 sentinel +
+// counter), so Go side uses [8][8] and calls SymbolAdapt(cdf, 7).
+// ---------------------------------------------------------------------------
+
+// AngleDeltaCDFDefault [mode-VERT_PRED][n_syms+sentinel+counter=8].
+// Mode index follows dav1d enum (matches Go IntraPredMode):
+//
+//	0 V_PRED, 1 H_PRED, 2 D45 (DiagDownLeft), 3 D135 (DiagDownRight),
+//	4 D113 (VertRight), 5 D157 (HorDown), 6 D203 (HorUp), 7 D67 (VertLeft).
+var AngleDeltaCDFDefault = [8][8]uint16{
+	{30588, 27736, 25201, 9992, 5779, 2551, 0, 0},   // V    CDF6(2180,5032,7567,22776,26989,30217)
+	{30467, 27160, 23967, 9281, 5794, 2438, 0, 0},   // H    CDF6(2301,5608,8801,23487,26974,30330)
+	{28988, 21750, 19069, 13414, 9685, 1482, 0, 0},  // D45  CDF6(3780,11018,13699,19354,23083,31286)
+	{28187, 21542, 17621, 15630, 10934, 4371, 0, 0}, // D135 CDF6(4581,11226,15147,17138,21834,28397)
+	{31031, 21841, 18259, 13180, 10023, 3945, 0, 0}, // D113 CDF6(1737,10927,14509,19588,22745,28823)
+	{30104, 22592, 20283, 15118, 11168, 2273, 0, 0}, // D157 CDF6(2664,10176,12485,17650,21600,30495)
+	{30528, 21672, 17315, 12427, 10207, 3851, 0, 0}, // D203 CDF6(2240,11096,15453,20341,22561,28917)
+	{29163, 22340, 20309, 15092, 11524, 2113, 0, 0}, // D67  CDF6(3605,10428,12459,17676,21244,30655)
 }

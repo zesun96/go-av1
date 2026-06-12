@@ -145,6 +145,15 @@ func (m *MSAC) Symbol(cdf []uint16, n int) uint32 {
 		if c >= v {
 			break
 		}
+		// Defensive: dav1d guarantees cdf[n-1] == 0 sentinel so this loop
+		// always exits within val ≤ n-1. Some default tables in this port
+		// have non-zero cdf[n-1] (counter doubling as sentinel), which can
+		// let val advance past n-1 and read cdf[n] (counter slot). Cap val
+		// at n-1 to avoid out-of-bounds while still terminating correctly.
+		if val >= nMinus1 {
+			val = nMinus1
+			break
+		}
 	}
 	m.ctxNorm(m.dif-(uint64(v)<<(ecWinSize-16)), u-v)
 	return val

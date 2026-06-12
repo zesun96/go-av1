@@ -205,7 +205,7 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 			return nil
 		}
 		// Decode all tiles into the pending picture.
-		fb := picToFrameBuf(d.pendingPic)
+		fb := d.picToFrameBuf(d.pendingPic)
 		tile.DecodeTileGroup(o.Payload, d.pendingFhdr, d.seq, fb, d.logf) //nolint:errcheck
 		d.finishFrame(d.pendingPic, d.pendingFhdr)
 		d.pendingFhdr = nil
@@ -237,7 +237,7 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 
 		pic := d.allocPicture(&fhdr)
 		tilePayload := frameOBUTilePayload(o.Payload, consumed)
-		fb := picToFrameBuf(pic)
+		fb := d.picToFrameBuf(pic)
 		tile.DecodeTileGroup(tilePayload, &fhdr, d.seq, fb, d.logf) //nolint:errcheck
 		d.finishFrame(pic, &fhdr)
 
@@ -289,8 +289,8 @@ func (d *decoderImpl) obuRefs() *[header.NumRefFrames]obu.FrameReference {
 
 // picToFrameBuf wraps a *Picture as a tile.FrameBuf so the tile package does
 // not need to import pkg/av1 (which would create an import cycle).
-func picToFrameBuf(p *Picture) *tile.FrameBuf {
-	return &tile.FrameBuf{
+func (d *decoderImpl) picToFrameBuf(p *Picture) *tile.FrameBuf {
+	fb := &tile.FrameBuf{
 		Y:          p.Y,
 		StrideY:    p.StrideY,
 		Width:      p.Width,
@@ -302,6 +302,25 @@ func picToFrameBuf(p *Picture) *tile.FrameBuf {
 		ChromaH:    p.ChromaHeight(),
 		Monochrome: p.Chroma == ChromaMonochrome,
 	}
+	for i, ref := range d.refs {
+		if ref.pic == nil {
+			continue
+		}
+		rp := ref.pic
+		fb.Refs[i] = &tile.PlaneBuf{
+			Y:          rp.Y,
+			StrideY:    rp.StrideY,
+			Width:      rp.Width,
+			Height:     rp.Height,
+			U:          rp.U,
+			V:          rp.V,
+			StrideUV:   rp.StrideUV,
+			ChromaW:    rp.ChromaWidth(),
+			ChromaH:    rp.ChromaHeight(),
+			Monochrome: rp.Chroma == ChromaMonochrome,
+		}
+	}
+	return fb
 }
 
 // allocPicture creates a new Picture for the given frame header.

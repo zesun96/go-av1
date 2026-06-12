@@ -54,6 +54,23 @@ const (
 	NSub8x8Partitions = PartitionTTopSplit
 )
 
+var alPartCtx = [2][NBlockLevels][NPartitions]uint8{
+	{
+		{0x00, 0x00, 0x10, 0xff, 0x00, 0x10, 0x10, 0x10, 0xff, 0xff},
+		{0x10, 0x10, 0x18, 0xff, 0x10, 0x18, 0x18, 0x18, 0x10, 0x1c},
+		{0x18, 0x18, 0x1c, 0xff, 0x18, 0x1c, 0x1c, 0x1c, 0x18, 0x1e},
+		{0x1c, 0x1c, 0x1e, 0xff, 0x1c, 0x1e, 0x1e, 0x1e, 0x1c, 0x1f},
+		{0x1e, 0x1e, 0x1f, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+	},
+	{
+		{0x00, 0x10, 0x00, 0xff, 0x10, 0x10, 0x00, 0x10, 0xff, 0xff},
+		{0x10, 0x18, 0x10, 0xff, 0x18, 0x18, 0x10, 0x18, 0x1c, 0x10},
+		{0x18, 0x1c, 0x18, 0xff, 0x1c, 0x1c, 0x18, 0x1c, 0x1e, 0x18},
+		{0x1c, 0x1e, 0x1c, 0xff, 0x1e, 0x1e, 0x1c, 0x1e, 0x1f, 0x1c},
+		{0x1e, 0x1f, 0x1e, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+	},
+}
+
 // AV1 intra prediction mode enumeration, mirroring dav1d enum IntraPredMode.
 const (
 	DCPred = iota
@@ -74,7 +91,6 @@ const (
 )
 
 // Av1Block holds per-block decoding state, mirroring dav1d Av1Block.
-// For M3.d (intra-only), only the intra union fields are populated.
 type Av1Block struct {
 	Bl       uint8 // BlockLevel
 	Bs       uint8 // BlockSize
@@ -94,4 +110,87 @@ type Av1Block struct {
 	CflAlpha [2]int8 // CFL signed scale factors [U, V]
 
 	// Inter fields (populated when Intra == false; future milestone)
+}
+
+// bsizeFromDim maps a (bw, bh) pair in luma pixel units to the BlockSize
+// enum index (BS128x128 .. BS4x4). Returns -1 if the dimensions do not
+// match a valid AV1 block size.
+func bsizeFromDim(bw, bh int) int {
+	switch {
+	case bw == 128 && bh == 128:
+		return BS128x128
+	case bw == 128 && bh == 64:
+		return BS128x64
+	case bw == 64 && bh == 128:
+		return BS64x128
+	case bw == 64 && bh == 64:
+		return BS64x64
+	case bw == 64 && bh == 32:
+		return BS64x32
+	case bw == 64 && bh == 16:
+		return BS64x16
+	case bw == 32 && bh == 64:
+		return BS32x64
+	case bw == 32 && bh == 32:
+		return BS32x32
+	case bw == 32 && bh == 16:
+		return BS32x16
+	case bw == 32 && bh == 8:
+		return BS32x8
+	case bw == 16 && bh == 64:
+		return BS16x64
+	case bw == 16 && bh == 32:
+		return BS16x32
+	case bw == 16 && bh == 16:
+		return BS16x16
+	case bw == 16 && bh == 8:
+		return BS16x8
+	case bw == 16 && bh == 4:
+		return BS16x4
+	case bw == 8 && bh == 32:
+		return BS8x32
+	case bw == 8 && bh == 16:
+		return BS8x16
+	case bw == 8 && bh == 8:
+		return BS8x8
+	case bw == 8 && bh == 4:
+		return BS8x4
+	case bw == 4 && bh == 16:
+		return BS4x16
+	case bw == 4 && bh == 8:
+		return BS4x8
+	case bw == 4 && bh == 4:
+		return BS4x4
+	}
+	return -1
+}
+
+// palSzCtx returns dav1d's sz_ctx = log2(bw4) + log2(bh4) - 2 used by
+// pal_y / pal_sz CDFs. Caller must guarantee bw,bh >= 4 (i.e. bw4,bh4 >= 1).
+// The result is clamped to [0,6].
+func palSzCtx(bw, bh int) int {
+	log2 := func(v int) int {
+		n := 0
+		for v > 1 {
+			v >>= 1
+			n++
+		}
+		return n
+	}
+	bw4 := bw >> 2
+	bh4 := bh >> 2
+	if bw4 < 1 {
+		bw4 = 1
+	}
+	if bh4 < 1 {
+		bh4 = 1
+	}
+	c := log2(bw4) + log2(bh4) - 2
+	if c < 0 {
+		return 0
+	}
+	if c > 6 {
+		return 6
+	}
+	return c
 }

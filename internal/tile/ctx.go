@@ -110,6 +110,49 @@ type TileCtx struct {
 	// Segment ID CDF [3 ctx][8 syms+counter].
 	// -----------------------------------------------------------------------
 	SegIDCDF [3][8]uint16
+
+	// Delta-q / delta-lf CDFs and tile-local state.
+	DeltaQCDF     [5]uint16
+	DeltaLFCDF    [5][5]uint16
+	LastQIdx      int
+	LastQIdxValid bool
+	LastDeltaLF   [4]int8
+
+	// -----------------------------------------------------------------------
+	// Filter-intra CDFs (A1).
+	//   UseFilterIntraCDF[bs][2]    : binary, read after y_mode==DC_PRED.
+	//   FilterIntraModeCDF[6]       : 5 modes + counter.
+	// -----------------------------------------------------------------------
+	UseFilterIntraCDF  [NBlockSizes][2]uint16
+	FilterIntraModeCDF [6]uint16
+
+	// -----------------------------------------------------------------------
+	// Palette CDFs (A2).
+	//   PaletteYCDF[sz_ctx=7][pal_ctx=3][2] : binary use_palette_y.
+	//   PaletteUVCDF[pal_ctx=2][2]          : binary use_palette_uv.
+	// Read only when frame_hdr.allow_screen_content_tools && y/uv_mode==DC_PRED
+	// && imax(bw4,bh4)<=16 && bw4+bh4>=4. sz_ctx = log2(bw4)+log2(bh4)-2.
+	// -----------------------------------------------------------------------
+	PaletteYCDF  [7][3][2]uint16
+	PaletteUVCDF [2][2]uint16
+
+	// -----------------------------------------------------------------------
+	// Tx-size CDFs (A3).
+	//   TxSzCDF[tx_max-1=4][tctx=3][n_syms+1=4]: depth symbol read when
+	//   txfm_mode==SWITCHABLE && t_dim.Max > TX_4x4. n_syms = imin(max,2)+1.
+	//   For max=1 (TX_8x8) only cdf[0..1] is used (2 syms); for max>=2 the
+	//   full cdf[0..3] is used (3 syms).
+	// -----------------------------------------------------------------------
+	TxSzCDF [4][3][4]uint16
+
+	// -----------------------------------------------------------------------
+	// Angle-delta CDFs (A6).
+	//   AngleDeltaCDF[mode-VERT_PRED][8] : 7 syms (delta = val-3) + counter.
+	// Read only when bw4*bh4 >= 4 (i.e. !(4x4|4x8|8x4)) and the intra mode
+	// is in [VERT_PRED..VERT_LEFT_PRED]. Used for both luma (after y_mode)
+	// and chroma (after uv_mode, when uv is not CFL).
+	// -----------------------------------------------------------------------
+	AngleDeltaCDF [8][8]uint16
 }
 
 // NewTileCtx allocates a TileCtx and copies the default CDF values into it.
@@ -157,6 +200,24 @@ func NewTileCtx() *TileCtx {
 
 	// Segment
 	ctx.SegIDCDF = SegIDCDFDefault
+
+	// Delta-q / delta-lf
+	ctx.DeltaQCDF = DeltaQCDFDefault
+	ctx.DeltaLFCDF = DeltaLFCDFDefault
+
+	// Filter-intra (A1)
+	ctx.UseFilterIntraCDF = UseFilterIntraCDFDefault
+	ctx.FilterIntraModeCDF = FilterIntraModeCDFDefault
+
+	// Palette flags (A2)
+	ctx.PaletteYCDF = PaletteYCDFDefault
+	ctx.PaletteUVCDF = PaletteUVCDFDefault
+
+	// Tx-size depth (A3)
+	ctx.TxSzCDF = TxSzCDFDefault
+
+	// Angle delta (A6)
+	ctx.AngleDeltaCDF = AngleDeltaCDFDefault
 
 	// Sentinel fix-up: several CDFs were imported from dav1d in its native
 	// storage form (n explicit values followed by a single counter slot, with
