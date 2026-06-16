@@ -6,7 +6,7 @@ package tile
 // disabled in the current implementation).
 //
 // Context index conventions (mirroring dav1d):
-//   - Partition:  ctx = (hasAbove<<1) | hasLeft  (0-3)
+//   - Partition:  ctx = hasAbove | (hasLeft<<1)  (0-3)
 //   - Skip:       ctx = aboveSkip + leftSkip       (0-2)
 //   - KFY mode:   ctx = [topMode][leftMode]         (0-4 each)
 //   - UV mode:    ctx = [cfl_allowed][y_mode]
@@ -133,8 +133,10 @@ type TileCtx struct {
 	// Read only when frame_hdr.allow_screen_content_tools && y/uv_mode==DC_PRED
 	// && imax(bw4,bh4)<=16 && bw4+bh4>=4. sz_ctx = log2(bw4)+log2(bh4)-2.
 	// -----------------------------------------------------------------------
-	PaletteYCDF  [7][3][2]uint16
-	PaletteUVCDF [2][2]uint16
+	PaletteYCDF    [7][3][2]uint16
+	PaletteUVCDF   [2][2]uint16
+	PaletteSizeCDF [2][7][8]uint16
+	ColorMapCDF    [2][7][5][8]uint16
 
 	// -----------------------------------------------------------------------
 	// Tx-size CDFs (A3).
@@ -144,6 +146,12 @@ type TileCtx struct {
 	//   full cdf[0..3] is used (3 syms).
 	// -----------------------------------------------------------------------
 	TxSzCDF [4][3][4]uint16
+
+	// -----------------------------------------------------------------------
+	// Var-tx partition CDFs.
+	//   TxPartCDF[cat=7][ctx=3][2]: binary split flag used by read_tx_tree.
+	// -----------------------------------------------------------------------
+	TxPartCDF [7][3][2]uint16
 
 	// -----------------------------------------------------------------------
 	// Angle-delta CDFs (A6).
@@ -212,9 +220,12 @@ func NewTileCtx() *TileCtx {
 	// Palette flags (A2)
 	ctx.PaletteYCDF = PaletteYCDFDefault
 	ctx.PaletteUVCDF = PaletteUVCDFDefault
+	ctx.PaletteSizeCDF = PaletteSizeCDFDefault
+	ctx.ColorMapCDF = ColorMapCDFDefault
 
 	// Tx-size depth (A3)
 	ctx.TxSzCDF = TxSzCDFDefault
+	ctx.TxPartCDF = TxPartCDFDefault
 
 	// Angle delta (A6)
 	ctx.AngleDeltaCDF = AngleDeltaCDFDefault
@@ -246,22 +257,28 @@ func NewTileCtx() *TileCtx {
 		ctx.EobBin1024CDF[i][9] = 0
 	}
 
-	// dav1d-shape *Full fields: broadcast the M7 4-bucket defaults across all
-	// new dimensions so Task 2 has a valid starting CDF the moment it switches
-	// over. Task 2 / Task 7 will replace this with verbatim dav1d data when
-	// PSNR validation requires it.
-	initCoefFullDefaults(ctx)
+	// dav1d-shape *Full fields: initialize the live grouped residual defaults
+	// as one coherent slice. EOB-bin tables are sourced from the existing exact
+	// Go defaults; base/br/eob_base/eob_hi/coef_skip come from the structured
+	// qcat=0 defaults derived from dav1d default_coef_cdf[0].
+	initCoefLiveDefaults(ctx)
 
 	return ctx
 }
 
-// initCoefFullDefaults broadcasts the simplified 4-bucket M7 default CDF
-// values across the dav1d-shape *Full fields. This keeps the Task 2 cut-over
-// CDF-valid (no zero divisor in MSAC) without requiring the full ~6KB
-// default_coef_cdf table from dav1d/src/cdf.c (which Task 7 ports verbatim).
-func initCoefFullDefaults(ctx *TileCtx) {
-	// EOB bin: copy the [2][2] M7 defaults; deeper sizes use their existing
-	// [2][N] table, broadcast across the is_1d dimension.
+// initCoefLiveDefaults initializes the live dav1d-shape coefficient state as
+// one grouped slice. This keeps the active path out of the old
+// "synthetic then overlay" startup pattern and makes the retained baseline
+// explicit.
+func initCoefLiveDefaults(ctx *TileCtx) {
+	initCoefEOBBinDefaults(ctx)
+	initCoefFullDefaultsQ0(ctx)
+}
+
+// initCoefEOBBinDefaults seeds the dav1d-shaped EOB-bin storage from the
+// existing exact Go tables. These tables are already used live and do not
+// depend on the qcat=0 coefficient-prior cutover.
+func initCoefEOBBinDefaults(ctx *TileCtx) {
 	for p := 0; p < 2; p++ {
 		for i := 0; i < 2; i++ {
 			copy(ctx.EobBin16Full[p][i][:5], ctx.EobBin16CDF[p][i][:5])
@@ -273,6 +290,14 @@ func initCoefFullDefaults(ctx *TileCtx) {
 		copy(ctx.EobBin512Full[p][:10], ctx.EobBin512CDF[p][:10])
 		copy(ctx.EobBin1024Full[p][:11], ctx.EobBin1024CDF[p][:11])
 	}
+}
+
+// initCoefFullDefaults broadcasts the simplified 4-bucket M7 default CDF
+// values across the dav1d-shape *Full fields. This keeps the Task 2 cut-over
+// CDF-valid (no zero divisor in MSAC) without requiring the full ~6KB
+// default_coef_cdf table from dav1d/src/cdf.c (which Task 7 ports verbatim).
+func initCoefFullDefaults(ctx *TileCtx) {
+	initCoefEOBBinDefaults(ctx)
 
 	// base_tok: broadcast 4-bucket default across (txSize, plane, 41 ctx).
 	// Layout: [val0][val1][val2][sentinel=0][counter=0]
@@ -297,7 +322,6 @@ func initCoefFullDefaults(ctx *TileCtx) {
 			}
 		}
 	}
-
 	// br_tok[4][2][21][5] — same layout as base_tok.
 	for s := 0; s < 4; s++ {
 		for p := 0; p < 2; p++ {
@@ -312,7 +336,9 @@ func initCoefFullDefaults(ctx *TileCtx) {
 		}
 	}
 
-	// eob_hi_bit[5][2][9][2]: 1-symbol CDF with 50/50 prior.
+	// eob_hi_bit[5][2][9][2]: keep a neutral prior until the full coefficient
+	// CDF path is switched over coherently. Real qcat=0 values without matching
+	// base/br/eob_base tables regress the current stream sharply.
 	for t := 0; t < N_TX_SIZES; t++ {
 		for p := 0; p < 2; p++ {
 			for b := 0; b < 9; b++ {
@@ -322,11 +348,43 @@ func initCoefFullDefaults(ctx *TileCtx) {
 		}
 	}
 
-	// coef_skip[5][13][2]: replicate the M7 SkipCDF[3] mid-prob value.
+	// coef_skip[5][13][2]: use a neutral prior until the full coefficient CDF
+	// path is switched over. Real dav1d skip priors without matching base/br/eob
+	// token tables regress the current stream sharply.
 	for t := 0; t < N_TX_SIZES; t++ {
 		for c := 0; c < 13; c++ {
 			ctx.CoefSkipFull[t][c][0] = 16384
 			ctx.CoefSkipFull[t][c][1] = 0
+		}
+	}
+}
+
+// initCoefFullDefaultsQ0 loads the full qcat=0 coefficient defaults derived
+// from dav1d default_coef_cdf[0]. Keep this separate from initCoefFullDefaults:
+// experiments showed that switching only a subset of these tables regresses the
+// current stream sharply, so the live path should only move over as one cut.
+func initCoefFullDefaultsQ0(ctx *TileCtx) {
+	for t := 0; t < N_TX_SIZES; t++ {
+		for p := 0; p < 2; p++ {
+			for c := 0; c < 41; c++ {
+				copy(ctx.BaseTokFull[t][p][c][:], BaseTokFullDefaultQ0[t][p][c][:])
+			}
+			for c := 0; c < 4; c++ {
+				copy(ctx.EobBaseTokFull[t][p][c][:], EobBaseTokFullDefaultQ0[t][p][c][:])
+			}
+			for b := 0; b < 9; b++ {
+				copy(ctx.EobHiBitFull[t][p][b][:], EobHiBitFullDefaultQ0[t][p][b][:])
+			}
+		}
+		for c := 0; c < 13; c++ {
+			copy(ctx.CoefSkipFull[t][c][:], CoefSkipFullDefaultQ0[t][c][:])
+		}
+	}
+	for s := 0; s < 4; s++ {
+		for p := 0; p < 2; p++ {
+			for c := 0; c < 21; c++ {
+				copy(ctx.BrTokFull[s][p][c][:], BrTokFullDefaultQ0[s][p][c][:])
+			}
 		}
 	}
 }

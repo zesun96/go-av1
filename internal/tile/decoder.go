@@ -17,7 +17,9 @@ import (
 
 	"github.com/zesun96/go-av1/internal/bitstream"
 	"github.com/zesun96/go-av1/internal/header"
+	predinter "github.com/zesun96/go-av1/internal/predict/inter"
 	"github.com/zesun96/go-av1/internal/predict/intra"
+	"github.com/zesun96/go-av1/internal/refmvs"
 	"github.com/zesun96/go-av1/internal/transform"
 )
 
@@ -245,7 +247,7 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 
 	// Select partition CDF and symbol count based on block level.
 	// AV1 spec: 128x128→8 syms, 64/32/16→10 syms, 8x8→4 syms.
-	// Context: partCtx = (hasAbove<<1) | hasLeft from FrameState.
+	// Context: partCtx = hasAbove | (hasLeft<<1) from FrameState.
 	partCtx := fs.PartCtx(bx, by, bl)
 	var partCDF []uint16
 	var nPart int
@@ -463,13 +465,7 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	// For inter frames, treat every block as intra DC128 (M7 stub).
 
 	if !isIntra {
-		// Inter frame block: first-stage MC fallback. Full inter syntax and
-		// MV decoding land next; until then, copy the same-position block from
-		// the first available reference instead of painting grey.
-		fs.SetBlockSeg(bx, by, bw, bh, skip, DCPred, segID)
-		if !copyInterRefBlock(fb, bx, by, bw, bh) {
-			fillDC128(fb, bx, by, bw, bh)
-		}
+		decodeInterBlockFallback(fs, fhdr, seq, fb, segID, skip, bx, by, bw, bh)
 		return
 	}
 
@@ -491,19 +487,19 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	}
 
 	// --- Angle-delta luma (A6: bit consume only) ---
-	// dav1d decode_b L1060-L1069: when bw4*bh4 >= 4 (i.e. not 4x4/4x8/8x4)
+	// dav1d decode_b L1060-L1069: when b_dim[2]+b_dim[3] >= 2
 	// and y_mode is in [VERT_PRED..VERT_LEFT_PRED], read a 7-symbol delta.
-	// We currently only consume the bits to keep the bitstream aligned;
-	// directional predictors continue to use their nominal angles.
 	var yAngleDelta int
-	if yMode >= VertPred && yMode <= VertLeftPred && (bw>>2)*(bh>>2) >= 4 {
+	if yMode >= VertPred && yMode <= VertLeftPred && angleDeltaAllowed(bw, bh) {
 		v := int(m.SymbolAdapt(ctx.AngleDeltaCDF[yMode-VertPred][:], 7))
 		yAngleDelta = v - 3
 	}
-	_ = yAngleDelta
 
 	// --- Intra UV mode ---
 	cflAllowed := 0
+	if hasChroma && cflAllowedForBlock(seq, bw, bh, lossless) {
+		cflAllowed = 1
+	}
 	uvMode := DCPred
 	if hasChroma {
 		uvModeSyms := NIntraPredModes
@@ -517,89 +513,93 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	// dav1d decode_b L1107-L1113: when uv_mode is not CFL_PRED, the same
 	// gating as luma applies and a chroma angle delta is read.
 	var uvAngleDelta int
-	if hasChroma && uvMode >= VertPred && uvMode <= VertLeftPred && (bw>>2)*(bh>>2) >= 4 {
+	if hasChroma && uvMode >= VertPred && uvMode <= VertLeftPred && angleDeltaAllowed(bw, bh) {
 		v := int(m.SymbolAdapt(ctx.AngleDeltaCDF[uvMode-VertPred][:], 7))
 		uvAngleDelta = v - 3
 	}
-	_ = uvAngleDelta
 
-	// --- Palette flags (A2: bit consume only) ---
-	// dav1d decode_b L1116-L1140 reads use_palette_y / use_palette_uv when
-	// allow_screen_content_tools is enabled and the block is mid-sized
-	// (max(bw4,bh4) <= 16, bw4+bh4 >= 4). webrtc captured streams typically
-	// have allow_screen_content_tools=0 so this branch is not exercised, but
-	// the gate is wired in so SCT-enabled streams stop drifting at this
-	// position. Full pal_sz / palette_colors / palette_indices decode is
-	// deferred (dav1d_read_pal_plane / read_pal_indices) — when use_pal=1 the
-	// remainder of the bitstream will desynchronise; the surrounding tile
-	// recover() in DecodeTile prevents a crash.
+	// --- Palette flags / size syntax ---
 	var palSzY, palSzUV int
+	var pal [3][8]uint8
+	var palIdxY, palIdxUV []uint8
 	if fhdr.AllowScreenContentTools != 0 && bw <= 64 && bh <= 64 && (bw+bh) >= 16 {
 		szCtx := palSzCtx(bw, bh)
 		if yMode == DCPred {
-			// pal_ctx = (above pal>0) + (left pal>0); we have no palette
-			// neighbour tracking yet, so use the conservative pal_ctx=0.
-			palCtx := 0
+			palCtx := fs.PaletteYCtx(bx, by)
 			if m.BoolAdapt(ctx.PaletteYCDF[szCtx][palCtx][:]) != 0 {
-				palSzY = -1 // marker: not implemented; bitstream will drift
+				palSzY = int(m.SymbolAdapt(ctx.PaletteSizeCDF[0][szCtx][:], 7)) + 2
+				pal[0] = readPalettePlane(m, ctx, fs, seq, 0, szCtx, bx, by, palSzY)
 			}
 		}
 		if hasChroma && uvMode == DCPred {
-			palCtx := 0
-			if palSzY > 0 {
+			palCtx := fs.PaletteUVCtx(bx, by)
+			if palSzY > 0 || palCtx != 0 {
 				palCtx = 1
 			}
 			if m.BoolAdapt(ctx.PaletteUVCDF[palCtx][:]) != 0 {
-				palSzUV = -1 // marker: not implemented
+				palSzUV = int(m.SymbolAdapt(ctx.PaletteSizeCDF[1][szCtx][:], 7)) + 2
+				pal[1], pal[2] = readPaletteUV(m, ctx, fs, seq, szCtx, bx, by, palSzUV)
 			}
 		}
 	}
-	_ = palSzUV
+	fs.SetPaletteCtx(bx, by, bw, bh, palSzY, palSzUV)
 
-	// --- Filter-intra (A1: bit consume only) ---
-	// dav1d decode_b L1142-L1155: when seq.FilterIntra is enabled,
-	// y_mode==DC_PRED, no Y palette, and max(b_dim[2],b_dim[3]) <= 3 (i.e.
-	// max(bw,bh) <= 32), read use_filter_intra (binary). On 1, read a 5-mode
-	// filter intra mode. We currently only consume these bits to keep the
-	// rest of the bitstream aligned; prediction still falls back to DC.
+	// --- Filter-intra ---
+	// When enabled on eligible DC-predicted luma blocks, decode the
+	// filter intra mode and route prediction through FILTER_PRED.
+	filterMode := -1
 	if seq.FilterIntra && yMode == DCPred && palSzY == 0 && bw <= 32 && bh <= 32 {
 		bs := bsizeFromDim(bw, bh)
 		if bs >= 0 {
 			useFI := m.BoolAdapt(ctx.UseFilterIntraCDF[bs][:])
 			if useFI != 0 {
-				_ = m.SymbolAdapt(ctx.FilterIntraModeCDF[:], 5)
+				filterMode = int(m.SymbolAdapt(ctx.FilterIntraModeCDF[:], 5))
 			}
 		}
+	}
+	yModeNofilt := yMode
+	if filterMode >= 0 && filterMode < len(FilterModeToYMode) {
+		yModeNofilt = int(FilterModeToYMode[filterMode])
+	}
+	if palSzY > 0 {
+		palIdxY = readPalIndices(m, &ctx.ColorMapCDF[0][palSzY-2], palSzY, bw, bh, bw, bh)
+	}
+	if hasChroma && palSzUV > 0 {
+		_, _, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
+		palIdxUV = readPalIndices(m, &ctx.ColorMapCDF[1][palSzUV-2], palSzUV, cbw, cbh, cbw, cbh)
 	}
 
 	// --- Transform size selection (M7: use largest fitting square tx) ---
 	txY := largestTx(bw, bh)
-	txUV := largestTx((bw+1)/2, (bh+1)/2)
+	_, _, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
+	txUV := largestTx(cbw, cbh)
+	var yTxBlocks []txBlockSpec
+	var blockState Av1Block
 
-	// --- Tx-size depth (A3: bit consume only) ---
-	// dav1d decode_b L1185-L1206: when txfm_mode==SWITCHABLE && t_dim.max>TX_4x4
-	// and not lossless, read a depth symbol from txsz[max-1][tctx] with
-	// imin(max,2)+1 symbols. Each unit of depth subdivides tx by one level
-	// (tx = t_dim.Sub). webrtc captured streams typically use TxfmModeLargest
-	// (mode=1) so this branch is not exercised; we wire it in for SWITCHABLE
-	// streams to stop drifting at this position.
-	if !lossless && fhdr.TxfmMode == header.TxfmModeSwitchable {
-		tDim := transform.TxfmDimensions[txY]
-		if tDim.Max > 0 { // > TX_4x4
-			// tctx = (above tx < txw) + (left tx < txh); we have no above/left
-			// tx tracking yet, conservative tctx=0.
-			tctx := 0
-			nSyms := int(tDim.Max)
-			if nSyms > 2 {
-				nSyms = 2
-			}
-			nSyms++ // imin(max,2) + 1
-			depth := int(m.SymbolAdapt(ctx.TxSzCDF[tDim.Max-1][tctx][:], nSyms))
-			for d := 0; d < depth; d++ {
-				txY = tDim.Sub
-				tDim = transform.TxfmDimensions[txY]
-			}
-		}
+	blockState.Tx = txY
+	blockState.MaxYTx = txY
+	blockState.Intra = true
+	blockState.SegID = segID
+	blockState.Skip = skip
+	blockState.YMode = uint8(yModeNofilt)
+	blockState.UvMode = uint8(uvMode)
+	blockState.YAngle = int8(yAngleDelta)
+	blockState.UvAngle = int8(uvAngleDelta)
+	blockState.PalSz = [2]uint8{uint8(maxInt(palSzY, 0)), uint8(maxInt(palSzUV, 0))}
+
+	switch {
+	case skip:
+		fs.SetTxCtx(bx, by, bw, bh, txY, fhdr.TxfmMode == header.TxfmModeSwitchable, true)
+	case lossless:
+		txY = transform.TX4x4
+		txUV = transform.TX4x4
+		blockState.Tx = txY
+		blockState.MaxYTx = txY
+		fs.SetTxCtx(bx, by, bw, bh, txY, fhdr.TxfmMode == header.TxfmModeSwitchable, false)
+	case fhdr.TxfmMode == header.TxfmModeSwitchable:
+		txY, yTxBlocks, blockState = readVarTxTree(m, ctx, fs, bx, by, bw, bh, txY)
+	default:
+		fs.SetTxCtx(bx, by, bw, bh, txY, false, false)
 	}
 	dqY := [2]uint16{
 		transform.DqTbl[0][clampQIdx(qidx+int(fhdr.Quant.YDCDelta))][0],
@@ -617,15 +617,21 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	reducedTxtpSet := fhdr.ReducedTxtpSet != 0
 
 	// --- Luma plane ---
-	decodeIntraPlane(m, ctx, fb, 0, bx, by, bw, bh, txY, yMode, 0, dqY, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
+	if palSzY > 0 {
+		if len(yTxBlocks) > 0 {
+			decodePalettePlaneVarTx(m, ctx, fs, fb, 0, bx, by, bw, bh, yTxBlocks, pal[0], palIdxY, dqY, skip, yModeNofilt, reducedTxtpSet, qidxIsZero, lossless)
+		} else {
+			decodePalettePlane(m, ctx, fs, fb, 0, bx, by, bw, bh, txY, pal[0], palIdxY, dqY, skip, yModeNofilt, reducedTxtpSet, qidxIsZero, lossless)
+		}
+	} else if len(yTxBlocks) > 0 {
+		decodeIntraPlaneVarTx(m, ctx, fs, fb, 0, bx, by, bw, bh, yTxBlocks, yMode, yAngleDelta, filterMode, dqY, skip, yModeNofilt, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
+	} else {
+		decodeIntraPlane(m, ctx, fs, fb, 0, bx, by, bw, bh, txY, yMode, yAngleDelta, filterMode, 0, dqY, skip, yModeNofilt, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
+	}
 
 	// --- Chroma planes (skip for monochrome) ---
 	if hasChroma && len(fb.U) > 0 {
-		// Chroma block position/size (4:2:0 subsampling).
-		cbx := bx / 2
-		cby := by / 2
-		cbw := (bw + 1) / 2
-		cbh := (bh + 1) / 2
+		cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
 
 		var cflAlphaU, cflAlphaV int8 // CFL alpha parameters
 
@@ -634,20 +640,26 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 			cflAlphaU, cflAlphaV = decodeCFLAlphas(m, ctx)
 		}
 
-		if uvMode == CFLPred {
+		if palSzUV > 0 {
+			decodePalettePlane(m, ctx, fs, fb, 1, cbx, cby, cbw, cbh, txUV, pal[1], palIdxUV, dqU, skip, yMode, reducedTxtpSet, qidxIsZero, lossless)
+			decodePalettePlane(m, ctx, fs, fb, 2, cbx, cby, cbw, cbh, txUV, pal[2], palIdxUV, dqV, skip, yMode, reducedTxtpSet, qidxIsZero, lossless)
+		} else if uvMode == CFLPred {
 			// Build zero-mean luma AC buffer (4:2:0 subsampled from reconstructed Y).
-			acCfl := buildCflAc(fb, bx, by, bw, bh, cbw, cbh)
+			acCfl := buildCflAc(fb, seq, bx, by, bw, bh, cbw, cbh)
 			// CFL prediction: chroma = DC_chroma + (alpha*luma_AC + 32) >> 6.
-			decodeIntraPlaneCFL(m, ctx, fb, 1, cbx, cby, cbw, cbh, txUV, int(cflAlphaU), dqU, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless, acCfl)
-			decodeIntraPlaneCFL(m, ctx, fb, 2, cbx, cby, cbw, cbh, txUV, int(cflAlphaV), dqV, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless, acCfl)
+			decodeIntraPlaneCFL(m, ctx, fs, fb, 1, cbx, cby, cbw, cbh, txUV, int(cflAlphaU), dqU, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless, acCfl)
+			decodeIntraPlaneCFL(m, ctx, fs, fb, 2, cbx, cby, cbw, cbh, txUV, int(cflAlphaV), dqV, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless, acCfl)
 		} else {
-			decodeIntraPlane(m, ctx, fb, 1, cbx, cby, cbw, cbh, txUV, uvMode, 0, dqU, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
-			decodeIntraPlane(m, ctx, fb, 2, cbx, cby, cbw, cbh, txUV, uvMode, 0, dqV, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
+			decodeIntraPlane(m, ctx, fs, fb, 1, cbx, cby, cbw, cbh, txUV, uvMode, uvAngleDelta, -1, 0, dqU, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
+			decodeIntraPlane(m, ctx, fs, fb, 2, cbx, cby, cbw, cbh, txUV, uvMode, uvAngleDelta, -1, 0, dqV, skip, yMode, reducedTxtpSet, fhdr, seq, qidxIsZero, lossless)
 		}
 	}
 
 	// Record decoded block state for future neighbour context derivation.
-	fs.SetBlockSeg(bx, by, bw, bh, skip, yMode, segID)
+	if palSzY > 0 || palSzUV > 0 {
+		fs.SetPaletteColors(bx, by, bw, bh, pal)
+	}
+	fs.SetBlockSeg(bx, by, bw, bh, skip, yModeNofilt, segID)
 }
 
 func blockHasChroma(seq *header.SequenceHeader, fb *FrameBuf, bx, by, bw, bh int) bool {
@@ -661,6 +673,16 @@ func blockHasChroma(seq *header.SequenceHeader, fb *FrameBuf, bx, by, bw, bh int
 	ssHor := int(seq.SsHor)
 	ssVer := int(seq.SsVer)
 	return (bw4 > ssHor || (bx4&1) != 0) && (bh4 > ssVer || (by4&1) != 0)
+}
+
+func chromaRect(seq *header.SequenceHeader, bx, by, bw, bh int) (cbx, cby, cbw, cbh int) {
+	ssHor := int(seq.SsHor)
+	ssVer := int(seq.SsVer)
+	cbx = bx >> ssHor
+	cby = by >> ssVer
+	cbw = (bw + (1 << ssHor) - 1) >> ssHor
+	cbh = (bh + (1 << ssVer) - 1) >> ssVer
+	return
 }
 
 func cflAllowedForBlock(seq *header.SequenceHeader, bw, bh int, lossless bool) bool {
@@ -875,60 +897,101 @@ func decodeCFLAlphas(m *bitstream.MSAC, ctx *TileCtx) (int8, int8) {
 // 4:2:0-subsampling the reconstructed luma block at (bx,by,bw,bh) into a
 // cbw×cbh array, then subtracting the mean. The result is in row-major
 // layout, length cbw*cbh.
-func buildCflAc(fb *FrameBuf, bx, by, bw, bh, cbw, cbh int) []int16 {
+func buildCflAc(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh, cbw, cbh int) []int16 {
 	ac := make([]int16, cbw*cbh)
 	if len(fb.Y) == 0 || cbw == 0 || cbh == 0 {
 		return ac
 	}
 	stride := fb.StrideY
-	planeW := fb.Width
-	planeH := fb.Height
-	var sum int32
-	for cy := 0; cy < cbh; cy++ {
-		for cx := 0; cx < cbw; cx++ {
-			lx := bx + cx*2
-			ly := by + cy*2
-			var s int32
-			n := 0
-			for dy := 0; dy < 2; dy++ {
-				yy := ly + dy
-				if yy >= planeH {
-					continue
-				}
-				for dx := 0; dx < 2; dx++ {
-					xx := lx + dx
-					if xx >= planeW {
-						continue
-					}
-					off := yy*stride + xx
-					if off < 0 || off >= len(fb.Y) {
-						continue
-					}
-					s += int32(fb.Y[off])
-					n++
+	ssHor := int(seq.SsHor)
+	ssVer := int(seq.SsVer)
+	validW := (bw + (1 << ssHor) - 1) >> ssHor
+	validH := (bh + (1 << ssVer) - 1) >> ssVer
+	if validW > cbw {
+		validW = cbw
+	}
+	if validH > cbh {
+		validH = cbh
+	}
+
+	for cy := 0; cy < validH; cy++ {
+		rowOff := cy * cbw
+		srcY := by + (cy << ssVer)
+		for cx := 0; cx < validW; cx++ {
+			srcX := bx + (cx << ssHor)
+			acSum := int(fb.Y[srcY*stride+srcX])
+			if ssHor != 0 {
+				acSum += int(fb.Y[srcY*stride+srcX+1])
+			}
+			if ssVer != 0 {
+				acSum += int(fb.Y[(srcY+1)*stride+srcX])
+				if ssHor != 0 {
+					acSum += int(fb.Y[(srcY+1)*stride+srcX+1])
 				}
 			}
-			var avg int32
-			if n > 0 {
-				// dav1d uses sum<<3/n for 4:2:0 (8x scale before subtraction).
-				avg = (s << 3) / int32(n)
-			}
-			ac[cy*cbw+cx] = int16(avg)
-			sum += avg
+			ac[rowOff+cx] = int16(acSum << (1 + btoi(ssVer == 0) + btoi(ssHor == 0)))
+		}
+		for cx := validW; cx < cbw; cx++ {
+			ac[rowOff+cx] = ac[rowOff+cx-1]
 		}
 	}
-	mean := int16(sum / int32(cbw*cbh))
+	for cy := validH; cy < cbh; cy++ {
+		copy(ac[cy*cbw:(cy+1)*cbw], ac[(cy-1)*cbw:cy*cbw])
+	}
+
+	log2sz := ctzPow2(cbw) + ctzPow2(cbh)
+	sum := (1 << log2sz) >> 1
 	for i := range ac {
-		ac[i] -= mean
+		sum += int(ac[i])
+	}
+	sum >>= log2sz
+	for i := range ac {
+		ac[i] -= int16(sum)
 	}
 	return ac
+}
+
+func predictCFLBlock(dst []byte, stride int, tlBuf []byte, tl, bx, by, tw, th, alpha int, ac []int16) {
+	switch {
+	case bx > 0 && by > 0:
+		intra.PredCFLBoth(dst, stride, tlBuf, tl, ac, tw, th, alpha)
+	case by > 0:
+		intra.PredCFLTop(dst, stride, tlBuf, tl, ac, tw, th, alpha)
+	case bx > 0:
+		intra.PredCFLLeft(dst, stride, tlBuf, tl, ac, tw, th, alpha)
+	default:
+		intra.PredCFL128(dst, stride, ac, tw, th, alpha)
+	}
+}
+
+func ctzPow2(v int) int {
+	n := 0
+	for v > 1 && (v&1) == 0 {
+		n++
+		v >>= 1
+	}
+	return n
+}
+
+func btoi(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // decodeIntraPlaneCFL decodes a chroma plane using CFL prediction. It is
 // a CFL-specialised variant of decodeIntraPlane: prediction is built via
 // PredCFL (DC base + alpha*ac), then chroma residual is added on top.
 func decodeIntraPlaneCFL(
-	m *bitstream.MSAC, ctx *TileCtx,
+	m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	fb *FrameBuf,
 	plane, bx, by, bw, bh int,
 	tx uint8,
@@ -991,9 +1054,8 @@ func decodeIntraPlaneCFL(
 			}
 			dst := planeBuf[dstOff:]
 
-			// CFL prediction: derive DC from neighbours, then add alpha*ac.
 			acSlice := cflAcSubBlock(ac, bw, bh, tbx, tby, tw, th)
-			intra.PredCFLBoth(predBuf, tw, tlBuf, tl, acSlice, tw, th, cflAlpha)
+			predictCFLBlock(predBuf, tw, tlBuf, tl, bx+tbx, by+tby, tw, th, cflAlpha, acSlice)
 
 			for row := 0; row < th; row++ {
 				dstRow := (by+tby+row)*stride + (bx + tbx)
@@ -1004,8 +1066,13 @@ func decodeIntraPlaneCFL(
 			}
 
 			if !skip {
-				coeff, eob, txtp := decodeCoefficients(m, ctx, tx, plane, yMode, reducedTxtpSet, qidxIsZero, lossless)
-				if eob > 0 && len(coeff) > 0 {
+				coeffMode := yMode
+				if plane > 0 {
+					coeffMode = CFLPred
+				}
+				coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, tx, plane, bx+tbx, by+tby, bw, bh, coeffMode, reducedTxtpSet, qidxIsZero, lossless)
+				fs.SetCoefCtx(plane, bx+tbx, by+tby, tx, resCtx)
+				if eob >= 0 && len(coeff) > 0 {
 					tdFull := transform.TxfmDimensions[tx]
 					twFull := int(tdFull.W) * 4
 					thFull := int(tdFull.H) * 4
@@ -1014,6 +1081,8 @@ func decodeIntraPlaneCFL(
 						ReconBlock(dst, stride, coeff, eob, tx, txtp, dq, 8)
 					}
 				}
+			} else {
+				fs.SetCoefCtx(plane, bx+tbx, by+tby, tx, 0x40)
 			}
 			updateTopleft(planeBuf, stride, planeW, planeH, bx+tbx, by+tby, tw, th, tlBuf, tl)
 		}
@@ -1042,6 +1111,346 @@ func cflAcSubBlock(ac []int16, cbw, cbh, tbx, tby, tw, th int) []int16 {
 	return out
 }
 
+func decodePalettePlane(
+	m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
+	fb *FrameBuf,
+	plane, bx, by, bw, bh int,
+	tx uint8,
+	pal [8]uint8,
+	palIdx []uint8,
+	dq [2]uint16,
+	skip bool,
+	yMode int,
+	reducedTxtpSet bool,
+	qidxIsZero bool,
+	lossless bool,
+) {
+	var planeBuf []byte
+	var stride, planeW, planeH int
+	switch plane {
+	case 0:
+		planeBuf = fb.Y
+		stride = fb.StrideY
+		planeW = fb.Width
+		planeH = fb.Height
+	case 1:
+		planeBuf = fb.U
+		stride = fb.StrideUV
+		planeW = fb.ChromaW
+		planeH = fb.ChromaH
+	default:
+		planeBuf = fb.V
+		stride = fb.StrideUV
+		planeW = fb.ChromaW
+		planeH = fb.ChromaH
+	}
+	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
+		return
+	}
+	if bx+bw > planeW {
+		bw = planeW - bx
+	}
+	if by+bh > planeH {
+		bh = planeH - by
+	}
+	if len(palIdx) < bw*bh {
+		return
+	}
+
+	td := transform.TxfmDimensions[tx]
+	tw := int(td.W) * 4
+	th := int(td.H) * 4
+	if tw > bw {
+		tw = bw
+	}
+	if th > bh {
+		th = bh
+	}
+	predBuf := make([]byte, tw*th)
+
+	for tby := 0; tby < bh; tby += th {
+		for tbx := 0; tbx < bw; tbx += tw {
+			dstOff := (by+tby)*stride + (bx + tbx)
+			if dstOff >= len(planeBuf) {
+				continue
+			}
+			dst := planeBuf[dstOff:]
+			predictPalette(predBuf, tw, pal, palIdx[tby*bw+tbx:], tw, th, bw)
+			for row := 0; row < th; row++ {
+				dstRow := (by+tby+row)*stride + (bx + tbx)
+				if dstRow+tw > len(planeBuf) {
+					break
+				}
+				copy(planeBuf[dstRow:dstRow+tw], predBuf[row*tw:(row+1)*tw])
+			}
+			if !skip {
+				coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, tx, plane, bx+tbx, by+tby, bw, bh, yMode, reducedTxtpSet, qidxIsZero, lossless)
+				fs.SetCoefCtx(plane, bx+tbx, by+tby, tx, resCtx)
+				if eob >= 0 && len(coeff) > 0 {
+					tdFull := transform.TxfmDimensions[tx]
+					twFull := int(tdFull.W) * 4
+					thFull := int(tdFull.H) * 4
+					maxOff := (thFull-1)*stride + (twFull - 1)
+					if dstOff+maxOff < len(planeBuf) {
+						ReconBlock(dst, stride, coeff, eob, tx, txtp, dq, 8)
+					}
+				}
+			} else {
+				fs.SetCoefCtx(plane, bx+tbx, by+tby, tx, 0x40)
+			}
+		}
+	}
+}
+
+func decodePalettePlaneVarTx(
+	m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
+	fb *FrameBuf,
+	plane, bx, by, bw, bh int,
+	blocks []txBlockSpec,
+	pal [8]uint8,
+	palIdx []uint8,
+	dq [2]uint16,
+	skip bool,
+	yMode int,
+	reducedTxtpSet bool,
+	qidxIsZero bool,
+	lossless bool,
+) {
+	var planeBuf []byte
+	var stride, planeW, planeH int
+	switch plane {
+	case 0:
+		planeBuf = fb.Y
+		stride = fb.StrideY
+		planeW = fb.Width
+		planeH = fb.Height
+	case 1:
+		planeBuf = fb.U
+		stride = fb.StrideUV
+		planeW = fb.ChromaW
+		planeH = fb.ChromaH
+	default:
+		planeBuf = fb.V
+		stride = fb.StrideUV
+		planeW = fb.ChromaW
+		planeH = fb.ChromaH
+	}
+	if len(palIdx) < bw*bh {
+		return
+	}
+	for _, blk := range blocks {
+		tw := blk.w
+		th := blk.h
+		if bx+blk.x+tw > planeW {
+			tw = planeW - (bx + blk.x)
+		}
+		if by+blk.y+th > planeH {
+			th = planeH - (by + blk.y)
+		}
+		if tw <= 0 || th <= 0 {
+			continue
+		}
+		dstOff := (by+blk.y)*stride + (bx + blk.x)
+		if dstOff >= len(planeBuf) {
+			continue
+		}
+		dst := planeBuf[dstOff:]
+		predBuf := make([]byte, tw*th)
+		predictPalette(predBuf, tw, pal, palIdx[blk.y*bw+blk.x:], tw, th, bw)
+		for row := 0; row < th; row++ {
+			dstRow := (by+blk.y+row)*stride + (bx + blk.x)
+			if dstRow+tw > len(planeBuf) {
+				break
+			}
+			copy(planeBuf[dstRow:dstRow+tw], predBuf[row*tw:(row+1)*tw])
+		}
+		if !skip {
+			coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, blk.tx, plane, bx+blk.x, by+blk.y, tw, th, yMode, reducedTxtpSet, qidxIsZero, lossless)
+			fs.SetCoefCtx(plane, bx+blk.x, by+blk.y, blk.tx, resCtx)
+			if eob >= 0 && len(coeff) > 0 {
+				tdFull := transform.TxfmDimensions[blk.tx]
+				twFull := int(tdFull.W) * 4
+				thFull := int(tdFull.H) * 4
+				maxOff := (thFull-1)*stride + (twFull - 1)
+				if dstOff+maxOff < len(planeBuf) {
+					ReconBlock(dst, stride, coeff, eob, blk.tx, txtp, dq, 8)
+				}
+			}
+		} else {
+			fs.SetCoefCtx(plane, bx+blk.x, by+blk.y, blk.tx, 0x40)
+		}
+	}
+}
+
+type txBlockSpec struct {
+	tx uint8
+	x  int
+	y  int
+	w  int
+	h  int
+}
+
+func readVarTxTree(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, bx, by, bw, bh int, maxTx uint8) (uint8, []txBlockSpec, Av1Block) {
+	block := Av1Block{
+		Tx:     maxTx,
+		MaxYTx: maxTx,
+		Uvtx:   largestTx((bw+1)/2, (bh+1)/2),
+	}
+	specs := make([]txBlockSpec, 0, 16)
+	minTx := maxTx
+	readTxTree(m, ctx, fs, bx, by, bw, bh, maxTx, 0, 0, 0, &block, &specs, &minTx)
+	block.Tx = minTx
+	return minTx, specs, block
+}
+
+func readTxTree(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, bx, by, bw, bh int, tx uint8, depth, xOff, yOff int, block *Av1Block, specs *[]txBlockSpec, minTx *uint8) {
+	td := transform.TxfmDimensions[tx]
+	txw := int(td.W) * 4
+	txh := int(td.H) * 4
+	px := xOff * txw
+	py := yOff * txh
+	if px >= bw || py >= bh {
+		return
+	}
+
+	isSplit := false
+	if depth < 2 && tx > transform.TX4x4 {
+		cat := 2*(int(transform.TX64x64)-int(td.Max)) - depth
+		if cat >= 0 && cat < len(ctx.TxPartCDF) {
+			tctx := fs.TxCtx(bx+px, by+py, tx)
+			isSplit = m.BoolAdapt(ctx.TxPartCDF[cat][tctx][:]) != 0
+			if isSplit {
+				if depth == 0 {
+					block.TxSplit0 |= 1 << (yOff*4 + xOff)
+				} else {
+					block.TxSplit1 |= 1 << (yOff*4 + xOff)
+				}
+			}
+		}
+	}
+
+	if isSplit && td.Max > 1 {
+		sub := td.Sub
+		subDim := transform.TxfmDimensions[sub]
+		subW := int(subDim.W) * 4
+		subH := int(subDim.H) * 4
+
+		readTxTree(m, ctx, fs, bx, by, bw, bh, sub, depth+1, xOff*2, yOff*2, block, specs, minTx)
+		if txw >= txh && px+subW < bw {
+			readTxTree(m, ctx, fs, bx, by, bw, bh, sub, depth+1, xOff*2+1, yOff*2, block, specs, minTx)
+		}
+		if txh >= txw && py+subH < bh {
+			readTxTree(m, ctx, fs, bx, by, bw, bh, sub, depth+1, xOff*2, yOff*2+1, block, specs, minTx)
+			if txw >= txh && px+subW < bw {
+				readTxTree(m, ctx, fs, bx, by, bw, bh, sub, depth+1, xOff*2+1, yOff*2+1, block, specs, minTx)
+			}
+		}
+		return
+	}
+
+	if tx < *minTx {
+		*minTx = tx
+	}
+	fs.SetTxCtx(bx+px, by+py, txw, txh, tx, true, false)
+	*specs = append(*specs, txBlockSpec{tx: tx, x: px, y: py, w: txw, h: txh})
+}
+
+func decodeIntraPlaneVarTx(
+	m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
+	fb *FrameBuf,
+	plane, bx, by, bw, bh int,
+	blocks []txBlockSpec,
+	mode, angleDelta, filterMode int,
+	dq [2]uint16,
+	skip bool,
+	yMode int,
+	reducedTxtpSet bool,
+	fhdr *header.FrameHeader,
+	seq *header.SequenceHeader,
+	qidxIsZero bool,
+	lossless bool,
+) {
+	var planeBuf []byte
+	var stride, planeW, planeH int
+	switch plane {
+	case 0:
+		planeBuf = fb.Y
+		stride = fb.StrideY
+		planeW = fb.Width
+		planeH = fb.Height
+	case 1:
+		planeBuf = fb.U
+		stride = fb.StrideUV
+		planeW = fb.ChromaW
+		planeH = fb.ChromaH
+	default:
+		planeBuf = fb.V
+		stride = fb.StrideUV
+		planeW = fb.ChromaW
+		planeH = fb.ChromaH
+	}
+
+	maxDim := bw
+	if bh > maxDim {
+		maxDim = bh
+	}
+	tlBuf := make([]byte, 4*maxDim+2)
+	tl := 2 * maxDim
+	fillTopleft(planeBuf, stride, planeW, planeH, bx, by, bw, bh, tlBuf, tl)
+
+	for _, blk := range blocks {
+		tw := blk.w
+		th := blk.h
+		if bx+blk.x+tw > planeW {
+			tw = planeW - (bx + blk.x)
+		}
+		if by+blk.y+th > planeH {
+			th = planeH - (by + blk.y)
+		}
+		if tw <= 0 || th <= 0 {
+			continue
+		}
+		dstOff := (by+blk.y)*stride + (bx + blk.x)
+		if dstOff >= len(planeBuf) {
+			continue
+		}
+		dst := planeBuf[dstOff:]
+		predBuf := make([]byte, tw*th)
+
+		callIntraPred(mode, angleDelta, filterMode, predBuf, tw, tlBuf, tl, tw, th)
+		for row := 0; row < th; row++ {
+			dstRow := (by+blk.y+row)*stride + (bx + blk.x)
+			if dstRow+tw > len(planeBuf) {
+				break
+			}
+			copy(planeBuf[dstRow:dstRow+tw], predBuf[row*tw:(row+1)*tw])
+		}
+
+		if !skip {
+			coeffMode := yMode
+			if plane > 0 {
+				coeffMode = mode
+			}
+			coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, blk.tx, plane, bx+blk.x, by+blk.y, tw, th, coeffMode, reducedTxtpSet, qidxIsZero, lossless)
+			fs.SetCoefCtx(plane, bx+blk.x, by+blk.y, blk.tx, resCtx)
+			if eob >= 0 && len(coeff) > 0 {
+				tdFull := transform.TxfmDimensions[blk.tx]
+				twFull := int(tdFull.W) * 4
+				thFull := int(tdFull.H) * 4
+				maxOff := (thFull-1)*stride + (twFull - 1)
+				if dstOff+maxOff < len(planeBuf) {
+					ReconBlock(dst, stride, coeff, eob, blk.tx, txtp, dq, 8)
+				}
+			}
+		} else {
+			fs.SetCoefCtx(plane, bx+blk.x, by+blk.y, blk.tx, 0x40)
+		}
+		updateTopleft(planeBuf, stride, planeW, planeH, bx+blk.x, by+blk.y, tw, th, tlBuf, tl)
+	}
+	_ = fhdr
+	_ = seq
+}
+
 // decodeIntraPlane performs intra prediction + coefficient decode + reconstruction
 // for one plane within a block.
 //
@@ -1051,11 +1460,11 @@ func cflAcSubBlock(ac []int16, cbw, cbh, tbx, tby, tw, th int) []int16 {
 //	yMode: luma intra prediction mode (used for chroma txtp derivation)
 //	reducedTxtpSet: from fhdr.ReducedTxtpSet
 func decodeIntraPlane(
-	m *bitstream.MSAC, ctx *TileCtx,
+	m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	fb *FrameBuf,
 	plane, bx, by, bw, bh int,
 	tx uint8,
-	mode, cflAlpha int,
+	mode, angleDelta, filterMode, cflAlpha int,
 	dq [2]uint16,
 	skip bool,
 	yMode int,
@@ -1137,7 +1546,7 @@ func decodeIntraPlane(
 			dst := planeBuf[dstOff:]
 
 			// 1. Intra prediction into predBuf.
-			callIntraPred(mode, predBuf, tw, tlBuf, tl, tw, th)
+			callIntraPred(mode, angleDelta, filterMode, predBuf, tw, tlBuf, tl, tw, th)
 
 			// 2. Copy prediction to destination.
 			for row := 0; row < th; row++ {
@@ -1150,8 +1559,13 @@ func decodeIntraPlane(
 
 			// 3. Decode and apply residual (if not skipped).
 			if !skip {
-				coeff, eob, txtp := decodeCoefficients(m, ctx, tx, plane, yMode, reducedTxtpSet, qidxIsZero, lossless)
-				if eob > 0 && len(coeff) > 0 {
+				coeffMode := yMode
+				if plane > 0 {
+					coeffMode = mode
+				}
+				coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, tx, plane, bx+tbx, by+tby, bw, bh, coeffMode, reducedTxtpSet, qidxIsZero, lossless)
+				fs.SetCoefCtx(plane, bx+tbx, by+tby, tx, resCtx)
+				if eob >= 0 && len(coeff) > 0 {
 					// Guard against partial tx blocks at plane edges:
 					// InvTxfmAdd writes dst[(th-1)*stride + (tw-1)] which would
 					// overrun planeBuf when the block straddles the bottom/right.
@@ -1163,6 +1577,8 @@ func decodeIntraPlane(
 						ReconBlock(dst, stride, coeff, eob, tx, txtp, dq, 8)
 					}
 				}
+			} else {
+				fs.SetCoefCtx(plane, bx+tbx, by+tby, tx, 0x40)
 			}
 
 			// Update topleft buffer from reconstructed samples for next tx block.
@@ -1176,14 +1592,30 @@ func decodeIntraPlane(
 // ---------------------------------------------------------------------------
 
 // callIntraPred calls the appropriate intra prediction kernel.
-func callIntraPred(mode int, dst []byte, stride int, topleft []byte, tl, width, height int) {
+func callIntraPred(mode, angleDelta, filterMode int, dst []byte, stride int, topleft []byte, tl, width, height int) {
+	if filterMode >= 0 {
+		intra.PredFilter(dst, stride, topleft, tl, width, height, filterMode)
+		return
+	}
+	if mode >= VertPred && mode <= VertLeftPred {
+		angle := intraModeAngle(mode) + 3*angleDelta
+		switch {
+		case angle < 90:
+			intra.PredZ1(dst, stride, topleft, tl, width, height, angle)
+		case angle == 90:
+			intra.PredV(dst, stride, topleft, tl, width, height)
+		case angle < 180:
+			intra.PredZ2(dst, stride, topleft, tl, width, height, angle, width, height)
+		case angle == 180:
+			intra.PredH(dst, stride, topleft, tl, width, height)
+		default:
+			intra.PredZ3(dst, stride, topleft, tl, width, height, angle)
+		}
+		return
+	}
 	switch mode {
 	case DCPred:
 		intra.PredDC(dst, stride, topleft, tl, width, height)
-	case VertPred:
-		intra.PredV(dst, stride, topleft, tl, width, height)
-	case HorPred:
-		intra.PredH(dst, stride, topleft, tl, width, height)
 	case PaethPred:
 		intra.PredPaeth(dst, stride, topleft, tl, width, height)
 	case SmoothPred:
@@ -1193,33 +1625,43 @@ func callIntraPred(mode int, dst []byte, stride int, topleft []byte, tl, width, 
 		intra.PredSmoothV(dst, stride, topleft, tl, width, height)
 	case SmoothHPred:
 		intra.PredSmoothH(dst, stride, topleft, tl, width, height)
-	case DiagDownLeftPred: // D45 — angle=45, Z1
-		intra.PredZ1(dst, stride, topleft, tl, width, height, 45)
-	case VertLeftPred: // D67 — angle=67, Z1
-		intra.PredZ1(dst, stride, topleft, tl, width, height, 67)
-	case VertRightPred: // D113 — angle=113, Z2
-		intra.PredZ2(dst, stride, topleft, tl, width, height, 113, width, height)
-	case DiagDownRightPred: // D135 — angle=135, Z2
-		intra.PredZ2(dst, stride, topleft, tl, width, height, 135, width, height)
-	case HorDownPred: // D157 — angle=157, Z2
-		intra.PredZ2(dst, stride, topleft, tl, width, height, 157, width, height)
-	case HorUpPred: // D203 — angle=203, Z3
-		intra.PredZ3(dst, stride, topleft, tl, width, height, 203)
 	default:
 		// CFL or unknown → DC fallback.
 		intra.PredDC(dst, stride, topleft, tl, width, height)
 	}
 }
 
+func intraModeAngle(mode int) int {
+	switch mode {
+	case VertPred:
+		return 90
+	case HorPred:
+		return 180
+	case DiagDownLeftPred:
+		return 45
+	case DiagDownRightPred:
+		return 135
+	case VertRightPred:
+		return 113
+	case HorDownPred:
+		return 157
+	case HorUpPred:
+		return 203
+	case VertLeftPred:
+		return 67
+	default:
+		return 90
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Coefficient decoding (M8 Task 2 — dav1d-aligned)
 //
-// Mirrors dav1d/src/recon_tmpl.c decode_coefs(). Layout differences:
-//   - dav1d cf[rc] is in the (x<<shift)|y / transposed layout that its own
-//     itxfm consumes. Our ReconBlock currently expects row-major raster
-//     (y*W + x). Task 3 will switch ReconBlock to dav1d's layout; for now we
-//     translate (x,y) → row-major when storing tokens, so the dav1d-aligned
-//     CDF reads do not require any other downstream change.
+// Mirrors dav1d/src/recon_tmpl.c decode_coefs(). Coefficients are stored in
+// the packed rc layouts consumed by the live dequant/itxfm path:
+//   - TX_CLASS_2D: rc = (x << shift) | y
+//   - TX_CLASS_H:  rc = scan position i (dav1d's transposed H-class layout)
+//   - TX_CLASS_V:  rc = (x << shift2) | y
 //   - dav1d's MSAC.SymbolAdapt returns 0..n_symbols (n_symbols+1 values) by
 //     using cdf[n_symbols] as a counter. Our Go MSAC.Symbol returns 0..n-1
 //     and requires cdf[n-1]=0 sentinel. So our CDF size is dav1d's + 1, and
@@ -1292,9 +1734,9 @@ func getLoCtx1D(levels []uint8, base, stride, y int) (int, int) {
 //
 // `qidxIsZero`: true iff frame_hdr.segmentation.qidx[seg_id] == 0
 // `lossless` :  true iff frame_hdr.segmentation.lossless[seg_id]
-func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, tx uint8, plane int,
-	yMode int, reducedTxtpSet bool, qidxIsZero bool, lossless bool,
-) ([]int32, int, uint8) {
+func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, tx uint8, plane int,
+	bx, by, bw, bh int, yMode int, reducedTxtpSet bool, qidxIsZero bool, lossless bool,
+) ([]int32, int, uint8, uint8) {
 	td := transform.TxfmDimensions[tx]
 	chroma := 0
 	if plane > 0 {
@@ -1303,6 +1745,14 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, tx uint8, plane int,
 	blockW := int(td.W) * 4
 	blockH := int(td.H) * 4
 	n := blockW * blockH
+
+	skipCtx := fs.CoefSkipCtx(plane, bx, by, bw, bh, tx)
+	if int(td.Ctx) < len(ctx.CoefSkipFull) {
+		allSkip := m.BoolAdapt(ctx.CoefSkipFull[td.Ctx][skipCtx][:])
+		if allSkip != 0 {
+			return nil, -1, transform.DCT_DCT, 0x40
+		}
+	}
 
 	// --- Transform type ---------------------------------------------------
 	var txtp uint8
@@ -1314,7 +1764,9 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, tx uint8, plane int,
 	case int(td.Max) >= 3: // TX32/TX64: forced DCT_DCT
 		txtp = transform.DCT_DCT
 	case chroma == 1:
-		if yMode >= 0 && yMode < len(TxtpFromUVMode) {
+		if yMode == CFLPred {
+			txtp = transform.DCT_DCT
+		} else if yMode >= 0 && yMode < len(TxtpFromUVMode) {
 			txtp = TxtpFromUVMode[yMode]
 		}
 	case qidxIsZero:
@@ -1385,11 +1837,8 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, tx uint8, plane int,
 		}
 		eob = ((eobHiBit | 2) << uint(eb)) | int(extra)
 	}
-	if eob == 0 {
-		return nil, 0, txtp
-	}
-	if eob > n {
-		eob = n
+	if eob >= n {
+		eob = n - 1
 	}
 
 	// --- Token decode -----------------------------------------------------
@@ -1445,186 +1894,234 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, tx uint8, plane int,
 	loCdf := &ctx.BaseTokFull[txCtx][chroma]
 	hiCdf := &ctx.BrTokFull[txCtxBr][chroma]
 
-	// rasterIdx maps dav1d (x, y) → col-major index used by
-	// transform.InvTxfmAdd (which reads coeff[y + x*sh]). Note: sh is the
-	// transform height (blockH); the column-major index is x*blockH + y.
-	rasterIdx := func(x, y int) int {
+	packedH := 4 << uint(slh)
+
+	// coeffIdx maps dav1d decode-coefs coordinates to the live coefficient
+	// buffer layout consumed by dequant/itxfm.
+	coeffIdx := func(x, y, scanPos int) int {
+		if scanPos < 0 {
+			return -1
+		}
+		if cls == TxClassH {
+			if scanPos >= n {
+				return -1
+			}
+			return scanPos
+		}
 		if x < 0 || x >= blockW || y < 0 || y >= blockH {
 			return -1
 		}
-		return x*blockH + y
+		return x*packedH + y
 	}
-
-	// signCtx for DC — simplified to 0 (Task 7 will wire dav1d's
-	// get_dc_sign_ctx using above/left neighbour sign accumulation).
-	dcSignCtx := 0
-
-	// Helper that reads sign + golomb extra bits and stores the signed
-	// magnitude into coeff. Mirrors the per-coefficient bit-stream order of
-	// the previous M7 implementation (sign decoded immediately after the
-	// token), keeping byte alignment with the existing pipeline.
-	writeSignedCoeff := func(coeffIdx, tok int, isDC bool) {
+	// dav1d first decodes all base/high tokens, then reads the DC sign and AC
+	// signs/residuals. Keep token magnitudes here and apply signs afterward.
+	dcSignCtx := fs.DCSignCtx(plane, bx, by, tx)
+	dcTok := 0
+	acNonZero := make([]int, 0, eob)
+	setCoeffToken := func(coeffIdx, tok int) {
 		if coeffIdx < 0 || tok == 0 {
 			return
 		}
-		var sign uint32
-		if isDC {
-			sign = m.BoolAdapt(ctx.DCSignCDF[chroma][dcSignCtx][:])
-		} else {
-			sign = m.BoolEqui()
+		coeff[coeffIdx] = int32(tok)
+		if coeffIdx != 0 {
+			acNonZero = append(acNonZero, coeffIdx)
 		}
-		mag := tok
+	}
+
+	if eob > 0 {
+		// EOB position (i = eob)
+		var x, y, levelIdx int
+		if cls == TxClass2D {
+			if eob >= len(scan) {
+				return coeff, eob, txtp, 0x40
+			}
+			rcRaw := int(scan[eob])
+			x = rcRaw >> shift
+			y = rcRaw & mask
+			levelIdx = rcRaw
+		} else if cls == TxClassH {
+			x = eob & mask
+			y = eob >> shift
+			levelIdx = x*stride + y
+		} else {
+			x = eob & mask
+			y = eob >> shift
+			levelIdx = x*stride + y
+		}
+
+		bctx := 1
+		if eob > (2 << uint(tx2dszctx)) {
+			bctx++
+		}
+		if eob > (4 << uint(tx2dszctx)) {
+			bctx++
+		}
+		if bctx > 3 {
+			bctx = 3
+		}
+		eobTok := int(m.SymbolAdapt(eobCdf[bctx][:], 3)) // 0..2
+		tok := eobTok + 1
+		levelTok := tok * 0x41
+		if eobTok == 2 {
+			var hctx int
+			if cls == TxClass2D {
+				if (x | y) > 1 {
+					hctx = 14
+				} else {
+					hctx = 7
+				}
+			} else {
+				if y != 0 {
+					hctx = 14
+				} else {
+					hctx = 7
+				}
+			}
+			tok = int(m.HiTok(hiCdf[hctx][:]))
+			levelTok = tok + (3 << 6)
+		}
+		setCoeffToken(coeffIdx(x, y, eob), tok)
+		if levelIdx >= 0 && levelIdx < len(levels) {
+			levels[levelIdx] = uint8(levelTok)
+		}
+
+		// AC tokens: i = eob-1 .. 1
+		for i := eob - 1; i > 0; i-- {
+			var xi, yi, lvlIdx int
+			if cls == TxClass2D {
+				if i >= len(scan) {
+					continue
+				}
+				r := int(scan[i])
+				xi = r >> shift
+				yi = r & mask
+				lvlIdx = r
+			} else if cls == TxClassH {
+				xi = i & mask
+				yi = i >> shift
+				lvlIdx = xi*stride + yi
+			} else {
+				xi = i & mask
+				yi = i >> shift
+				lvlIdx = xi*stride + yi
+			}
+			var loCtx, hiMag int
+			if cls == TxClass2D {
+				loCtx, hiMag = getLoCtx2D(levels, lvlIdx, stride, ctxOff, xi, yi)
+			} else {
+				loCtx, hiMag = getLoCtx1D(levels, lvlIdx, stride, yi)
+			}
+			ytmp := yi
+			if cls == TxClass2D {
+				ytmp = yi | xi
+			}
+			toki := int(m.SymbolAdapt(loCdf[loCtx][:], 4)) // 0..3
+			if toki == 3 {
+				mag := uint(hiMag) & 63
+				var hctx int
+				yThresh := 0
+				if cls == TxClass2D {
+					yThresh = 1
+				}
+				if ytmp > yThresh {
+					hctx = 14
+				} else {
+					hctx = 7
+				}
+				if mag > 12 {
+					hctx += 6
+				} else {
+					hctx += int((mag + 1) >> 1)
+				}
+				toki = int(m.HiTok(hiCdf[hctx][:]))
+				if lvlIdx >= 0 && lvlIdx < len(levels) {
+					levels[lvlIdx] = uint8(toki + (3 << 6))
+				}
+			} else if lvlIdx >= 0 && lvlIdx < len(levels) {
+				levels[lvlIdx] = uint8(toki * 0x41)
+			}
+			setCoeffToken(coeffIdx(xi, yi, i), toki)
+		}
+	}
+
+	// DC token (i = 0). For eob==0 dav1d uses eob_base_tok[0] and forces a
+	// non-zero DC token; otherwise it uses the regular base_tok context.
+	if eob == 0 {
+		tokBr := int(m.SymbolAdapt(eobCdf[0][:], 3))
+		dcTok = tokBr + 1
+		if tokBr == 2 {
+			dcTok = int(m.HiTok(hiCdf[0][:]))
+		}
+	} else {
+		if cls == TxClass2D {
+			dcCtx, _ := getLoCtx2D(levels, 0, stride, ctxOff, 0, 0)
+			dcTok = int(m.SymbolAdapt(loCdf[dcCtx][:], 4))
+		} else {
+			dcCtx, _ := getLoCtx1D(levels, 0, stride, 0)
+			dcTok = int(m.SymbolAdapt(loCdf[dcCtx][:], 4))
+		}
+		if dcTok == 3 {
+			var dcMag uint
+			if cls == TxClass2D {
+				dcMag = uint(levels[0*stride+1]) + uint(levels[1*stride+0]) + uint(levels[1*stride+1])
+			} else {
+				dcMag = uint(levels[0*stride+1]) + uint(levels[0*stride+2]) + uint(levels[0*stride+3])
+			}
+			dcMag &= 63
+			var hctx int
+			if dcMag > 12 {
+				hctx = 6
+			} else {
+				hctx = int((dcMag + 1) >> 1)
+			}
+			dcTok = int(m.HiTok(hiCdf[hctx][:]))
+		}
+	}
+	setCoeffToken(coeffIdx(0, 0, 0), dcTok)
+
+	// Sign and residual pass. dav1d reads DC sign first if DC is non-zero,
+	// then AC signs in low-to-high scan order. acNonZero was collected while
+	// scanning high-to-low, so iterate it backward.
+	culLevel := 0
+	dcSignLevel := uint8(0x40)
+	if dcTok != 0 {
+		sign := m.BoolAdapt(ctx.DCSignCDF[chroma][dcSignCtx][:])
+		mag := dcTok
 		if mag == 15 {
 			mag = int(readGolomb(m)) + 15
 		}
+		culLevel += mag
 		if sign != 0 {
-			coeff[coeffIdx] = int32(-mag)
+			coeff[0] = int32(-mag)
+			dcSignLevel = 0x00
 		} else {
-			coeff[coeffIdx] = int32(mag)
+			coeff[0] = int32(mag)
+			dcSignLevel = 0x80
 		}
 	}
+	for i := len(acNonZero) - 1; i >= 0; i-- {
+		idx := acNonZero[i]
+		mag := int(coeff[idx])
+		if mag == 0 {
+			continue
+		}
+		sign := m.BoolEqui()
+		if mag == 15 {
+			mag = int(readGolomb(m)) + 15
+		}
+		culLevel += mag
+		if sign != 0 {
+			coeff[idx] = int32(-mag)
+		} else {
+			coeff[idx] = int32(mag)
+		}
+	}
+	if culLevel > 63 {
+		culLevel = 63
+	}
+	resCtx := uint8(culLevel) | dcSignLevel
 
-	// EOB position (i = eob-1)
-	var x, y, levelIdx int
-	if cls == TxClass2D {
-		if eob-1 >= len(scan) {
-			return coeff, eob, txtp
-		}
-		rcRaw := int(scan[eob-1])
-		x = rcRaw >> shift
-		y = rcRaw & mask
-		levelIdx = rcRaw
-	} else if cls == TxClassH {
-		x = (eob - 1) & mask
-		y = (eob - 1) >> shift
-		levelIdx = x*stride + y
-	} else {
-		x = (eob - 1) & mask
-		y = (eob - 1) >> shift
-		levelIdx = x*stride + y
-	}
-
-	bctx := 1
-	if eob > (2 << uint(tx2dszctx)) {
-		bctx++
-	}
-	if eob > (4 << uint(tx2dszctx)) {
-		bctx++
-	}
-	if bctx > 3 {
-		bctx = 3
-	}
-	eobTok := int(m.SymbolAdapt(eobCdf[bctx][:], 3)) // 0..2
-	tok := eobTok + 1
-	levelTok := tok * 0x41
-	if eobTok == 2 {
-		var hctx int
-		if cls == TxClass2D {
-			if (x | y) > 1 {
-				hctx = 14
-			} else {
-				hctx = 7
-			}
-		} else {
-			if y != 0 {
-				hctx = 14
-			} else {
-				hctx = 7
-			}
-		}
-		tok = int(m.HiTok(hiCdf[hctx][:]))
-		levelTok = tok + (3 << 6)
-	}
-	writeSignedCoeff(rasterIdx(x, y), tok, eob-1 == 0)
-	if levelIdx >= 0 && levelIdx < len(levels) {
-		levels[levelIdx] = uint8(levelTok)
-	}
-
-	// AC tokens: i = eob-2 .. 1
-	for i := eob - 2; i > 0; i-- {
-		var xi, yi, lvlIdx int
-		if cls == TxClass2D {
-			if i >= len(scan) {
-				continue
-			}
-			r := int(scan[i])
-			xi = r >> shift
-			yi = r & mask
-			lvlIdx = r
-		} else if cls == TxClassH {
-			xi = i & mask
-			yi = i >> shift
-			lvlIdx = xi*stride + yi
-		} else {
-			xi = i & mask
-			yi = i >> shift
-			lvlIdx = xi*stride + yi
-		}
-		var loCtx, hiMag int
-		if cls == TxClass2D {
-			loCtx, hiMag = getLoCtx2D(levels, lvlIdx, stride, ctxOff, xi, yi)
-		} else {
-			loCtx, hiMag = getLoCtx1D(levels, lvlIdx, stride, yi)
-		}
-		ytmp := yi
-		if cls == TxClass2D {
-			ytmp = yi | xi
-		}
-		toki := int(m.SymbolAdapt(loCdf[loCtx][:], 4)) // 0..3
-		if toki == 3 {
-			mag := uint(hiMag) & 63
-			var hctx int
-			yThresh := 0
-			if cls == TxClass2D {
-				yThresh = 1
-			}
-			if ytmp > yThresh {
-				hctx = 14
-			} else {
-				hctx = 7
-			}
-			if mag > 12 {
-				hctx += 6
-			} else {
-				hctx += int((mag + 1) >> 1)
-			}
-			toki = int(m.HiTok(hiCdf[hctx][:]))
-			if lvlIdx >= 0 && lvlIdx < len(levels) {
-				levels[lvlIdx] = uint8(toki + (3 << 6))
-			}
-		} else if lvlIdx >= 0 && lvlIdx < len(levels) {
-			levels[lvlIdx] = uint8(toki * 0x41)
-		}
-		writeSignedCoeff(rasterIdx(xi, yi), toki, false)
-	}
-
-	// DC token (i = 0)
-	var dcTok int
-	if cls == TxClass2D {
-		dcTok = int(m.SymbolAdapt(loCdf[0][:], 4))
-	} else {
-		dcCtx, _ := getLoCtx1D(levels, 0, stride, 0)
-		dcTok = int(m.SymbolAdapt(loCdf[dcCtx][:], 4))
-	}
-	if dcTok == 3 {
-		var dcMag uint
-		if cls == TxClass2D {
-			dcMag = uint(levels[0*stride+1]) + uint(levels[1*stride+0]) + uint(levels[1*stride+1])
-		} else {
-			dcMag = uint(levels[0*stride+1]) + uint(levels[0*stride+2]) + uint(levels[0*stride+3])
-		}
-		dcMag &= 63
-		var hctx int
-		if dcMag > 12 {
-			hctx = 6
-		} else {
-			hctx = int((dcMag + 1) >> 1)
-		}
-		dcTok = int(m.HiTok(hiCdf[hctx][:]))
-	}
-	writeSignedCoeff(rasterIdx(0, 0), dcTok, true)
-
-	return coeff, eob, txtp
+	return coeff, eob, txtp, resCtx
 }
 
 // clampTxType restricts txtp to the 1D transform types supported by the
@@ -1635,8 +2132,8 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, tx uint8, plane int,
 // If either dimension doesn't support the decoded 1D type, fall back to DCT_DCT.
 func clampTxType(txtp, lw, lh uint8) uint8 {
 	txtps := transform.Tx1dTypes[txtp]
-	row1d := txtps[1] // row transform type
-	col1d := txtps[0] // column transform type
+	row1d := txtps[0] // first 1D pass over rows
+	col1d := txtps[1] // second 1D pass over columns
 
 	// Check row transform
 	if lw >= 3 { // TX32 or TX64 in width
@@ -1767,12 +2264,9 @@ func updateTopleft(planeBuf []byte, stride, planeW, planeH, bx, by, tw, th int,
 // We seed with a position gradient (instead of the spec's flat 128) so that
 // the reconstructed frame has visible texture, mirroring fillTopleft's
 // behaviour. M8+ replaces this with proper inter prediction.
-func fillDC128(fb *FrameBuf, bx, by, bw, bh int) {
+func fillDC128(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh int) {
 	yFill := byte(64 + ((bx + by) & 0x7F))
-	cbx := bx / 2
-	cby := by / 2
-	cbw := (bw + 1) / 2
-	cbh := (bh + 1) / 2
+	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
 	uFill := byte(96 + ((cbx + cby) & 0x3F))
 	vFill := byte(96 + ((cbx - cby) & 0x3F))
 	fillPlaneConst(fb.Y, fb.StrideY, fb.Width, fb.Height, bx, by, bw, bh, yFill)
@@ -1806,21 +2300,20 @@ func fillPlaneConst(plane []byte, stride, pw, ph, bx, by, bw, bh int, fill byte)
 // copyInterRefBlock copies a same-position block from the first available
 // reference frame. This is a temporary zero-MV predictor used to connect the
 // reference buffer to inter-frame reconstruction before full MV syntax support.
-func copyInterRefBlock(fb *FrameBuf, bx, by, bw, bh int) bool {
-	ref := firstAvailableRef(fb)
+func copyInterRefBlock(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh int) bool {
+	refSlot, ref := primaryInterRef(fb, nil)
 	if ref == nil || len(ref.Y) == 0 {
 		return false
 	}
-	copyPlaneBlock(fb.Y, fb.StrideY, fb.Width, fb.Height, ref.Y, ref.StrideY, ref.Width, ref.Height, bx, by, bw, bh)
+	mv := refmvs.MV{}
+	_ = refSlot
+	copyInterPredictPlane(fb.Y, fb.StrideY, fb.Width, fb.Height, ref.Y, ref.StrideY, ref.Width, ref.Height, bx, by, bw, bh, mv, header.FilterMode8TapRegular)
 	if fb.Monochrome || ref.Monochrome {
 		return true
 	}
-	cbx := bx >> 1
-	cby := by >> 1
-	cbw := (bw + 1) >> 1
-	cbh := (bh + 1) >> 1
-	copyPlaneBlock(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.U, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh)
-	copyPlaneBlock(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.V, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh)
+	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
+	copyInterPredictPlane(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.U, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, mv, header.FilterMode8TapRegular)
+	copyInterPredictPlane(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.V, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, mv, header.FilterMode8TapRegular)
 	return true
 }
 
@@ -1831,6 +2324,343 @@ func firstAvailableRef(fb *FrameBuf) *PlaneBuf {
 		}
 	}
 	return nil
+}
+
+func primaryInterRef(fb *FrameBuf, fhdr *header.FrameHeader) (int, *PlaneBuf) {
+	if fhdr != nil {
+		for _, idx := range fhdr.Refidx {
+			refSlot := int(idx)
+			if refSlot >= 0 && refSlot < len(fb.Refs) && fb.Refs[refSlot] != nil {
+				return refSlot, fb.Refs[refSlot]
+			}
+		}
+	}
+	for i, ref := range fb.Refs {
+		if ref != nil {
+			return i, ref
+		}
+	}
+	return -1, nil
+}
+
+func frameRefSlot(fhdr *header.FrameHeader, refFrame int) (int, bool) {
+	if fhdr == nil {
+		return -1, false
+	}
+	// AV1 ref-frame enums are 1..7 for LAST..ALTREF. FrameHeader.Refidx is
+	// indexed in that order with 0-based positions.
+	if refFrame <= 0 || refFrame > len(fhdr.Refidx) {
+		return -1, false
+	}
+	slot := int(fhdr.Refidx[refFrame-1])
+	if slot < 0 {
+		return -1, false
+	}
+	return slot, true
+}
+
+func slotRefFrame(fhdr *header.FrameHeader, refSlot int) (int, bool) {
+	if fhdr == nil || refSlot < 0 {
+		return 0, false
+	}
+	for i, idx := range fhdr.Refidx {
+		if int(idx) == refSlot {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+func decodeInterBlockFallback(fs *FrameState, fhdr *header.FrameHeader, seq *header.SequenceHeader,
+	fb *FrameBuf, segID uint8, skip bool, bx, by, bw, bh int) {
+	refSlot, refFrame, _, mv, filterMode, interMode, skipMode, ref := deriveInterFallback(fs, fb, fhdr, segID, skip, bx, by)
+
+	block := Av1Block{
+		Intra:     false,
+		SegID:     segID,
+		Skip:      skip,
+		SkipMode:  skipMode,
+		InterMode: uint8(interMode),
+		RefSlot:   int8(refSlot),
+		Filter:    uint8(filterMode),
+		MV:        [2]int16{mv.Y, mv.X},
+	}
+	_ = block
+
+	if ref != nil {
+		copyInterPredictPlane(fb.Y, fb.StrideY, fb.Width, fb.Height, ref.Y, ref.StrideY, ref.Width, ref.Height, bx, by, bw, bh, mv, filterMode)
+		if !fb.Monochrome && !ref.Monochrome && len(fb.U) != 0 && len(ref.U) != 0 {
+			ssHor := int(seq.SsHor)
+			ssVer := int(seq.SsVer)
+			cmv := refmvs.MV{
+				X: int16(floorDivPow2(int(mv.X), ssHor)),
+				Y: int16(floorDivPow2(int(mv.Y), ssVer)),
+			}
+			cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
+			copyInterPredictPlane(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.U, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, cmv, filterMode)
+			copyInterPredictPlane(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.V, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, cmv, filterMode)
+		}
+	} else {
+		fillDC128(fb, seq, bx, by, bw, bh)
+	}
+
+	fs.SetInterBlock(bx, by, bw, bh, skip, segID, refSlot, refFrame, uint8(filterMode), interMode, mv)
+}
+
+func predictInterFallback(fb *FrameBuf, fhdr *header.FrameHeader, seq *header.SequenceHeader, segID uint8, bx, by, bw, bh int) bool {
+	refSlot, _, refOrder, mv, filterMode, _, _, ref := deriveInterFallback(nil, fb, fhdr, segID, false, bx, by)
+	if ref == nil {
+		return false
+	}
+	_ = refSlot
+	_ = refOrder
+
+	copyInterPredictPlane(fb.Y, fb.StrideY, fb.Width, fb.Height, ref.Y, ref.StrideY, ref.Width, ref.Height, bx, by, bw, bh, mv, filterMode)
+	if fb.Monochrome || ref.Monochrome || len(fb.U) == 0 || len(ref.U) == 0 {
+		return true
+	}
+
+	ssHor := int(seq.SsHor)
+	ssVer := int(seq.SsVer)
+	cmv := refmvs.MV{
+		X: int16(floorDivPow2(int(mv.X), ssHor)),
+		Y: int16(floorDivPow2(int(mv.Y), ssVer)),
+	}
+	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
+	copyInterPredictPlane(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.U, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, cmv, filterMode)
+	copyInterPredictPlane(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.V, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, cmv, filterMode)
+	return true
+}
+
+func deriveInterFallback(fs *FrameState, fb *FrameBuf, fhdr *header.FrameHeader, segID uint8, skip bool, bx, by int) (refSlot, refFrame, refOrder int, mv refmvs.MV, filterMode header.FilterMode, interMode int, skipMode bool, ref *PlaneBuf) {
+	refOrder = 0
+	refSlot, ref = primaryInterRef(fb, fhdr)
+	filterMode = header.FilterMode8TapRegular
+	interMode = InterModeZeroMV
+	if fhdr == nil {
+		return
+	}
+	if rf, ok := slotRefFrame(fhdr, refSlot); ok {
+		refFrame = rf
+	}
+	if skip && fhdr.SkipModeEnabled != 0 {
+		skipRefOrder := int(fhdr.SkipModeRefs[0])
+		if skipRefOrder >= 0 && skipRefOrder < len(fhdr.Refidx) {
+			skipRefSlot := int(fhdr.Refidx[skipRefOrder])
+			if skipRefSlot >= 0 && skipRefSlot < len(fb.Refs) && fb.Refs[skipRefSlot] != nil {
+				refSlot = skipRefSlot
+				refFrame = skipRefOrder + 1
+				ref = fb.Refs[skipRefSlot]
+				refOrder = skipRefOrder
+				skipMode = true
+			}
+		}
+	}
+	if fhdr.Segmentation.Enabled != 0 {
+		segRef := int(fhdr.Segmentation.SegData.D[segID].Ref)
+		if segSlot, ok := frameRefSlot(fhdr, segRef); ok && segSlot < len(fb.Refs) && fb.Refs[segSlot] != nil {
+			refSlot = segSlot
+			refFrame = segRef
+			ref = fb.Refs[segSlot]
+			refOrder = segRef - 1
+			skipMode = false
+		}
+	}
+	if !skipMode && fs != nil {
+		if neighSlot, ok := fs.NeighbourInterRef(bx, by); ok && neighSlot >= 0 && neighSlot < len(fb.Refs) && fb.Refs[neighSlot] != nil {
+			refSlot = neighSlot
+			if rf, ok := slotRefFrame(fhdr, neighSlot); ok {
+				refFrame = rf
+			}
+			ref = fb.Refs[neighSlot]
+		}
+	}
+	for i, idx := range fhdr.Refidx {
+		if int(idx) == refSlot {
+			refOrder = i
+			break
+		}
+	}
+	filterMode = fhdr.SubpelFilterMode
+	if filterMode == header.FilterModeSwitchable {
+		filterMode = header.FilterMode8TapRegular
+	}
+	if fhdr.Segmentation.Enabled != 0 && fhdr.Segmentation.SegData.D[segID].GlobalMV != 0 {
+		interMode = InterModeGlobalMV
+	}
+	if refOrder >= 0 && refOrder < len(fhdr.GMV) && fhdr.GMV[refOrder].Type == header.WMTypeTranslation {
+		interMode = InterModeGlobalMV
+		shift := 13
+		if fhdr.HP == 0 {
+			shift = 14
+		}
+		mv.X = int16(fhdr.GMV[refOrder].Matrix[0] >> shift)
+		mv.Y = int16(fhdr.GMV[refOrder].Matrix[1] >> shift)
+	} else if fhdr.UseRefFrameMVs != 0 && fs != nil {
+		if tMV, tRefSlot, ok := fs.TemporalInterMV(bx, by); ok && tRefSlot >= 0 && tRefSlot < len(fb.Refs) && fb.Refs[tRefSlot] != nil && !skipMode {
+			mv = tMV
+			refSlot = tRefSlot
+			if rf, ok := slotRefFrame(fhdr, tRefSlot); ok {
+				refFrame = rf
+			}
+			ref = fb.Refs[tRefSlot]
+			for i, idx := range fhdr.Refidx {
+				if int(idx) == refSlot {
+					refOrder = i
+					break
+				}
+			}
+		}
+	}
+	if mv == (refmvs.MV{}) && fs != nil && !skipMode {
+		if cnt, stack := singleRefInterCandidates(fs, fhdr, fb, bx, by); cnt > 0 {
+			mv = stack[0].MV[0]
+			if cnt > 1 {
+				interMode = InterModeNearMV
+			} else {
+				interMode = InterModeNearestMV
+			}
+		}
+	}
+	if mv == (refmvs.MV{}) && fs != nil && !skipMode {
+		if blk, ok := fs.NeighbourGridInterBlock(bx, by); ok && blk.Ref[0] > 0 {
+			gridRefSlot, okRef := frameRefSlot(fhdr, int(blk.Ref[0]))
+			if okRef && gridRefSlot >= 0 && gridRefSlot < len(fb.Refs) && fb.Refs[gridRefSlot] != nil {
+				mv = blk.MV[0]
+				refSlot = gridRefSlot
+				refFrame = int(blk.Ref[0])
+				ref = fb.Refs[gridRefSlot]
+				for i, idx := range fhdr.Refidx {
+					if int(idx) == refSlot {
+						refOrder = i
+						break
+					}
+				}
+			}
+		}
+	}
+	if mv == (refmvs.MV{}) {
+		if neighMV, ok := fs.NeighbourInterMV(bx, by); ok && !skipMode {
+			mv = neighMV
+			interMode = InterModeNearestMV
+		}
+	}
+	if fhdr.ForceIntegerMV != 0 {
+		mv.X = truncateMVToIntPel(mv.X)
+		mv.Y = truncateMVToIntPel(mv.Y)
+	}
+	return
+}
+
+func singleRefInterCandidates(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, bx, by int) (int, [4]refmvs.Candidate) {
+	var stack [4]refmvs.Candidate
+	if fs == nil || fhdr == nil || fs.MVFrame == nil {
+		return 0, stack
+	}
+	cnt := 0
+	add := func(blk refmvs.Block, weight int) {
+		if blk.Ref[0] <= 0 {
+			return
+		}
+		refSlot, ok := frameRefSlot(fhdr, int(blk.Ref[0]))
+		if !ok || refSlot < 0 || refSlot >= len(fb.Refs) || fb.Refs[refSlot] == nil {
+			return
+		}
+		cnt = refmvs.AddCandidate(stack[:], cnt, blk.MV, weight)
+	}
+	if blk, ok := fs.MVFrame.GridBlock(bx>>2, (by>>2)-1); ok {
+		add(blk, 4)
+	}
+	if blk, ok := fs.MVFrame.GridBlock((bx>>2)-1, by>>2); ok {
+		add(blk, 3)
+	}
+	if blk, ok := fs.MVFrame.GridBlock((bx>>2)-1, (by>>2)-1); ok {
+		add(blk, 2)
+	}
+	refmvs.SortCandidates(stack[:], cnt)
+	return cnt, stack
+}
+
+func truncateMVToIntPel(v int16) int16 {
+	return int16((int(v) / 8) * 8)
+}
+
+func interFilter2D(mode header.FilterMode) predinter.Filter2D {
+	switch mode {
+	case header.FilterMode8TapSmooth:
+		return predinter.Filter2D8TapSmooth
+	case header.FilterMode8TapSharp:
+		return predinter.Filter2D8TapSharp
+	case header.FilterModeBilinear:
+		return predinter.Filter2DBilinear
+	default:
+		return predinter.Filter2D8TapRegular
+	}
+}
+
+func floorDivPow2(v, shift int) int {
+	if shift <= 0 {
+		return v
+	}
+	d := 1 << shift
+	if v >= 0 {
+		return v / d
+	}
+	return -(((-v) + d - 1) / d)
+}
+
+func splitMV8(mv int) (pix, frac16 int) {
+	pix = floorDivPow2(mv, 3)
+	frac8 := mv - (pix << 3)
+	frac16 = frac8 << 1
+	return
+}
+
+func copyInterPredictPlane(dst []byte, dstStride, dstW, dstH int,
+	src []byte, srcStride, srcW, srcH int,
+	bx, by, bw, bh int,
+	mv refmvs.MV, mode header.FilterMode,
+) {
+	if len(dst) == 0 || len(src) == 0 || bw <= 0 || bh <= 0 {
+		return
+	}
+	if bx+bw > dstW {
+		bw = dstW - bx
+	}
+	if by+bh > dstH {
+		bh = dstH - by
+	}
+	if bw <= 0 || bh <= 0 {
+		return
+	}
+	mv = refmvs.ClampMV(mv, bx>>2, by>>2, (bw+3)>>2, (bh+3)>>2, (srcW+3)>>2, (srcH+3)>>2)
+	px, mx := splitMV8(int(mv.X))
+	py, my := splitMV8(int(mv.Y))
+	sx := bx + px
+	sy := by + py
+
+	padStride := bw + 7
+	padH := bh + 7
+	pad := make([]byte, padStride*padH)
+	for y := 0; y < padH; y++ {
+		srcY := clampInt(sy-3+y, 0, srcH-1)
+		for x := 0; x < padStride; x++ {
+			srcX := clampInt(sx-3+x, 0, srcW-1)
+			pad[y*padStride+x] = src[srcY*srcStride+srcX]
+		}
+	}
+
+	dstOff := by*dstStride + bx
+	if dstOff < 0 || dstOff >= len(dst) {
+		return
+	}
+	filt := interFilter2D(mode)
+	srcBase := 3*padStride + 3
+	if filt == predinter.Filter2DBilinear {
+		predinter.PutBilin(dst[dstOff:], dstStride, pad, srcBase, padStride, bw, bh, mx, my)
+		return
+	}
+	predinter.Put8Tap(dst[dstOff:], dstStride, pad, srcBase, padStride, bw, bh, mx, my, filt)
 }
 
 func copyPlaneBlock(dst []byte, dstStride, dstW, dstH int, src []byte, srcStride, srcW, srcH int, x, y, w, h int) {

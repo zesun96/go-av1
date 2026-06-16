@@ -214,6 +214,11 @@ type Frame struct {
 	// Per-block MV store (35 × RPStride entries for the current superblock row).
 	R       []Block
 	RStride int
+
+	// Full-frame block store used by the Go decoder while the dav1d-style
+	// row window is still being wired into block-syntax consumers.
+	GridStride int
+	Grid       []Block
 }
 
 // NewFrame allocates a Frame for a frame of iw×ih luma pixels.
@@ -224,13 +229,40 @@ func NewFrame(iw, ih int) *Frame {
 	ih8 := (ih + 7) >> 3
 	rStride := iw4 + 4 // 2-pixel border each side
 	return &Frame{
-		IW4:      iw4,
-		IH4:      ih4,
-		IW8:      iw8,
-		IH8:      ih8,
-		RPStride: iw8,
-		RP:       make([]TemporalBlock, iw8*ih8),
-		R:        make([]Block, 35*rStride),
-		RStride:  rStride,
+		IW4:        iw4,
+		IH4:        ih4,
+		IW8:        iw8,
+		IH8:        ih8,
+		RPStride:   iw8,
+		RP:         make([]TemporalBlock, iw8*ih8),
+		R:          make([]Block, 35*rStride),
+		RStride:    rStride,
+		GridStride: iw4,
+		Grid:       make([]Block, iw4*ih4),
 	}
+}
+
+// PutGridBlock writes blk into every 4x4 unit covered by a coded block.
+func (f *Frame) PutGridBlock(bx4, by4, bw4, bh4 int, blk Block) {
+	if f == nil || f.GridStride == 0 {
+		return
+	}
+	x0 := clamp(bx4, 0, f.IW4)
+	y0 := clamp(by4, 0, f.IH4)
+	x1 := clamp(bx4+bw4, 0, f.IW4)
+	y1 := clamp(by4+bh4, 0, f.IH4)
+	for y := y0; y < y1; y++ {
+		base := y * f.GridStride
+		for x := x0; x < x1; x++ {
+			f.Grid[base+x] = blk
+		}
+	}
+}
+
+// GridBlock returns the stored block for a 4x4 position.
+func (f *Frame) GridBlock(bx4, by4 int) (Block, bool) {
+	if f == nil || f.GridStride == 0 || bx4 < 0 || by4 < 0 || bx4 >= f.IW4 || by4 >= f.IH4 {
+		return Block{}, false
+	}
+	return f.Grid[by4*f.GridStride+bx4], true
 }

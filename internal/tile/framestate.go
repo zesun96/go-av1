@@ -11,6 +11,11 @@
 // They are allocated once per frame and reused across tiles.
 package tile
 
+import (
+	"github.com/zesun96/go-av1/internal/refmvs"
+	"github.com/zesun96/go-av1/internal/transform"
+)
+
 // FrameState holds per-4x4-unit neighbour information for one frame.
 // Rows are indexed top→bottom, columns left→right.
 type FrameState struct {
@@ -31,6 +36,20 @@ type FrameState struct {
 
 	AbovePartition []uint8
 	LeftPartition  []uint8
+	AboveTx        []uint8
+	LeftTx         []uint8
+	AbovePalY      []uint8
+	LeftPalY       []uint8
+	AbovePalUV     []uint8
+	LeftPalUV      []uint8
+	AbovePal       [3][][8]uint8
+	LeftPal        [3][][8]uint8
+	AboveRef       []int8
+	LeftRef        []int8
+	AboveFilter    []uint8
+	LeftFilter     []uint8
+	AboveMV        [2][]int16
+	LeftMV         [2][]int16
 
 	// CDEFIndex stores the decoded per-64x64 CDEF strength index. A value of
 	// -1 means no non-skip block has read the index for that CDEF unit yet.
@@ -41,6 +60,12 @@ type FrameState struct {
 	// the current block's segment id when segmentation is enabled.
 	AboveSegID []uint8
 	LeftSegID  []uint8
+
+	AboveLCoef []uint8
+	LeftLCoef  []uint8
+	AboveCCoef [2][]uint8
+	LeftCCoef  [2][]uint8
+	MVFrame    *refmvs.Frame
 
 	// Frame dimensions in 4-px units.
 	W4, H4 int
@@ -69,21 +94,75 @@ func NewFrameState(w, h int) *FrameState {
 		LeftPresent:    make([]uint8, h4),
 		AbovePartition: make([]uint8, w8),
 		LeftPartition:  make([]uint8, h8),
-		CDEFIndex:      cdefIndex,
-		AboveSegID:     make([]uint8, w4),
-		LeftSegID:      make([]uint8, h4),
-		W4:             w4,
-		H4:             h4,
-		W8:             w8,
-		H8:             h8,
-		W64:            w64,
+		AboveTx:        make([]uint8, w4),
+		LeftTx:         make([]uint8, h4),
+		AbovePalY:      make([]uint8, w4),
+		LeftPalY:       make([]uint8, h4),
+		AbovePalUV:     make([]uint8, w4),
+		LeftPalUV:      make([]uint8, h4),
+		AbovePal: [3][][8]uint8{
+			make([][8]uint8, w4),
+			make([][8]uint8, w4),
+			make([][8]uint8, w4),
+		},
+		LeftPal: [3][][8]uint8{
+			make([][8]uint8, h4),
+			make([][8]uint8, h4),
+			make([][8]uint8, h4),
+		},
+		AboveRef:    filledInt8(w4, -1),
+		LeftRef:     filledInt8(h4, -1),
+		AboveFilter: make([]uint8, w4),
+		LeftFilter:  make([]uint8, h4),
+		AboveMV: [2][]int16{
+			make([]int16, w4),
+			make([]int16, w4),
+		},
+		LeftMV: [2][]int16{
+			make([]int16, h4),
+			make([]int16, h4),
+		},
+		CDEFIndex:  cdefIndex,
+		AboveSegID: make([]uint8, w4),
+		LeftSegID:  make([]uint8, h4),
+		AboveLCoef: filledUint8(w4, 0x40),
+		LeftLCoef:  filledUint8(h4, 0x40),
+		AboveCCoef: [2][]uint8{
+			filledUint8(w4, 0x40),
+			filledUint8(w4, 0x40),
+		},
+		LeftCCoef: [2][]uint8{
+			filledUint8(h4, 0x40),
+			filledUint8(h4, 0x40),
+		},
+		W4:  w4,
+		H4:  h4,
+		W8:  w8,
+		H8:  h8,
+		W64: w64,
 	}
+}
+
+func filledUint8(n int, v uint8) []uint8 {
+	out := make([]uint8, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
+}
+
+func filledInt8(n int, v int8) []int8 {
+	out := make([]int8, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
 }
 
 // PartCtx returns the partition context index (0-3) for a block at (bx,by)
 // pixels based on whether there is a decoded block above and to the left.
 //
-//	partCtx = (hasAbove << 1) | hasLeft
+//	partCtx = hasAbove | (hasLeft << 1)
 func (fs *FrameState) PartCtx(bx, by, bl int) int {
 	col8 := bx / 8
 	row8 := by / 8
@@ -234,6 +313,413 @@ func (fs *FrameState) SetBlockSeg(bx, by, bw, bh int, skip bool, yMode int, segI
 			}
 		}
 	}
+}
+
+// SetInterBlock records the decoded neighbour state for an inter-coded block.
+// The block still updates the generic skip/segmentation/presence caches through
+// SetBlockSeg; inter-specific neighbour state is tracked separately for future
+// reference/motion-vector syntax.
+func (fs *FrameState) SetInterBlock(bx, by, bw, bh int, skip bool, segID uint8, refSlot, refFrame int, filter uint8, interMode int, mv refmvs.MV) {
+	fs.SetBlockSeg(bx, by, bw, bh, skip, DCPred, segID)
+
+	col4Start := bx / 4
+	col4End := (bx + bw + 3) / 4
+	if col4End > fs.W4 {
+		col4End = fs.W4
+	}
+	row4Start := by / 4
+	row4End := (by + bh + 3) / 4
+	if row4End > fs.H4 {
+		row4End = fs.H4
+	}
+
+	refVal := int8(refSlot)
+	aboveRow4 := row4End - 1
+	if aboveRow4 >= 0 && aboveRow4 < fs.H4 {
+		for c := col4Start; c < col4End; c++ {
+			fs.AboveRef[c] = refVal
+			fs.AboveFilter[c] = filter
+			fs.AboveMV[0][c] = mv.Y
+			fs.AboveMV[1][c] = mv.X
+		}
+	}
+
+	leftCol4 := col4End - 1
+	if leftCol4 >= 0 && leftCol4 < fs.W4 {
+		for r := row4Start; r < row4End; r++ {
+			fs.LeftRef[r] = refVal
+			fs.LeftFilter[r] = filter
+			fs.LeftMV[0][r] = mv.Y
+			fs.LeftMV[1][r] = mv.X
+		}
+	}
+
+	fs.setTemporalMVBlock(bx, by, bw, bh, refSlot, mv)
+	fs.setCurrentMVBlock(bx, by, bw, bh, refFrame, interMode, mv)
+}
+
+func (fs *FrameState) setTemporalMVBlock(bx, by, bw, bh int, refSlot int, mv refmvs.MV) {
+	if fs.MVFrame == nil || fs.MVFrame.RPStride == 0 {
+		return
+	}
+	col8Start := bx >> 3
+	col8End := (bx + bw + 7) >> 3
+	if col8End > fs.MVFrame.IW8 {
+		col8End = fs.MVFrame.IW8
+	}
+	row8Start := by >> 3
+	row8End := (by + bh + 7) >> 3
+	if row8End > fs.MVFrame.IH8 {
+		row8End = fs.MVFrame.IH8
+	}
+	refVal := uint8(0)
+	if refSlot >= 0 {
+		refVal = uint8(refSlot + 1)
+	}
+	for y := row8Start; y < row8End; y++ {
+		base := y * fs.MVFrame.RPStride
+		for x := col8Start; x < col8End; x++ {
+			idx := base + x
+			if idx < 0 || idx >= len(fs.MVFrame.RP) {
+				continue
+			}
+			fs.MVFrame.RP[idx] = refmvs.TemporalBlock{
+				MV:  mv,
+				Ref: refVal,
+			}
+		}
+	}
+}
+
+func (fs *FrameState) setCurrentMVBlock(bx, by, bw, bh int, refFrame, interMode int, mv refmvs.MV) {
+	if fs.MVFrame == nil {
+		return
+	}
+	bw4 := (bw + 3) >> 2
+	bh4 := (bh + 3) >> 2
+	mf := uint8(0)
+	if interMode == InterModeGlobalMV {
+		mf = 1
+	}
+	blk := refmvs.Block{
+		MV: refmvs.MVPair{
+			mv,
+			{},
+		},
+		Ref: refmvs.RefPair{int8(refFrame), -1},
+		BS:  uint8(maxInt(bsizeFromDim(bw, bh), 0)),
+		MF:  mf,
+	}
+	fs.MVFrame.PutGridBlock(bx>>2, by>>2, bw4, bh4, blk)
+}
+
+func (fs *FrameState) NeighbourInterRef(bx, by int) (slot int, ok bool) {
+	col4 := bx / 4
+	row4 := by / 4
+	if row4 > 0 && col4 < fs.W4 && fs.AbovePresent[col4] != 0 && fs.AboveRef[col4] >= 0 {
+		return int(fs.AboveRef[col4]), true
+	}
+	if col4 > 0 && row4 < fs.H4 && fs.LeftPresent[row4] != 0 && fs.LeftRef[row4] >= 0 {
+		return int(fs.LeftRef[row4]), true
+	}
+	return -1, false
+}
+
+func (fs *FrameState) NeighbourInterMV(bx, by int) (mv refmvs.MV, ok bool) {
+	col4 := bx / 4
+	row4 := by / 4
+	if row4 > 0 && col4 < fs.W4 && fs.AbovePresent[col4] != 0 && fs.AboveRef[col4] >= 0 {
+		return refmvs.MV{Y: fs.AboveMV[0][col4], X: fs.AboveMV[1][col4]}, true
+	}
+	if col4 > 0 && row4 < fs.H4 && fs.LeftPresent[row4] != 0 && fs.LeftRef[row4] >= 0 {
+		return refmvs.MV{Y: fs.LeftMV[0][row4], X: fs.LeftMV[1][row4]}, true
+	}
+	return refmvs.MV{}, false
+}
+
+func (fs *FrameState) TemporalInterMV(bx, by int) (mv refmvs.MV, refSlot int, ok bool) {
+	if fs.MVFrame == nil || fs.MVFrame.RPStride == 0 {
+		return refmvs.MV{}, -1, false
+	}
+	col8 := bx >> 3
+	row8 := by >> 3
+	if col8 < 0 || col8 >= fs.MVFrame.IW8 || row8 < 0 || row8 >= fs.MVFrame.IH8 {
+		return refmvs.MV{}, -1, false
+	}
+	tb := fs.MVFrame.RP[row8*fs.MVFrame.RPStride+col8]
+	if tb.Ref == 0 {
+		return refmvs.MV{}, -1, false
+	}
+	return tb.MV, int(tb.Ref) - 1, true
+}
+
+func (fs *FrameState) GridInterBlock(bx, by int) (refmvs.Block, bool) {
+	if fs.MVFrame == nil {
+		return refmvs.Block{}, false
+	}
+	return fs.MVFrame.GridBlock(bx>>2, by>>2)
+}
+
+func (fs *FrameState) NeighbourGridInterBlock(bx, by int) (refmvs.Block, bool) {
+	if fs.MVFrame == nil {
+		return refmvs.Block{}, false
+	}
+	if blk, ok := fs.MVFrame.GridBlock(bx>>2, (by>>2)-1); ok && !blk.Ref.IsIntra() {
+		return blk, true
+	}
+	if blk, ok := fs.MVFrame.GridBlock((bx>>2)-1, by>>2); ok && !blk.Ref.IsIntra() {
+		return blk, true
+	}
+	return refmvs.Block{}, false
+}
+
+func (fs *FrameState) PaletteYCtx(bx, by int) int {
+	col4 := bx / 4
+	row4 := by / 4
+	above := 0
+	if row4 > 0 && col4 < fs.W4 && fs.AbovePalY[col4] != 0 {
+		above = 1
+	}
+	left := 0
+	if col4 > 0 && row4 < fs.H4 && fs.LeftPalY[row4] != 0 {
+		left = 1
+	}
+	return above + left
+}
+
+func (fs *FrameState) PaletteUVCtx(bx, by int) int {
+	col4 := bx / 4
+	row4 := by / 4
+	if row4 > 0 && col4 < fs.W4 && fs.AbovePalUV[col4] != 0 {
+		return 1
+	}
+	if col4 > 0 && row4 < fs.H4 && fs.LeftPalUV[row4] != 0 {
+		return 1
+	}
+	return 0
+}
+
+func (fs *FrameState) SetPaletteCtx(bx, by, bw, bh, palY, palUV int) {
+	col4Start := bx / 4
+	col4End := (bx + bw + 3) / 4
+	if col4End > fs.W4 {
+		col4End = fs.W4
+	}
+	row4Start := by / 4
+	row4End := (by + bh + 3) / 4
+	if row4End > fs.H4 {
+		row4End = fs.H4
+	}
+	palYVal := uint8(0)
+	if palY > 0 {
+		palYVal = uint8(palY)
+	}
+	palUVVal := uint8(0)
+	if palUV > 0 {
+		palUVVal = uint8(palUV)
+	}
+	for c := col4Start; c < col4End; c++ {
+		fs.AbovePalY[c] = palYVal
+		fs.AbovePalUV[c] = palUVVal
+	}
+	for r := row4Start; r < row4End; r++ {
+		fs.LeftPalY[r] = palYVal
+		fs.LeftPalUV[r] = palUVVal
+	}
+}
+
+func (fs *FrameState) SetPaletteColors(bx, by, bw, bh int, pal [3][8]uint8) {
+	col4Start := bx / 4
+	col4End := (bx + bw + 3) / 4
+	if col4End > fs.W4 {
+		col4End = fs.W4
+	}
+	row4Start := by / 4
+	row4End := (by + bh + 3) / 4
+	if row4End > fs.H4 {
+		row4End = fs.H4
+	}
+	for pl := 0; pl < 3; pl++ {
+		for c := col4Start; c < col4End; c++ {
+			fs.AbovePal[pl][c] = pal[pl]
+		}
+		for r := row4Start; r < row4End; r++ {
+			fs.LeftPal[pl][r] = pal[pl]
+		}
+	}
+}
+
+func (fs *FrameState) coefEdges(plane int) (above, left []uint8) {
+	if plane == 0 {
+		return fs.AboveLCoef, fs.LeftLCoef
+	}
+	idx := plane - 1
+	if idx < 0 {
+		idx = 0
+	} else if idx > 1 {
+		idx = 1
+	}
+	return fs.AboveCCoef[idx], fs.LeftCCoef[idx]
+}
+
+func (fs *FrameState) CoefSkipCtx(plane, bx, by, bw, bh int, tx uint8) int {
+	above, left := fs.coefEdges(plane)
+	td := transform.TxfmDimensions[tx]
+	col4 := bx >> 2
+	row4 := by >> 2
+	bwLog := blockDimLog4(bw)
+	bhLog := blockDimLog4(bh)
+
+	if plane == 0 {
+		if bwLog == int(td.Lw) && bhLog == int(td.Lh) {
+			return 0
+		}
+		a := mergedCoefLow(above, col4, int(td.W))
+		l := mergedCoefLow(left, row4, int(td.H))
+		if a > 4 {
+			a = 4
+		}
+		if l > 4 {
+			l = 4
+		}
+		return int(DAV1DSkipCtx[a][l])
+	}
+
+	chromaBwLog := bwLog
+	chromaBhLog := bhLog
+	if chromaBwLog > 0 {
+		chromaBwLog--
+	}
+	if chromaBhLog > 0 {
+		chromaBhLog--
+	}
+	notOneBlk := boolInt(chromaBwLog > int(td.Lw) || chromaBhLog > int(td.Lh))
+	ca := 0
+	if !allCoefNeutral(above, col4, int(td.W)) {
+		ca = 1
+	}
+	cl := 0
+	if !allCoefNeutral(left, row4, int(td.H)) {
+		cl = 1
+	}
+	return 7 + notOneBlk*3 + ca + cl
+}
+
+func (fs *FrameState) DCSignCtx(plane, bx, by int, tx uint8) int {
+	above, left := fs.coefEdges(plane)
+	td := transform.TxfmDimensions[tx]
+	col4 := bx >> 2
+	row4 := by >> 2
+	s := coefSignSum(above, col4, int(td.W)) + coefSignSum(left, row4, int(td.H))
+	return boolInt(s != 0) + boolInt(s > 0)
+}
+
+func (fs *FrameState) SetCoefCtx(plane, bx, by int, tx uint8, resCtx uint8) {
+	above, left := fs.coefEdges(plane)
+	td := transform.TxfmDimensions[tx]
+	col4 := bx >> 2
+	row4 := by >> 2
+	for i := 0; i < int(td.W) && col4+i < len(above); i++ {
+		above[col4+i] = resCtx
+	}
+	for i := 0; i < int(td.H) && row4+i < len(left); i++ {
+		left[row4+i] = resCtx
+	}
+}
+
+func (fs *FrameState) TxCtx(bx, by int, maxTx uint8) int {
+	td := transform.TxfmDimensions[maxTx]
+	col4 := bx >> 2
+	row4 := by >> 2
+
+	above := 0
+	if col4 < len(fs.AboveTx) && fs.AboveTx[col4] >= td.Lw {
+		above = 1
+	}
+	left := 0
+	if row4 < len(fs.LeftTx) && fs.LeftTx[row4] >= td.Lh {
+		left = 1
+	}
+	return above + left
+}
+
+func (fs *FrameState) SetTxCtx(bx, by, bw, bh int, tx uint8, switchable, skip bool) {
+	col4 := bx >> 2
+	row4 := by >> 2
+
+	txw := blockDimLog4(bw)
+	txh := blockDimLog4(bh)
+	if switchable && !skip {
+		td := transform.TxfmDimensions[tx]
+		txw = int(td.Lw)
+		txh = int(td.Lh)
+	}
+
+	w4 := blockDim4Units(bw)
+	h4 := blockDim4Units(bh)
+	for i := 0; i < w4 && col4+i < len(fs.AboveTx); i++ {
+		fs.AboveTx[col4+i] = uint8(txw)
+	}
+	for i := 0; i < h4 && row4+i < len(fs.LeftTx); i++ {
+		fs.LeftTx[row4+i] = uint8(txh)
+	}
+}
+
+func maxCoefLow(v []uint8, start, n int) int {
+	max := 0
+	for i := 0; i < n && start+i < len(v); i++ {
+		x := int(v[start+i] & 0x3f)
+		if x > max {
+			max = x
+		}
+	}
+	return max
+}
+
+func mergedCoefLow(v []uint8, start, n int) int {
+	merged := 0
+	for i := 0; i < n && start+i < len(v); i++ {
+		merged |= int(v[start+i])
+	}
+	return merged & 0x3f
+}
+
+func allCoefNeutral(v []uint8, start, n int) bool {
+	for i := 0; i < n && start+i < len(v); i++ {
+		if v[start+i] != 0x40 {
+			return false
+		}
+	}
+	return true
+}
+
+func coefSignSum(v []uint8, start, n int) int {
+	sum := 0
+	for i := 0; i < n && start+i < len(v); i++ {
+		sum += int(v[start+i]>>6) - 1
+	}
+	return sum
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func blockDimLog4(px int) int {
+	n := 0
+	v := (px + 3) >> 2
+	for v > 1 {
+		v >>= 1
+		n++
+	}
+	return n
+}
+
+func blockDim4Units(px int) int {
+	return (px + 3) >> 2
 }
 
 // intraToKFYCtx maps an AV1 intra prediction mode to the 5-category

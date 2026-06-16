@@ -39,6 +39,14 @@ func pixelClamp(v, maxVal int) int {
 //   - bitDepth: pixel bit depth (8, 10, or 12)
 func InvTxfmAdd(dst []uint8, stride int, coeff []int32, eob int,
 	tx uint8, shift int, txtp uint8, bitDepth int) {
+	InvTxfmAddWithLastNonzeroCol(dst, stride, coeff, eob, tx, shift, txtp, -1, bitDepth)
+}
+
+// InvTxfmAddWithLastNonzeroCol mirrors InvTxfmAdd but allows callers to pass
+// dav1d's exact last_nonzero_col_from_eob value when the coefficient scan path
+// has it available.
+func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob int,
+	tx uint8, shift int, txtp uint8, exactLastNonzeroCol int, bitDepth int) {
 
 	td := TxfmDimensions[tx]
 	w := int(td.W) * 4
@@ -83,8 +91,8 @@ func InvTxfmAdd(dst []uint8, stride int, coeff []int32, eob int,
 	}
 
 	txtps := Tx1dTypes[txtp]
-	first1d := Tx1dFns[td.Lw][txtps[1]]
-	second1d := Tx1dFns[td.Lh][txtps[0]]
+	first1d := Tx1dFns[td.Lw][txtps[0]]
+	second1d := Tx1dFns[td.Lh][txtps[1]]
 
 	// Guard against unimplemented transform combinations (e.g. ADST for TX32/TX64).
 	// Fall back to DCT if the requested 1D function is nil.
@@ -125,6 +133,8 @@ func InvTxfmAdd(dst []uint8, stride int, coeff []int32, eob int,
 			}
 		} else if txtps[0] == Tx1dIDENTITY && txtps[1] != Tx1dIDENTITY {
 			lastNonzeroCol = eob >> (int(td.Lw) + 2)
+		} else if exactLastNonzeroCol >= 0 {
+			lastNonzeroCol = exactLastNonzeroCol
 		}
 		if lastNonzeroCol >= sh {
 			lastNonzeroCol = sh - 1

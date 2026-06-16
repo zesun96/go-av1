@@ -290,6 +290,25 @@ func TestTemporalBlock_ZeroValue(t *testing.T) {
 	}
 }
 
+func TestFrameGridBlock(t *testing.T) {
+	f := NewFrame(32, 32)
+	blk := Block{
+		MV:  MVPair{MV{Y: 8, X: -4}, {}},
+		Ref: RefPair{3, -1},
+		BS:  17,
+		MF:  2,
+	}
+	f.PutGridBlock(2, 1, 2, 3, blk)
+
+	got, ok := f.GridBlock(3, 3)
+	if !ok {
+		t.Fatal("GridBlock ok=false")
+	}
+	if got.Ref != blk.Ref || got.MV != blk.MV || got.BS != blk.BS || got.MF != blk.MF {
+		t.Fatalf("GridBlock=%+v want %+v", got, blk)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // clampMVComponent (internal helper)
 // ─────────────────────────────────────────────────────────────────────────────

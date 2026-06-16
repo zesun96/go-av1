@@ -4,6 +4,7 @@ package tile
 
 import (
 	"github.com/zesun96/go-av1/internal/header"
+	"github.com/zesun96/go-av1/internal/refmvs"
 )
 
 // DecodeTileGroup parses a tile_group_obu() payload (or the tile portion of
@@ -34,6 +35,7 @@ func DecodeTileGroup(
 
 	// Allocate frame-level neighbour state (shared across tiles in raster order).
 	fs := NewFrameState(fb.Width, fb.Height)
+	fs.MVFrame = refmvs.NewFrame(fb.Width, fb.Height)
 
 	for _, td := range tiles {
 		if err2 := DecodeTile(td, fhdr, seq, fb, fs, logf); err2 != nil {

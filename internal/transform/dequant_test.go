@@ -252,12 +252,14 @@ func TestDequant_AC_32x32_Shift(t *testing.T) {
 	}
 }
 
-func TestDequant_EOB(t *testing.T) {
-	// eob=1 means only DC and first AC are valid
+func TestDequant_SparseRC(t *testing.T) {
+	// `eob` is scan-order metadata. The decoder stores non-zero coefficients at
+	// sparse column-major rc positions, so dequantization must honor every
+	// populated slot rather than assuming rc <= eob.
 	coeffs := make([]int32, 16)
 	coeffs[0] = 2
 	coeffs[1] = 3
-	coeffs[2] = 4 // should NOT be dequantized (beyond eob)
+	coeffs[2] = 4
 	dq := [2]uint16{100, 80}
 
 	Dequant(coeffs, 4, dq, TX4x4, nil, 1)
@@ -268,8 +270,8 @@ func TestDequant_EOB(t *testing.T) {
 	if coeffs[1] != 240 { // 80*3
 		t.Fatalf("AC[1]: got %d want 240", coeffs[1])
 	}
-	if coeffs[2] != 4 {
-		t.Fatalf("AC[2] beyond eob: got %d want 4 (untouched)", coeffs[2])
+	if coeffs[2] != 320 { // 80*4
+		t.Fatalf("AC[2]: got %d want 320", coeffs[2])
 	}
 }
 

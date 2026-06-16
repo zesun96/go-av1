@@ -90,6 +90,21 @@ const (
 	CFLPred = NIntraPredModes
 )
 
+var FilterModeToYMode = [5]uint8{
+	DCPred,
+	VertPred,
+	HorPred,
+	HorDownPred,
+	DCPred,
+}
+
+const (
+	InterModeZeroMV = iota
+	InterModeGlobalMV
+	InterModeNearestMV
+	InterModeNearMV
+)
+
 // Av1Block holds per-block decoding state, mirroring dav1d Av1Block.
 type Av1Block struct {
 	Bl       uint8 // BlockLevel
@@ -102,14 +117,22 @@ type Av1Block struct {
 	Uvtx     uint8 // (Rect)TxfmSize for UV transform
 
 	// Intra fields (populated when Intra == true)
-	YMode    uint8   // IntraPredMode for luma
-	UvMode   uint8   // IntraPredMode for chroma
+	YMode    uint8 // IntraPredMode for luma
+	UvMode   uint8 // IntraPredMode for chroma
+	PalSz    [2]uint8
 	Tx       uint8   // (Rect)TxfmSize for luma transform
+	MaxYTx   uint8   // largest luma transform allowed by block size
+	TxSplit0 uint8   // var-tx split mask depth 0
+	TxSplit1 uint16  // var-tx split mask depth 1
 	YAngle   int8    // directional angle for luma
 	UvAngle  int8    // directional angle for chroma
 	CflAlpha [2]int8 // CFL signed scale factors [U, V]
 
 	// Inter fields (populated when Intra == false; future milestone)
+	InterMode uint8
+	RefSlot   int8
+	Filter    uint8
+	MV        [2]int16 // [Y, X] in 1/8-pel
 }
 
 // bsizeFromDim maps a (bw, bh) pair in luma pixel units to the BlockSize
@@ -193,4 +216,24 @@ func palSzCtx(bw, bh int) int {
 		return 6
 	}
 	return c
+}
+
+func angleDeltaAllowed(bw, bh int) bool {
+	log2 := func(v int) int {
+		n := 0
+		for v > 1 {
+			v >>= 1
+			n++
+		}
+		return n
+	}
+	bw4 := bw >> 2
+	bh4 := bh >> 2
+	if bw4 < 1 {
+		bw4 = 1
+	}
+	if bh4 < 1 {
+		bh4 = 1
+	}
+	return log2(bw4)+log2(bh4) >= 2
 }

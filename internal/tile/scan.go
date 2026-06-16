@@ -13,6 +13,8 @@
 // dav1d/src/scan.c when needed.
 package tile
 
+import "github.com/zesun96/go-av1/internal/transform"
+
 // ---------------------------------------------------------------------------
 // Enum: TxClass — decides how get_lo_ctx / scan / stride are computed.
 // ---------------------------------------------------------------------------
@@ -122,29 +124,144 @@ var DAV1DSkipCtx = [5][5]uint8{
 
 // scanCache is keyed by (txClass<<8)|(lw<<4)|lh.
 var scanCache = map[uint16][]uint16{}
+var lastNonzeroColCache = map[uint8][]uint8{}
 
 // GetScan returns a coefficient scan order for a transform of log2-size
 // (lw, lh) and tx_class. The returned slice has length (4<<lw)*(4<<lh).
-// Each entry is a raster index (y*stride + x) where stride = 4<<lw.
+// For TX_CLASS_2D each entry is dav1d's packed rc value: (x << shift) | y,
+// where shift=lh+2. For 1D transforms the caller does not use this table.
 //
-// For Task 1 we always return a row-major raster scan regardless of
-// tx_class; Task 2 will replace this with real dav1d_scans data when the
-// pattern is needed for accurate decoding.
+// Small and medium transforms use verbatim dav1d scan tables. dav1d also
+// aliases TX64x64/RTX32x64/RTX64x32 to scan_32x32 and RTX16x64/RTX64x16 to
+// scan_16x32/scan_32x16 respectively; keep those aliases here so Largest-tx
+// streams do not fall back to raster order.
 func GetScan(lw, lh uint8, cls TxClass) []uint16 {
 	key := (uint16(cls) << 8) | (uint16(lw) << 4) | uint16(lh)
 	if s, ok := scanCache[key]; ok {
 		return s
 	}
+
+	if cls == TxClass2D {
+		if tx, ok := rectTxSizeForLogs(lw, lh); ok {
+			if exact := Scans[tx]; len(exact) != 0 {
+				scanCache[key] = exact
+				return exact
+			}
+		}
+	}
+
 	w := 4 << lw
 	h := 4 << lh
 	out := make([]uint16, w*h)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			out[y*w+x] = uint16(y*w + x)
+	n := 0
+	if cls == TxClass2D {
+		shift := lh + 2
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out[n] = uint16((x << shift) | y)
+				n++
+			}
+		}
+	} else {
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out[n] = uint16(y*w + x)
+				n++
+			}
 		}
 	}
 	scanCache[key] = out
 	return out
+}
+
+// LastNonzeroColFromEOB returns dav1d's last_nonzero_col_from_eob value for
+// exact 2D-scan-backed transforms. The bool is false when no exact table is
+// available for the given transform size.
+func LastNonzeroColFromEOB(tx uint8, eob int) (int, bool) {
+	if eob < 0 {
+		return 0, false
+	}
+
+	if cols, ok := lastNonzeroColCache[tx]; ok {
+		if eob >= len(cols) {
+			return len(cols) - 1, true
+		}
+		return int(cols[eob]), true
+	}
+
+	if int(tx) >= len(Scans) {
+		return 0, false
+	}
+	scan := Scans[tx]
+	if len(scan) == 0 {
+		return 0, false
+	}
+
+	td := transform.TxfmDimensions[tx]
+	sh := int(td.H) * 4
+	if sh > 32 {
+		sh = 32
+	}
+	mask := sh - 1
+	cols := make([]uint8, len(scan))
+	maxCol := 0
+	for i, rc := range scan {
+		col := int(rc) & mask
+		if col > maxCol {
+			maxCol = col
+		}
+		cols[i] = uint8(maxCol)
+	}
+	lastNonzeroColCache[tx] = cols
+	if eob >= len(cols) {
+		return len(cols) - 1, true
+	}
+	return int(cols[eob]), true
+}
+
+func rectTxSizeForLogs(lw, lh uint8) (uint8, bool) {
+	switch {
+	case lw == 0 && lh == 0:
+		return transform.TX4x4, true
+	case lw == 1 && lh == 1:
+		return transform.TX8x8, true
+	case lw == 2 && lh == 2:
+		return transform.TX16x16, true
+	case lw == 3 && lh == 3:
+		return transform.TX32x32, true
+	case lw == 4 && lh == 4:
+		return transform.TX64x64, true
+	case lw == 0 && lh == 1:
+		return transform.RTX4x8, true
+	case lw == 1 && lh == 0:
+		return transform.RTX8x4, true
+	case lw == 1 && lh == 2:
+		return transform.RTX8x16, true
+	case lw == 2 && lh == 1:
+		return transform.RTX16x8, true
+	case lw == 2 && lh == 3:
+		return transform.RTX16x32, true
+	case lw == 3 && lh == 2:
+		return transform.RTX32x16, true
+	case lw == 3 && lh == 4:
+		return transform.RTX32x64, true
+	case lw == 4 && lh == 3:
+		return transform.RTX64x32, true
+	case lw == 0 && lh == 2:
+		return transform.RTX4x16, true
+	case lw == 2 && lh == 0:
+		return transform.RTX16x4, true
+	case lw == 1 && lh == 3:
+		return transform.RTX8x32, true
+	case lw == 3 && lh == 1:
+		return transform.RTX32x8, true
+	case lw == 2 && lh == 4:
+		return transform.RTX16x64, true
+	case lw == 4 && lh == 2:
+		return transform.RTX64x16, true
+	default:
+		return 0, false
+	}
 }
 
 // ---------------------------------------------------------------------------

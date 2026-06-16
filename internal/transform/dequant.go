@@ -342,13 +342,11 @@ func Dequant(coeffs []int32, stride int, dq [2]uint16, txSz int, qm []uint8, eob
 	}
 	acDq := int(dq[1])
 
-	// Process remaining coefficients in raster scan order.
-	// We need to iterate over the block; for simplicity we process
-	// all positions that could be within eob.
+	// Process remaining coefficients in column-major rc order.
+	// `eob` is the last non-zero position in scan order, not the highest rc
+	// index. The residual decoder stores coefficients sparsely at packed rc
+	// positions, so limiting dequantization to rc <= eob drops valid AC terms.
 	maxIdx := pxW * pxH
-	if eob > 0 && eob < maxIdx {
-		maxIdx = eob + 1
-	}
 	for rc := 1; rc < maxIdx; rc++ {
 		if coeffs[rc] == 0 {
 			continue

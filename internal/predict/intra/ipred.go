@@ -2,6 +2,59 @@ package intra
 
 import "math/bits"
 
+var filterIntraTaps = [5][8][7]int8{
+	{
+		{0, -6, 10, 0, 0, 0, 12},
+		{-5, 2, 10, 0, 0, 9, 0},
+		{-3, 1, 1, 10, 0, 7, 0},
+		{-3, 1, 1, 2, 10, 5, 0},
+		{-4, 6, 0, 0, 0, 2, 12},
+		{-3, 2, 6, 0, 0, 2, 9},
+		{-3, 2, 2, 6, 0, 2, 7},
+		{-3, 1, 2, 2, 6, 3, 5},
+	},
+	{
+		{-10, 16, 0, 0, 0, 10, 0},
+		{-6, 0, 16, 0, 0, 6, 0},
+		{-4, 0, 0, 16, 0, 4, 0},
+		{-2, 0, 0, 0, 16, 2, 0},
+		{-10, 16, 0, 0, 0, 0, 10},
+		{-6, 0, 16, 0, 0, 0, 6},
+		{-4, 0, 0, 16, 0, 0, 4},
+		{-2, 0, 0, 0, 16, 0, 2},
+	},
+	{
+		{-8, 8, 0, 0, 0, 16, 0},
+		{-8, 0, 8, 0, 0, 16, 0},
+		{-8, 0, 0, 8, 0, 16, 0},
+		{-8, 0, 0, 0, 8, 16, 0},
+		{-4, 4, 0, 0, 0, 0, 16},
+		{-4, 0, 4, 0, 0, 0, 16},
+		{-4, 0, 0, 4, 0, 0, 16},
+		{-4, 0, 0, 0, 4, 0, 16},
+	},
+	{
+		{-2, 8, 0, 0, 0, 10, 0},
+		{-1, 3, 8, 0, 0, 6, 0},
+		{-1, 2, 3, 8, 0, 4, 0},
+		{0, 1, 2, 3, 8, 2, 0},
+		{-1, 4, 0, 0, 0, 3, 10},
+		{-1, 3, 4, 0, 0, 4, 6},
+		{-1, 2, 3, 4, 0, 4, 4},
+		{-1, 2, 2, 3, 4, 3, 3},
+	},
+	{
+		{-12, 14, 0, 0, 0, 14, 0},
+		{-10, 0, 14, 0, 0, 12, 0},
+		{-9, 0, 0, 14, 0, 11, 0},
+		{-8, 0, 0, 0, 14, 10, 0},
+		{-10, 12, 0, 0, 0, 0, 14},
+		{-9, 1, 12, 0, 0, 0, 12},
+		{-8, 0, 0, 12, 0, 1, 11},
+		{-7, 0, 0, 1, 12, 1, 9},
+	},
+}
+
 // Topleft buffer layout (mirrors dav1d's `pixel *topleft`):
 //
 //   topleft[tl-1-i] = left sample i  (i = 0 .. height-1, top→bottom)
@@ -111,6 +164,55 @@ func PredH(dst []uint8, stride int, topleft []uint8, tl, width, height int) {
 			row[x] = v
 		}
 		row = row[stride:]
+	}
+}
+
+// PredFilter implements AV1 filter intra prediction for the five
+// filter-intra variants signalled on DC-predicted luma blocks.
+func PredFilter(dst []uint8, stride int, topleft []uint8, tl, width, height, mode int) {
+	if mode < 0 || mode >= len(filterIntraTaps) {
+		PredDC(dst, stride, topleft, tl, width, height)
+		return
+	}
+
+	filter := filterIntraTaps[mode]
+	for y := 0; y < height; y += 2 {
+		topBase := tl + 1
+		topSrc := topleft
+		if y > 0 {
+			topBase = (y - 1) * stride
+			topSrc = dst
+		}
+		p0 := int(topleft[tl-y])
+		leftBase := tl - y - 1
+		leftFromDst := false
+		for x := 0; x < width; x += 4 {
+			p1 := int(topSrc[topBase+0])
+			p2 := int(topSrc[topBase+1])
+			p3 := int(topSrc[topBase+2])
+			p4 := int(topSrc[topBase+3])
+			p5, p6 := 0, 0
+			if leftFromDst {
+				p5 = int(dst[leftBase])
+				p6 = int(dst[leftBase+stride])
+			} else {
+				p5 = int(topleft[leftBase])
+				p6 = int(topleft[leftBase-1])
+			}
+			for yy := 0; yy < 2; yy++ {
+				rowBase := (y+yy)*stride + x
+				for xx := 0; xx < 4; xx++ {
+					f := filter[yy*4+xx]
+					acc := int(f[0])*p0 + int(f[1])*p1 + int(f[2])*p2 + int(f[3])*p3 +
+						int(f[4])*p4 + int(f[5])*p5 + int(f[6])*p6
+					dst[rowBase+xx] = clip8((acc + 8) >> 4)
+				}
+			}
+			leftBase = y*stride + x + 3
+			leftFromDst = true
+			p0 = int(topSrc[topBase+3])
+			topBase += 4
+		}
 	}
 }
 

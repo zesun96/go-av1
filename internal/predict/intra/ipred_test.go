@@ -175,6 +175,65 @@ func TestPredH(t *testing.T) {
 	}
 }
 
+func TestPredFilter_ConstantEdge(t *testing.T) {
+	for mode := 0; mode < 5; mode++ {
+		buf, tl := makeEdge(8, 8, 73, func(int) uint8 { return 73 }, func(int) uint8 { return 73 })
+		dst := make([]uint8, 8*8)
+		PredFilter(dst, 8, buf, tl, 8, 8, mode)
+		blockEqual(t, dst, 8, allConst(8, 8, 73), 8, 8, "FILTER")
+	}
+}
+
+func TestPredFilter_Oracle4x4(t *testing.T) {
+	buf, tl := makeEdge(4, 4, 23,
+		func(i int) uint8 { return []uint8{31, 37, 41, 43}[i] },
+		func(i int) uint8 { return []uint8{29, 19, 17, 13}[i] },
+	)
+	dst := make([]uint8, 4*4)
+	PredFilter(dst, 4, buf, tl, 4, 4, 0)
+
+	filter := filterIntraTaps[0]
+	want := make([]uint8, 4*4)
+	for y := 0; y < 4; y += 2 {
+		topBase := tl + 1
+		topSrc := buf
+		if y > 0 {
+			topBase = (y - 1) * 4
+			topSrc = want
+		}
+		p0 := int(buf[tl-y])
+		leftBase := tl - y - 1
+		leftFromDst := false
+		for x := 0; x < 4; x += 4 {
+			p1 := int(topSrc[topBase+0])
+			p2 := int(topSrc[topBase+1])
+			p3 := int(topSrc[topBase+2])
+			p4 := int(topSrc[topBase+3])
+			p5, p6 := 0, 0
+			if leftFromDst {
+				p5 = int(want[leftBase])
+				p6 = int(want[leftBase+4])
+			} else {
+				p5 = int(buf[leftBase])
+				p6 = int(buf[leftBase-1])
+			}
+			for yy := 0; yy < 2; yy++ {
+				for xx := 0; xx < 4; xx++ {
+					f := filter[yy*4+xx]
+					acc := int(f[0])*p0 + int(f[1])*p1 + int(f[2])*p2 + int(f[3])*p3 +
+						int(f[4])*p4 + int(f[5])*p5 + int(f[6])*p6
+					want[(y+yy)*4+x+xx] = clip8((acc + 8) >> 4)
+				}
+			}
+			leftBase = y*4 + x + 3
+			leftFromDst = true
+			p0 = int(topSrc[topBase+3])
+			topBase += 4
+		}
+	}
+	blockEqual(t, dst, 4, want, 4, 4, "FILTER4x4")
+}
+
 // ---- PAETH ----------------------------------------------------------------
 
 // paethRef is an independent oracle for the PAETH selection rule.

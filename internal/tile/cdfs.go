@@ -114,26 +114,26 @@ var DefaultSkipCDF = [3][3]uint16{
 //   → 32768-x: {31998,30347,27543,19861,12574,0}
 // ---------------------------------------------------------------------------
 
-const TxTypeIntra2Symbols = 4 // reduced set or TX16
-const TxTypeIntra1Symbols = 6 // full set for TX4/TX8
+const TxTypeIntra2Symbols = 5 // reduced set or TX16
+const TxTypeIntra1Symbols = 7 // full set for TX4/TX8
 
 var DefaultTxTypeIntra2CDF = [TxTypeIntra2Symbols + 1]uint16{
-	31376, 30268, 28889, 0, 0,
+	31376, 30268, 28889, 27648, 0, 0,
 }
 
 var DefaultTxTypeIntra1CDF = [TxTypeIntra1Symbols + 1]uint16{
-	31998, 30347, 27543, 19861, 12574, 0, 0,
+	31998, 30347, 27543, 19861, 12574, 8192, 0, 0,
 }
 
 // TxTypeIntra2Set maps the 4-symbol reduced intra tx type index to TxfmType.
 // Source: dav1d_tx_types_per_set[0..4]
 // {IDTX=9, DCT_DCT=0, ADST_ADST=3, ADST_DCT=1, DCT_ADST=2}
-var TxTypeIntra2Set = [TxTypeIntra2Symbols]uint8{9, 0, 3, 1}
+var TxTypeIntra2Set = [TxTypeIntra2Symbols]uint8{9, 0, 3, 1, 2}
 
 // TxTypeIntra1Set maps the 6-symbol full intra tx type index to TxfmType.
 // Source: dav1d_tx_types_per_set[5..10]
 // {IDTX=9, DCT_DCT=0, V_DCT=10, H_DCT=11, ADST_ADST=3, ADST_DCT=1}
-var TxTypeIntra1Set = [TxTypeIntra1Symbols]uint8{9, 0, 10, 11, 3, 1}
+var TxTypeIntra1Set = [TxTypeIntra1Symbols]uint8{9, 0, 10, 11, 3, 1, 2}
 
 // TxtpFromUVMode maps intra UV prediction mode → txtp (luma-derived).
 // Source: dav1d_txtp_from_uvmode[N_UV_INTRA_PRED_MODES]

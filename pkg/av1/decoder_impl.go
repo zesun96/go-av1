@@ -204,9 +204,13 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 		if d.pendingFhdr == nil || d.pendingPic == nil || d.seq == nil {
 			return nil
 		}
-		// Decode all tiles into the pending picture.
-		fb := d.picToFrameBuf(d.pendingPic)
-		tile.DecodeTileGroup(o.Payload, d.pendingFhdr, d.seq, fb, d.logf) //nolint:errcheck
+		if !d.pendingFhdr.FrameType.IsIntra() && d.copyReferenceFallback(d.pendingPic, d.pendingFhdr) {
+			d.logf("frame: inter fallback copied reference frame")
+		} else {
+			// Decode all tiles into the pending picture.
+			fb := d.picToFrameBuf(d.pendingPic)
+			tile.DecodeTileGroup(o.Payload, d.pendingFhdr, d.seq, fb, d.logf) //nolint:errcheck
+		}
 		d.finishFrame(d.pendingPic, d.pendingFhdr)
 		d.pendingFhdr = nil
 		d.pendingPic = nil
@@ -236,9 +240,13 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 		}
 
 		pic := d.allocPicture(&fhdr)
-		tilePayload := frameOBUTilePayload(o.Payload, consumed)
-		fb := d.picToFrameBuf(pic)
-		tile.DecodeTileGroup(tilePayload, &fhdr, d.seq, fb, d.logf) //nolint:errcheck
+		if !fhdr.FrameType.IsIntra() && d.copyReferenceFallback(pic, &fhdr) {
+			d.logf("frame: inter fallback copied reference frame")
+		} else {
+			tilePayload := frameOBUTilePayload(o.Payload, consumed)
+			fb := d.picToFrameBuf(pic)
+			tile.DecodeTileGroup(tilePayload, &fhdr, d.seq, fb, d.logf) //nolint:errcheck
+		}
 		d.finishFrame(pic, &fhdr)
 
 	case header.OBUTemporalDelimiter:
@@ -270,7 +278,7 @@ func frameOBUTilePayload(payload []byte, frameHeaderBytes int) []byte {
 func (d *decoderImpl) finishFrame(pic *Picture, fhdr *header.FrameHeader) {
 	d.postFilter(pic, fhdr)
 	d.updateRefs(pic, fhdr)
-	if fhdr.ShowFrame != 0 || fhdr.ShowableFrame != 0 {
+	if fhdr.ShowFrame != 0 {
 		d.outQ = append(d.outQ, pic.Retain())
 	}
 	pic.Release()
@@ -690,3 +698,58 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, priStrength, secStrengt
 // applyRestoration is a stub.
 // TODO M8: call looprestoration.WienerFilter / SGR per restoration unit.
 func (d *decoderImpl) applyRestoration(_ *Picture, _ *header.FrameHeader) {}
+
+func (d *decoderImpl) copyReferenceFallback(dst *Picture, fhdr *header.FrameHeader) bool {
+	src := d.firstHeaderReference(fhdr)
+	if src == nil {
+		return false
+	}
+	copyPicturePlanes(dst, src)
+	return true
+}
+
+func (d *decoderImpl) firstHeaderReference(fhdr *header.FrameHeader) *Picture {
+	for _, idx := range fhdr.Refidx {
+		if idx < 0 || int(idx) >= len(d.refs) {
+			continue
+		}
+		if p := d.refs[idx].pic; p != nil {
+			return p
+		}
+	}
+	for i := range d.refs {
+		if p := d.refs[i].pic; p != nil {
+			return p
+		}
+	}
+	return nil
+}
+
+func copyPicturePlanes(dst, src *Picture) {
+	copyPlaneRows(dst.Y, dst.StrideY, src.Y, src.StrideY, minInt(dst.Width, src.Width), minInt(dst.Height, src.Height))
+	cw := minInt(dst.ChromaWidth(), src.ChromaWidth())
+	ch := minInt(dst.ChromaHeight(), src.ChromaHeight())
+	copyPlaneRows(dst.U, dst.StrideUV, src.U, src.StrideUV, cw, ch)
+	copyPlaneRows(dst.V, dst.StrideUV, src.V, src.StrideUV, cw, ch)
+}
+
+func copyPlaneRows(dst []byte, dstStride int, src []byte, srcStride int, w, h int) {
+	if w <= 0 || h <= 0 || len(dst) == 0 || len(src) == 0 {
+		return
+	}
+	for y := 0; y < h; y++ {
+		doff := y * dstStride
+		soff := y * srcStride
+		if doff+w > len(dst) || soff+w > len(src) {
+			break
+		}
+		copy(dst[doff:doff+w], src[soff:soff+w])
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

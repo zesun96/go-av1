@@ -28,11 +28,11 @@ type FrameBuf struct {
 	Width   int
 	Height  int
 
-	// Chroma planes (4:2:0 layout).
+	// Chroma planes.
 	U, V     []byte
 	StrideUV int
-	ChromaW  int // (Width+1)/2
-	ChromaH  int // (Height+1)/2
+	ChromaW  int
+	ChromaH  int
 
 	// Monochrome: if true, U/V are nil.
 	Monochrome bool
