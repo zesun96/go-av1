@@ -204,13 +204,9 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 		if d.pendingFhdr == nil || d.pendingPic == nil || d.seq == nil {
 			return nil
 		}
-		if !d.pendingFhdr.FrameType.IsIntra() && d.copyReferenceFallback(d.pendingPic, d.pendingFhdr) {
-			d.logf("frame: inter fallback copied reference frame")
-		} else {
-			// Decode all tiles into the pending picture.
-			fb := d.picToFrameBuf(d.pendingPic)
-			tile.DecodeTileGroup(o.Payload, d.pendingFhdr, d.seq, fb, d.logf) //nolint:errcheck
-		}
+		// Decode all tiles into the pending picture.
+		fb := d.picToFrameBuf(d.pendingPic)
+		tile.DecodeTileGroup(o.Payload, d.pendingFhdr, d.seq, fb, d.logf) //nolint:errcheck
 		d.finishFrame(d.pendingPic, d.pendingFhdr)
 		d.pendingFhdr = nil
 		d.pendingPic = nil
@@ -240,13 +236,9 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 		}
 
 		pic := d.allocPicture(&fhdr)
-		if !fhdr.FrameType.IsIntra() && d.copyReferenceFallback(pic, &fhdr) {
-			d.logf("frame: inter fallback copied reference frame")
-		} else {
-			tilePayload := frameOBUTilePayload(o.Payload, consumed)
-			fb := d.picToFrameBuf(pic)
-			tile.DecodeTileGroup(tilePayload, &fhdr, d.seq, fb, d.logf) //nolint:errcheck
-		}
+		tilePayload := frameOBUTilePayload(o.Payload, consumed)
+		fb := d.picToFrameBuf(pic)
+		tile.DecodeTileGroup(tilePayload, &fhdr, d.seq, fb, d.logf) //nolint:errcheck
 		d.finishFrame(pic, &fhdr)
 
 	case header.OBUTemporalDelimiter:

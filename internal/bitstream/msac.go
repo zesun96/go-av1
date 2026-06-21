@@ -122,26 +122,26 @@ func (m *MSAC) Bool(f uint32) uint32 {
 // for the last symbol is implicitly 0). Use SymbolAdapt for the adaptive
 // flavour with the per-context counter trailing the table.
 //
-// The boost term follows the AV1 specification (9.4.1.3) and the dav1d
-// SIMD min_prob table: EC_MIN_PROB * ((n-1) - val). The dav1d C reference
-// in src/msac.c uses (n - val), which differs by one EC_MIN_PROB and is
-// inconsistent with the spec / its own assembly path; we follow the spec
-// here so the decoder round-trips with libaom/SVT-style encoders.
+// The boost term follows dav1d/src/msac.c exactly:
+// EC_MIN_PROB * (n - val), where n is the symbol count. This intentionally
+// matches the local dav1d reference rather than an alternative spec reading,
+// because the goal of this decoder is bitstream parity with dav1d.
 func (m *MSAC) Symbol(cdf []uint16, n int) uint32 {
-	if n < 1 || n > 15 {
+	if n < 1 || n > 16 {
 		panic("bitstream: Symbol n out of range")
 	}
 	c := uint32(m.dif >> (ecWinSize - 16))
 	r := m.rng >> 8
 	var u, v uint32 = 0, m.rng
 	val := uint32(0xFFFFFFFF)
+	nSymbols := uint32(n)
 	nMinus1 := uint32(n - 1)
 	for {
 		val++
 		u = v
 		v = r * uint32(cdf[val]>>ecProbShift)
 		v >>= 7 - ecProbShift
-		v += ecMinProb * (nMinus1 - val)
+		v += ecMinProb * (nSymbols - val)
 		if c >= v {
 			break
 		}

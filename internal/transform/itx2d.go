@@ -47,6 +47,10 @@ func InvTxfmAdd(dst []uint8, stride int, coeff []int32, eob int,
 // has it available.
 func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob int,
 	tx uint8, shift int, txtp uint8, exactLastNonzeroCol int, bitDepth int) {
+	if txtp == WHT_WHT {
+		InvWHT4x4(dst, stride, coeff, bitDepth)
+		return
+	}
 
 	td := TxfmDimensions[tx]
 	w := int(td.W) * 4

@@ -50,8 +50,13 @@ type DecoderOptions struct {
 	AllowFilmGrain bool
 
 	// InloopFilters is the bitmask of in-loop filters to apply. Zero defaults
-	// to InloopFilterAll.
+	// to InloopFilterAll unless InloopFiltersSet is true.
 	InloopFilters InloopFilter
+
+	// InloopFiltersSet reports whether InloopFilters was explicitly chosen by
+	// the caller. This allows zero to mean "disable all filters" instead of
+	// always collapsing to the default.
+	InloopFiltersSet bool
 
 	// FrameSelection chooses which frames to output. Zero defaults to
 	// DecodeFrameAll.
@@ -94,7 +99,7 @@ type Decoder interface {
 
 // NewDecoder constructs a Decoder backed by the M6 pipeline.
 func NewDecoder(opts DecoderOptions) (Decoder, error) {
-	if opts.InloopFilters == 0 {
+	if !opts.InloopFiltersSet && opts.InloopFilters == 0 {
 		opts.InloopFilters = InloopFilterAll
 	}
 	return newDecoderImpl(opts)

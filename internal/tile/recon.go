@@ -29,17 +29,32 @@ func shiftFromTx(tx uint8) int {
 //   - txtp:     2D transform type (DCT_DCT, ADST_DCT, etc.)
 //   - dq:       [DC, AC] dequant values
 //   - bitDepth: pixel bit depth (8, 10, or 12)
+func applyResidualAdd(dst []uint8, stride int, coeff []int32,
+	eob int, tx uint8, txtp uint8, bitDepth int) {
+	shift := shiftFromTx(tx)
+	exactLastNonzeroCol := -1
+	if col, ok := LastNonzeroColFromEOB(tx, eob); ok {
+		exactLastNonzeroCol = col
+	}
+
+	// Apply inverse transform and add residual to dst
+	transform.InvTxfmAddWithLastNonzeroCol(dst, stride, coeff, eob, tx, shift, txtp, exactLastNonzeroCol, bitDepth)
+}
+
 func ReconBlock(dst []uint8, stride int, coeff []int32,
 	eob int, tx uint8, txtp uint8,
 	dq [2]uint16, bitDepth int) {
 
-	shift := shiftFromTx(tx)
-
 	// Dequantize coefficients in-place
-	transform.Dequant(coeff, int(transform.TxfmDimensions[tx].W)*4, dq, int(tx), nil, eob)
+	transform.Dequant(coeff, int(transform.TxfmDimensions[tx].W)*4, dq, int(tx), nil, eob, bitDepth)
+	applyResidualAdd(dst, stride, coeff, eob, tx, txtp, bitDepth)
+}
 
-	// Apply inverse transform and add residual to dst
-	transform.InvTxfmAdd(dst, stride, coeff, eob, tx, shift, txtp, bitDepth)
+// ReconBlockDequantized mirrors dav1d's live decode path where residual
+// consumption already applies dq/qm before the inverse transform stage.
+func ReconBlockDequantized(dst []uint8, stride int, coeff []int32,
+	eob int, tx uint8, txtp uint8, bitDepth int) {
+	applyResidualAdd(dst, stride, coeff, eob, tx, txtp, bitDepth)
 }
 
 // ReconBIntra reconstructs an intra-coded block by iterating over its

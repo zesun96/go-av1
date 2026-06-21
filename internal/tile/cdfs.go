@@ -96,6 +96,15 @@ var DefaultSkipCDF = [3][3]uint16{
 	{28192, 0, 0},
 }
 
+var DefaultIntraCDF = [4][2]uint16{
+	{31962, 0},
+	{16106, 0},
+	{12582, 0},
+	{6230, 0},
+}
+
+var DefaultIntrabcCDF = [2]uint16{2237, 0}
+
 // ---------------------------------------------------------------------------
 // Transform type CDFs (intra luma)
 //
@@ -116,6 +125,8 @@ var DefaultSkipCDF = [3][3]uint16{
 
 const TxTypeIntra2Symbols = 5 // reduced set or TX16
 const TxTypeIntra1Symbols = 7 // full set for TX4/TX8
+const TxTypeInter2Symbols = 12
+const TxTypeInter1Symbols = 16
 
 var DefaultTxTypeIntra2CDF = [TxTypeIntra2Symbols + 1]uint16{
 	31376, 30268, 28889, 27648, 0, 0,
@@ -123,6 +134,22 @@ var DefaultTxTypeIntra2CDF = [TxTypeIntra2Symbols + 1]uint16{
 
 var DefaultTxTypeIntra1CDF = [TxTypeIntra1Symbols + 1]uint16{
 	31998, 30347, 27543, 19861, 12574, 8192, 0, 0,
+}
+
+var DefaultTxTypeInter1CDF = [2][TxTypeInter1Symbols + 1]uint16{
+	{28310, 27208, 25073, 23059, 19438, 17979, 15231, 12502, 11264, 9920, 8834, 7294, 5041, 3853, 2137, 0, 0},
+	{31123, 30195, 27990, 27057, 24961, 24146, 22246, 17411, 15094, 12360, 10251, 7758, 5652, 3912, 2019, 0, 0},
+}
+
+var DefaultTxTypeInter2CDF = [TxTypeInter2Symbols + 1]uint16{
+	31998, 30347, 27543, 19861, 16949, 13841, 11207, 8679, 6173, 4242, 2239, 0, 0,
+}
+
+var DefaultTxTypeInter3CDF = [4][2]uint16{
+	{16384, 0},
+	{28601, 0},
+	{30770, 0},
+	{32020, 0},
 }
 
 // TxTypeIntra2Set maps the 4-symbol reduced intra tx type index to TxfmType.
@@ -134,6 +161,16 @@ var TxTypeIntra2Set = [TxTypeIntra2Symbols]uint8{9, 0, 3, 1, 2}
 // Source: dav1d_tx_types_per_set[5..10]
 // {IDTX=9, DCT_DCT=0, V_DCT=10, H_DCT=11, ADST_ADST=3, ADST_DCT=1}
 var TxTypeIntra1Set = [TxTypeIntra1Symbols]uint8{9, 0, 10, 11, 3, 1, 2}
+
+// TxTypeInter2Set maps dav1d_tx_types_per_set[12..23].
+var TxTypeInter2Set = [TxTypeInter2Symbols]uint8{
+	9, 10, 11, 0, 1, 2, 4, 5, 3, 6, 7, 8,
+}
+
+// TxTypeInter1Set maps dav1d_tx_types_per_set[24..39].
+var TxTypeInter1Set = [TxTypeInter1Symbols]uint8{
+	9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 4, 5, 3, 6, 7, 8,
+}
 
 // TxtpFromUVMode maps intra UV prediction mode → txtp (luma-derived).
 // Source: dav1d_txtp_from_uvmode[N_UV_INTRA_PRED_MODES]

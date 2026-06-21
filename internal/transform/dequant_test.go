@@ -179,7 +179,7 @@ func TestDequant_DCOnly_4x4(t *testing.T) {
 	coeffs[0] = 3 // DC level = 3
 	dq := [2]uint16{100, 80}
 
-	Dequant(coeffs, 4, dq, TX4x4, nil, -1)
+	Dequant(coeffs, 4, dq, TX4x4, nil, -1, 8)
 
 	// DC: dc_dq * level = 100 * 3 = 300, dq_shift=0 → 300
 	if coeffs[0] != 300 {
@@ -193,7 +193,7 @@ func TestDequant_DCOnly_32x32(t *testing.T) {
 	coeffs[0] = 4 // DC level
 	dq := [2]uint16{200, 150}
 
-	Dequant(coeffs, 32, dq, TX32x32, nil, -1)
+	Dequant(coeffs, 32, dq, TX32x32, nil, -1, 8)
 
 	// DC: 200 * 4 = 800, >> 1 = 400
 	if coeffs[0] != 400 {
@@ -207,7 +207,7 @@ func TestDequant_DCOnly_64x64(t *testing.T) {
 	coeffs[0] = 8 // DC level
 	dq := [2]uint16{200, 150}
 
-	Dequant(coeffs, 64, dq, TX64x64, nil, -1)
+	Dequant(coeffs, 64, dq, TX64x64, nil, -1, 8)
 
 	// DC: 200 * 8 = 1600, >> 2 = 400
 	if coeffs[0] != 400 {
@@ -222,7 +222,7 @@ func TestDequant_AC_4x4(t *testing.T) {
 	coeffs[5] = -3 // negative AC
 	dq := [2]uint16{100, 80}
 
-	Dequant(coeffs, 4, dq, TX4x4, nil, -1)
+	Dequant(coeffs, 4, dq, TX4x4, nil, -1, 8)
 
 	// DC: 100 * 0 = 0
 	if coeffs[0] != 0 {
@@ -244,7 +244,7 @@ func TestDequant_AC_32x32_Shift(t *testing.T) {
 	coeffs[1] = 5 // AC level
 	dq := [2]uint16{200, 150}
 
-	Dequant(coeffs, 32, dq, TX32x32, nil, -1)
+	Dequant(coeffs, 32, dq, TX32x32, nil, -1, 8)
 
 	// AC[1]: 150 * 5 = 750, >> 1 = 375
 	if coeffs[1] != 375 {
@@ -262,7 +262,7 @@ func TestDequant_SparseRC(t *testing.T) {
 	coeffs[2] = 4
 	dq := [2]uint16{100, 80}
 
-	Dequant(coeffs, 4, dq, TX4x4, nil, 1)
+	Dequant(coeffs, 4, dq, TX4x4, nil, 1, 8)
 
 	if coeffs[0] != 200 {
 		t.Fatalf("DC: got %d want 200", coeffs[0])
@@ -279,7 +279,7 @@ func TestDequant_ZeroCoeffs(t *testing.T) {
 	coeffs := make([]int32, 16)
 	dq := [2]uint16{100, 80}
 
-	Dequant(coeffs, 4, dq, TX4x4, nil, -1)
+	Dequant(coeffs, 4, dq, TX4x4, nil, -1, 8)
 
 	// All should remain zero
 	for i, v := range coeffs {
@@ -304,7 +304,7 @@ func TestDequant_WithQM(t *testing.T) {
 		qm[i] = 32
 	}
 
-	Dequant(coeffs, 4, dq, TX4x4, qm, -1)
+	Dequant(coeffs, 4, dq, TX4x4, qm, -1, 8)
 
 	// DC: (100*32+16)>>5 = (3200+16)>>5 = 3216>>5 = 100, then 100*3=300
 	if coeffs[0] != 300 {
@@ -339,7 +339,7 @@ func TestDequant_RandomSmoke(t *testing.T) {
 			uint16(rng.Intn(256) + 10),
 		}
 
-		Dequant(coeffs, int(TxfmDimensions[txSz].W)*4, dq, txSz, nil, -1)
+		Dequant(coeffs, int(TxfmDimensions[txSz].W)*4, dq, txSz, nil, -1, 8)
 
 		// Verify dequantized values are within reasonable bounds
 		for i, v := range coeffs {
@@ -357,7 +357,7 @@ func TestDequant_RectSize(t *testing.T) {
 	coeffs[1] = 3
 	dq := [2]uint16{200, 150}
 
-	Dequant(coeffs, 16, dq, RTX16x32, nil, -1)
+	Dequant(coeffs, 16, dq, RTX16x32, nil, -1, 8)
 
 	// DC: 200*4=800, >>1=400
 	if coeffs[0] != 400 {
@@ -366,5 +366,35 @@ func TestDequant_RectSize(t *testing.T) {
 	// AC: 150*3=450, >>1=225
 	if coeffs[1] != 225 {
 		t.Fatalf("AC rect: got %d want 225", coeffs[1])
+	}
+}
+
+func TestDequant_ClipsToDav1dCfMax(t *testing.T) {
+	coeffs := make([]int32, 16)
+	coeffs[0] = 100
+	coeffs[1] = -100
+	dq := [2]uint16{1000, 1000}
+
+	Dequant(coeffs, 4, dq, TX4x4, nil, 1, 8)
+
+	if coeffs[0] != 32767 {
+		t.Fatalf("DC clip: got %d want 32767", coeffs[0])
+	}
+	if coeffs[1] != -32768 {
+		t.Fatalf("AC clip: got %d want -32768", coeffs[1])
+	}
+}
+
+func TestDequant_UsesDav1d24BitProductWrap(t *testing.T) {
+	coeffs := make([]int32, 16)
+	coeffs[0] = 8392
+	dq := [2]uint16{2000, 2000}
+
+	Dequant(coeffs, 4, dq, TX4x4, nil, -1, 8)
+
+	// dav1d wraps dequant products to 24 bits before shift/clip:
+	// (2000 * 8392) & 0xffffff = 6784.
+	if coeffs[0] != 6784 {
+		t.Fatalf("24-bit wrap: got %d want 6784", coeffs[0])
 	}
 }

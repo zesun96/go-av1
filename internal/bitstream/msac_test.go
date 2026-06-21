@@ -80,7 +80,7 @@ func TestMSAC_BoolRoundTripAcrossProbabilities(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMSAC_SymbolRoundTrip(t *testing.T) {
-	for _, n := range []int{2, 3, 4, 5, 8, 12, 15} {
+	for _, n := range []int{2, 3, 4, 5, 8, 12, 15, 16} {
 		rng := rand.New(rand.NewSource(int64(n)))
 		const samples = 256
 		seq := make([]uint32, samples)
@@ -154,7 +154,7 @@ func TestMSAC_SymbolAdaptUpdatesCDF(t *testing.T) {
 }
 
 func TestMSAC_SymbolPanicsOnBadN(t *testing.T) {
-	for _, n := range []int{0, 16} {
+	for _, n := range []int{0, 17} {
 		func(nn int) {
 			defer func() {
 				if recover() == nil {
@@ -323,6 +323,24 @@ func TestMSAC_HiTokWalksBranches(t *testing.T) {
 		got := dec.HiTok(cdf)
 		if got != want {
 			t.Fatalf("HiTok[%d] = %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestMSAC_SymbolMatchesDav1dBoostTerm(t *testing.T) {
+	const n = 4
+	cdf := makeUniformDav1dCDF(n)
+	icdf := dav1dToICDF(cdf, n)
+	enc := newMSACEncoder()
+	seq := []int{0, 3, 1, 2, 3, 0, 2, 1}
+	for _, s := range seq {
+		enc.encodeCDFQ15(s, icdf, n)
+	}
+	dec := NewMSAC(enc.done(), true)
+	for i, want := range seq {
+		got := int(dec.Symbol(cdf, n))
+		if got != want {
+			t.Fatalf("dav1d boost Symbol[%d] = %d, want %d", i, got, want)
 		}
 	}
 }

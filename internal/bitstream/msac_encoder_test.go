@@ -104,7 +104,7 @@ func (e *msacEncoder) encodeBoolEqui(val uint32) {
 func (e *msacEncoder) encodeQ15(fl, fh uint32, s, n int) {
 	low := e.low
 	r := e.rng
-	N := uint32(n - 1)
+	N := uint32(n)
 	var newR uint32
 	if fl < 32768 {
 		u := ((r >> 8) * (fl >> ecProbShift)) >> (7 - ecProbShift)

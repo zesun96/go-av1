@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/zesun96/go-av1/pkg/av1"
 	"github.com/zesun96/go-av1/pkg/ivf"
@@ -19,6 +20,7 @@ func main() {
 	in := flag.String("i", "", "input AV1 file (IVF)")
 	out := flag.String("o", "", "output Y4M file (- for stdout, empty = discard)")
 	threads := flag.Int("threads", 0, "worker threads (0 = NumCPU)")
+	filters := flag.String("filters", "all", "in-loop filters: all, none, or comma-separated deblock,cdef,restoration")
 	flag.Parse()
 
 	fmt.Fprintf(os.Stderr, "go-av1d %s (M6 pipeline)\n", av1.Version)
@@ -44,7 +46,17 @@ func main() {
 	fmt.Fprintf(os.Stderr, "stream: %dx%d  fps: %d/%d\n",
 		hdr.Width, hdr.Height, hdr.TimebaseDen, hdr.TimebaseNum)
 
-	dec, err := av1.NewDecoder(av1.DecoderOptions{Threads: *threads})
+	inloopFilters, err := parseInloopFilters(*filters)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "filters: %v\n", err)
+		os.Exit(2)
+	}
+
+	dec, err := av1.NewDecoder(av1.DecoderOptions{
+		Threads:          *threads,
+		InloopFilters:    inloopFilters,
+		InloopFiltersSet: true,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "decoder: %v\n", err)
 		os.Exit(1)
@@ -125,4 +137,31 @@ func writeY4MFrame(w io.Writer, pic *av1.Picture, first bool, hdr ivf.FileHeader
 	for row := 0; row < ch; row++ {
 		w.Write(pic.V[row*pic.StrideUV : row*pic.StrideUV+cw]) //nolint:errcheck
 	}
+}
+
+func parseInloopFilters(s string) (av1.InloopFilter, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	switch s {
+	case "", "all":
+		return av1.InloopFilterAll, nil
+	case "none":
+		return 0, nil
+	}
+
+	var mask av1.InloopFilter
+	for _, part := range strings.Split(s, ",") {
+		switch strings.TrimSpace(part) {
+		case "deblock":
+			mask |= av1.InloopFilterDeblock
+		case "cdef":
+			mask |= av1.InloopFilterCDEF
+		case "restoration":
+			mask |= av1.InloopFilterRestoration
+		case "":
+			continue
+		default:
+			return 0, fmt.Errorf("unknown filter %q", part)
+		}
+	}
+	return mask, nil
 }

@@ -35,6 +35,7 @@ func DecodeTileGroup(
 
 	// Allocate frame-level neighbour state (shared across tiles in raster order).
 	fs := NewFrameState(fb.Width, fb.Height)
+	fs.SetSubsampling(seq.SsHor, seq.SsVer)
 	fs.MVFrame = refmvs.NewFrame(fb.Width, fb.Height)
 
 	for _, td := range tiles {

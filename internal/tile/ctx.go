@@ -14,6 +14,8 @@ package tile
 //   - EOB bin:    ctx = [plane(0=luma,1=chroma)][ctx2]
 //   - DC sign:    ctx = [plane][sign_ctx]
 type TileCtx struct {
+	CoefQCat int
+
 	// -----------------------------------------------------------------------
 	// Partition CDFs — 4 contexts, different sizes per block level.
 	//   [128x128]: 8  symbols + counter = [4][9]
@@ -29,9 +31,11 @@ type TileCtx struct {
 	// -----------------------------------------------------------------------
 	// Intra prediction mode CDFs.
 	// KFY: key-frame luma [top_mode][left_mode][13+counter]
+	// Y:   inter/intra-only luma [size_ctx][13+counter]
 	// UV:  [cfl_allowed][y_mode][NUVIntraModes+counter]
 	// -----------------------------------------------------------------------
 	KFYModeCDF [NKFYMCtx][NKFYMCtx][NIntraPredModes + 1]uint16
+	YModeCDF   [4][NIntraPredModes + 1]uint16
 	UVModeCDF  [2][NIntraPredModes][NUVIntraModes + 1]uint16
 
 	// -----------------------------------------------------------------------
@@ -39,13 +43,23 @@ type TileCtx struct {
 	// -----------------------------------------------------------------------
 	SkipCDF [3][3]uint16
 
+	// Intra decision in inter/switch frames and intrabc flag.
+	IntraCDF   [4][2]uint16
+	IntrabcCDF [2]uint16
+
 	// -----------------------------------------------------------------------
-	// Transform type CDFs (intra only).
+	// Transform type CDFs.
 	// Intra1 (6 symbols): [2 tx_class][13 y_mode][7]
 	// Intra2 (4 symbols): [3 tx_class][13 y_mode][5]
+	// Inter1 (15 coded branches -> 16 symbols): [2 tx_class][17]
+	// Inter2 (11 coded branches -> 12 symbols): [13]
+	// Inter3 (bool): [4 tx_class][2]
 	// -----------------------------------------------------------------------
 	TxTypeIntra1CDF [2][NIntraPredModes][TxTypeIntra1Symbols + 1]uint16
 	TxTypeIntra2CDF [3][NIntraPredModes][TxTypeIntra2Symbols + 1]uint16
+	TxTypeInter1CDF [2][TxTypeInter1Symbols + 1]uint16
+	TxTypeInter2CDF [TxTypeInter2Symbols + 1]uint16
+	TxTypeInter3CDF [4][2]uint16
 
 	// -----------------------------------------------------------------------
 	// EOB point CDFs — [2 plane][2 ctx][symbols+counter]
@@ -161,11 +175,47 @@ type TileCtx struct {
 	// and chroma (after uv_mode, when uv is not CFL).
 	// -----------------------------------------------------------------------
 	AngleDeltaCDF [8][8]uint16
+
+	// -----------------------------------------------------------------------
+	// Minimal single-ref inter syntax CDFs.
+	//   NewMVModeCDF[6][2]
+	//   GlobalMVModeCDF[2][2]
+	//   RefMVModeCDF[6][2]
+	//   DRLBitCDF[3][2]
+	// -----------------------------------------------------------------------
+	NewMVModeCDF    [6][2]uint16
+	GlobalMVModeCDF [2][2]uint16
+	RefMVModeCDF    [6][2]uint16
+	DRLBitCDF       [3][2]uint16
+
+	// -----------------------------------------------------------------------
+	// Minimal motion-vector residual CDFs.
+	// -----------------------------------------------------------------------
+	MVJointCDF    [5]uint16
+	MVSignCDF     [2][2]uint16
+	MVClassesCDF  [2][12]uint16
+	MVClass0CDF   [2][2]uint16
+	MVClass0FPCDF [2][2][5]uint16
+	MVClass0HPCDF [2][2]uint16
+	MVClassNCDF   [2][10][2]uint16
+	MVClassNFPCDF [2][5]uint16
+	MVClassNHPCDF [2][2]uint16
+
+	// Single-ref frame syntax CDFs: ref[0..5][ctx=3][2]
+	RefCDF [6][3][2]uint16
+
+	// Switchable interpolation filter CDFs [dir][ctx][3 syms + sentinel]
+	FilterCDF [2][8][4]uint16
 }
 
 // NewTileCtx allocates a TileCtx and copies the default CDF values into it.
 func NewTileCtx() *TileCtx {
+	return NewTileCtxForQIdx(0)
+}
+
+func NewTileCtxForQIdx(qidx int) *TileCtx {
 	ctx := &TileCtx{}
+	ctx.CoefQCat = coefQCatFromQIdx(qidx)
 
 	// Partition
 	ctx.Partition128CDF = Partition128CDFDefault
@@ -176,14 +226,20 @@ func NewTileCtx() *TileCtx {
 
 	// Intra modes
 	ctx.KFYModeCDF = KFYMCDFDefault
+	ctx.YModeCDF = YModeCDFDefault
 	ctx.UVModeCDF = UVModeCDFDefault
 
 	// Skip
 	ctx.SkipCDF = SkipCDFDefault
+	ctx.IntraCDF = DefaultIntraCDF
+	ctx.IntrabcCDF = DefaultIntrabcCDF
 
 	// TX type
 	ctx.TxTypeIntra1CDF = TxTypeIntra1CDFDefault
 	ctx.TxTypeIntra2CDF = TxTypeIntra2CDFDefault
+	ctx.TxTypeInter1CDF = DefaultTxTypeInter1CDF
+	ctx.TxTypeInter2CDF = DefaultTxTypeInter2CDF
+	ctx.TxTypeInter3CDF = DefaultTxTypeInter3CDF
 
 	// EOB bin
 	ctx.EobBin16CDF = EobBin16Default
@@ -230,6 +286,23 @@ func NewTileCtx() *TileCtx {
 	// Angle delta (A6)
 	ctx.AngleDeltaCDF = AngleDeltaCDFDefault
 
+	// Minimal single-ref inter syntax
+	ctx.NewMVModeCDF = NewMVModeCDFDefault
+	ctx.GlobalMVModeCDF = GlobalMVModeCDFDefault
+	ctx.RefMVModeCDF = RefMVModeCDFDefault
+	ctx.DRLBitCDF = DRLBitCDFDefault
+	ctx.MVJointCDF = MVJointCDFDefault
+	ctx.MVSignCDF = MVSignCDFDefault
+	ctx.MVClassesCDF = MVClassesCDFDefault
+	ctx.MVClass0CDF = MVClass0CDFDefault
+	ctx.MVClass0FPCDF = MVClass0FPCDFDefault
+	ctx.MVClass0HPCDF = MVClass0HPCDFDefault
+	ctx.MVClassNCDF = MVClassNCDFDefault
+	ctx.MVClassNFPCDF = MVClassNFPCDFDefault
+	ctx.MVClassNHPCDF = MVClassNHPCDFDefault
+	ctx.RefCDF = RefCDFDefault
+	ctx.FilterCDF = FilterCDFDefault
+
 	// Sentinel fix-up: several CDFs were imported from dav1d in its native
 	// storage form (n explicit values followed by a single counter slot, with
 	// the implicit "last symbol" mass absorbed by the counter being <=32).
@@ -261,7 +334,7 @@ func NewTileCtx() *TileCtx {
 	// as one coherent slice. EOB-bin tables are sourced from the existing exact
 	// Go defaults; base/br/eob_base/eob_hi/coef_skip come from the structured
 	// qcat=0 defaults derived from dav1d default_coef_cdf[0].
-	initCoefLiveDefaults(ctx)
+	initCoefLiveDefaults(ctx, ctx.CoefQCat)
 
 	return ctx
 }
@@ -270,9 +343,33 @@ func NewTileCtx() *TileCtx {
 // one grouped slice. This keeps the active path out of the old
 // "synthetic then overlay" startup pattern and makes the retained baseline
 // explicit.
-func initCoefLiveDefaults(ctx *TileCtx) {
-	initCoefEOBBinDefaults(ctx)
-	initCoefFullDefaultsQ0(ctx)
+func initCoefLiveDefaults(ctx *TileCtx, qcat int) {
+	switch qcat {
+	case 0:
+		initCoefFullDefaultsQ0(ctx)
+	case 1:
+		initCoefFullDefaultsQ1(ctx)
+	case 2:
+		initCoefFullDefaultsQ2(ctx)
+	case 3:
+		initCoefFullDefaultsQ3(ctx)
+	default:
+		initCoefFullDefaultsQ0(ctx)
+	}
+}
+
+func coefQCatFromQIdx(qidx int) int {
+	qcat := 0
+	if qidx > 20 {
+		qcat++
+	}
+	if qidx > 60 {
+		qcat++
+	}
+	if qidx > 120 {
+		qcat++
+	}
+	return qcat
 }
 
 // initCoefEOBBinDefaults seeds the dav1d-shaped EOB-bin storage from the
@@ -364,6 +461,7 @@ func initCoefFullDefaults(ctx *TileCtx) {
 // experiments showed that switching only a subset of these tables regresses the
 // current stream sharply, so the live path should only move over as one cut.
 func initCoefFullDefaultsQ0(ctx *TileCtx) {
+	initCoefEOBBinDefaults(ctx)
 	for t := 0; t < N_TX_SIZES; t++ {
 		for p := 0; p < 2; p++ {
 			for c := 0; c < 41; c++ {
@@ -384,6 +482,117 @@ func initCoefFullDefaultsQ0(ctx *TileCtx) {
 		for p := 0; p < 2; p++ {
 			for c := 0; c < 21; c++ {
 				copy(ctx.BrTokFull[s][p][c][:], BrTokFullDefaultQ0[s][p][c][:])
+			}
+		}
+	}
+}
+
+func initCoefFullDefaultsQ3(ctx *TileCtx) {
+	for p := 0; p < 2; p++ {
+		for i := 0; i < 2; i++ {
+			copy(ctx.EobBin16Full[p][i][:], EobBin16FullDefaultQ3[p][i][:])
+			copy(ctx.EobBin32Full[p][i][:], EobBin32FullDefaultQ3[p][i][:])
+			copy(ctx.EobBin64Full[p][i][:], EobBin64FullDefaultQ3[p][i][:])
+			copy(ctx.EobBin128Full[p][i][:], EobBin128FullDefaultQ3[p][i][:])
+			copy(ctx.EobBin256Full[p][i][:], EobBin256FullDefaultQ3[p][i][:])
+		}
+		copy(ctx.EobBin512Full[p][:], EobBin512FullDefaultQ3[p][:])
+		copy(ctx.EobBin1024Full[p][:], EobBin1024FullDefaultQ3[p][:])
+	}
+	for t := 0; t < N_TX_SIZES; t++ {
+		for p := 0; p < 2; p++ {
+			for c := 0; c < 41; c++ {
+				copy(ctx.BaseTokFull[t][p][c][:], BaseTokFullDefaultQ3[t][p][c][:])
+			}
+			for c := 0; c < 4; c++ {
+				copy(ctx.EobBaseTokFull[t][p][c][:], EobBaseTokFullDefaultQ3[t][p][c][:])
+			}
+			for b := 0; b < 9; b++ {
+				copy(ctx.EobHiBitFull[t][p][b][:], EobHiBitFullDefaultQ3[t][p][b][:])
+			}
+		}
+		for c := 0; c < 13; c++ {
+			copy(ctx.CoefSkipFull[t][c][:], CoefSkipFullDefaultQ3[t][c][:])
+		}
+	}
+	for s := 0; s < 4; s++ {
+		for p := 0; p < 2; p++ {
+			for c := 0; c < 21; c++ {
+				copy(ctx.BrTokFull[s][p][c][:], BrTokFullDefaultQ3[s][p][c][:])
+			}
+		}
+	}
+}
+
+func initCoefFullDefaultsQ1(ctx *TileCtx) {
+	for p := 0; p < 2; p++ {
+		for i := 0; i < 2; i++ {
+			copy(ctx.EobBin16Full[p][i][:], EobBin16FullDefaultQ1[p][i][:])
+			copy(ctx.EobBin32Full[p][i][:], EobBin32FullDefaultQ1[p][i][:])
+			copy(ctx.EobBin64Full[p][i][:], EobBin64FullDefaultQ1[p][i][:])
+			copy(ctx.EobBin128Full[p][i][:], EobBin128FullDefaultQ1[p][i][:])
+			copy(ctx.EobBin256Full[p][i][:], EobBin256FullDefaultQ1[p][i][:])
+		}
+		copy(ctx.EobBin512Full[p][:], EobBin512FullDefaultQ1[p][:])
+		copy(ctx.EobBin1024Full[p][:], EobBin1024FullDefaultQ1[p][:])
+	}
+	for t := 0; t < N_TX_SIZES; t++ {
+		for p := 0; p < 2; p++ {
+			for c := 0; c < 41; c++ {
+				copy(ctx.BaseTokFull[t][p][c][:], BaseTokFullDefaultQ1[t][p][c][:])
+			}
+			for c := 0; c < 4; c++ {
+				copy(ctx.EobBaseTokFull[t][p][c][:], EobBaseTokFullDefaultQ1[t][p][c][:])
+			}
+			for b := 0; b < 9; b++ {
+				copy(ctx.EobHiBitFull[t][p][b][:], EobHiBitFullDefaultQ1[t][p][b][:])
+			}
+		}
+		for c := 0; c < 13; c++ {
+			copy(ctx.CoefSkipFull[t][c][:], CoefSkipFullDefaultQ1[t][c][:])
+		}
+	}
+	for s := 0; s < 4; s++ {
+		for p := 0; p < 2; p++ {
+			for c := 0; c < 21; c++ {
+				copy(ctx.BrTokFull[s][p][c][:], BrTokFullDefaultQ1[s][p][c][:])
+			}
+		}
+	}
+}
+
+func initCoefFullDefaultsQ2(ctx *TileCtx) {
+	for p := 0; p < 2; p++ {
+		for i := 0; i < 2; i++ {
+			copy(ctx.EobBin16Full[p][i][:], EobBin16FullDefaultQ2[p][i][:])
+			copy(ctx.EobBin32Full[p][i][:], EobBin32FullDefaultQ2[p][i][:])
+			copy(ctx.EobBin64Full[p][i][:], EobBin64FullDefaultQ2[p][i][:])
+			copy(ctx.EobBin128Full[p][i][:], EobBin128FullDefaultQ2[p][i][:])
+			copy(ctx.EobBin256Full[p][i][:], EobBin256FullDefaultQ2[p][i][:])
+		}
+		copy(ctx.EobBin512Full[p][:], EobBin512FullDefaultQ2[p][:])
+		copy(ctx.EobBin1024Full[p][:], EobBin1024FullDefaultQ2[p][:])
+	}
+	for t := 0; t < N_TX_SIZES; t++ {
+		for p := 0; p < 2; p++ {
+			for c := 0; c < 41; c++ {
+				copy(ctx.BaseTokFull[t][p][c][:], BaseTokFullDefaultQ2[t][p][c][:])
+			}
+			for c := 0; c < 4; c++ {
+				copy(ctx.EobBaseTokFull[t][p][c][:], EobBaseTokFullDefaultQ2[t][p][c][:])
+			}
+			for b := 0; b < 9; b++ {
+				copy(ctx.EobHiBitFull[t][p][b][:], EobHiBitFullDefaultQ2[t][p][b][:])
+			}
+		}
+		for c := 0; c < 13; c++ {
+			copy(ctx.CoefSkipFull[t][c][:], CoefSkipFullDefaultQ2[t][c][:])
+		}
+	}
+	for s := 0; s < 4; s++ {
+		for p := 0; p < 2; p++ {
+			for c := 0; c < 21; c++ {
+				copy(ctx.BrTokFull[s][p][c][:], BrTokFullDefaultQ2[s][p][c][:])
 			}
 		}
 	}

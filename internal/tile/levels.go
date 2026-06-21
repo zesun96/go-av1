@@ -103,6 +103,8 @@ const (
 	InterModeGlobalMV
 	InterModeNearestMV
 	InterModeNearMV
+	InterModeRefMV
+	InterModeNewMV
 )
 
 // Av1Block holds per-block decoding state, mirroring dav1d Av1Block.
@@ -132,6 +134,9 @@ type Av1Block struct {
 	InterMode uint8
 	RefSlot   int8
 	Filter    uint8
+	FilterV   uint8
+	BaseMV    [2]int16 // [Y, X] in 1/8-pel
+	DeltaMV   [2]int16 // [Y, X] in 1/8-pel
 	MV        [2]int16 // [Y, X] in 1/8-pel
 }
 
@@ -186,6 +191,25 @@ func bsizeFromDim(bw, bh int) int {
 		return BS4x4
 	}
 	return -1
+}
+
+func blockLevelFromDim(bw, bh int) int {
+	d := bw
+	if bh > d {
+		d = bh
+	}
+	switch {
+	case d >= 128:
+		return BL128X128
+	case d >= 64:
+		return BL64X64
+	case d >= 32:
+		return BL32X32
+	case d >= 16:
+		return BL16X16
+	default:
+		return BL8X8
+	}
 }
 
 // palSzCtx returns dav1d's sz_ctx = log2(bw4) + log2(bh4) - 2 used by

@@ -287,3 +287,42 @@ func TestE2E_PredPlusDCResidue(t *testing.T) {
 		}
 	}
 }
+
+func TestReconBlock_UsesExactLastNonzeroColPath(t *testing.T) {
+	dstA := make([]uint8, 8*8)
+	dstB := make([]uint8, 8*8)
+	for i := range dstA {
+		dstA[i] = 90
+		dstB[i] = 90
+	}
+
+	coeffA := make([]int32, 8*8)
+	coeffB := make([]int32, 8*8)
+	coeffA[0] = 5
+	coeffA[1] = -3
+	coeffA[8] = 2
+	copy(coeffB, coeffA)
+
+	dq := [2]uint16{8, 8}
+	eob := 3
+
+	ReconBlock(dstA, 8, coeffA, eob, transform.TX8x8, transform.DCT_DCT, dq, 8)
+
+	transform.Dequant(coeffB, int(transform.TxfmDimensions[transform.TX8x8].W)*4, dq, int(transform.TX8x8), nil, eob, 8)
+	exact, ok := LastNonzeroColFromEOB(transform.TX8x8, eob)
+	if !ok {
+		t.Fatal("expected exact last-nonzero-col for TX8x8")
+	}
+	transform.InvTxfmAddWithLastNonzeroCol(dstB, 8, coeffB, eob, transform.TX8x8, shiftFromTx(transform.TX8x8), transform.DCT_DCT, exact, 8)
+
+	for i := range dstA {
+		if dstA[i] != dstB[i] {
+			t.Fatalf("dst[%d]=%d want %d", i, dstA[i], dstB[i])
+		}
+	}
+	for i := range coeffA {
+		if coeffA[i] != coeffB[i] {
+			t.Fatalf("coeff[%d]=%d want %d", i, coeffA[i], coeffB[i])
+		}
+	}
+}

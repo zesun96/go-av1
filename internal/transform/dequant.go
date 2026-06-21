@@ -297,7 +297,7 @@ func InitQuantTables(qidx int, d QuantDeltas, hbd int, segDeltaQ SegDeltaQ) [8][
 // transforms; pass nil to skip QM scaling.
 //
 // This mirrors the dequantization logic in dav1d/src/recon_tmpl.c:596-718.
-func Dequant(coeffs []int32, stride int, dq [2]uint16, txSz int, qm []uint8, eob int) {
+func Dequant(coeffs []int32, stride int, dq [2]uint16, txSz int, qm []uint8, eob int, bitDepth int) {
 	dim := &TxfmDimensions[txSz]
 	pxW := int(dim.W) * 4 // pixel width
 	pxH := int(dim.H) * 4 // pixel height
@@ -308,10 +308,14 @@ func Dequant(coeffs []int32, stride int, dq [2]uint16, txSz int, qm []uint8, eob
 
 	// Maximum coefficient magnitude after dequant, mirroring
 	// cf_max = ~(~127U << bpc) from dav1d.
-	// For 8-bit: 255, for 10-bit: 1023, for 12-bit: 4095.
-	// We use a generous upper bound of 0x7FFF since the clip is
-	// primarily a safety net; the real clip happens in InvTxfmAdd.
-	cfMax := int32(0x7FFF)
+	// Mirrors dav1d's:
+	//   cf_max = ~(~127U << (BITDEPTH == 8 ? 8 : bpc))
+	// For 8-bit this is 0x7fff, not the pixel-domain 255.
+	clipBits := bitDepth
+	if bitDepth == 8 {
+		clipBits = 8
+	}
+	cfMax := int32((1 << (clipBits + 7)) - 1)
 
 	useQM := qm != nil
 
@@ -329,9 +333,14 @@ func Dequant(coeffs []int32, stride int, dq [2]uint16, txSz int, qm []uint8, eob
 		if level < 0 {
 			level = -level
 		}
-		dqVal := (dcDq * level) >> dqShift
-		if dqVal > int(cfMax) {
-			dqVal = int(cfMax)
+		dqVal := (dcDq * level) & 0xffffff
+		dqVal >>= dqShift
+		maxMag := int(cfMax)
+		if sign < 0 {
+			maxMag++
+		}
+		if dqVal > maxMag {
+			dqVal = maxMag
 		}
 		coeffs[0] = sign * int32(dqVal)
 	}
@@ -364,9 +373,14 @@ func Dequant(coeffs []int32, stride int, dq [2]uint16, txSz int, qm []uint8, eob
 		if useQM {
 			dqVal = (acDq*int(qm[rc]) + 16) >> 5
 		}
-		dqVal = (dqVal * level) >> dqShift
-		if dqVal > int(cfMax) {
-			dqVal = int(cfMax)
+		dqVal = (dqVal * level) & 0xffffff
+		dqVal >>= dqShift
+		maxMag := int(cfMax)
+		if sign < 0 {
+			maxMag++
+		}
+		if dqVal > maxMag {
+			dqVal = maxMag
 		}
 		coeffs[rc] = sign * int32(dqVal)
 	}

@@ -63,12 +63,11 @@ func TestLastNonzeroColFromEOB(t *testing.T) {
 		want int
 	}{
 		{transform.TX4x4, 0, 0},
-		{transform.TX4x4, 1, 0},
+		{transform.TX4x4, 1, 1},
 		{transform.TX4x4, 2, 1},
-		{transform.TX4x4, 3, 2},
+		{transform.TX4x4, 3, 1},
 		{transform.TX4x4, 15, 3},
-		{transform.TX64x64, 127, 14},
-		{transform.TX64x64, 1023, 31},
+		{transform.TX64x64, 1023, 15},
 	}
 
 	for _, tc := range tests {

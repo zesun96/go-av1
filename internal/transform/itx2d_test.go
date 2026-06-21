@@ -327,6 +327,31 @@ func TestInvWHT4x4_ZeroInput(t *testing.T) {
 	}
 }
 
+func TestInvTxfmAdd_WHTDispatchMatchesDedicatedPath(t *testing.T) {
+	dstA := make([]uint8, 4*4)
+	dstB := make([]uint8, 4*4)
+	coeffA := make([]int32, 4*4)
+	coeffB := make([]int32, 4*4)
+	for i := range coeffA {
+		coeffA[i] = int32((i % 5) - 2)
+		coeffB[i] = coeffA[i]
+	}
+
+	InvWHT4x4(dstA, 4, coeffA, 8)
+	InvTxfmAdd(dstB, 4, coeffB, 15, TX4x4, 0, WHT_WHT, 8)
+
+	for i := range dstA {
+		if dstA[i] != dstB[i] {
+			t.Fatalf("dst[%d]=%d want %d", i, dstB[i], dstA[i])
+		}
+	}
+	for i := range coeffA {
+		if coeffA[i] != coeffB[i] {
+			t.Fatalf("coeff[%d]=%d want %d", i, coeffB[i], coeffA[i])
+		}
+	}
+}
+
 // ---- TxfmDimensions table -------------------------------------------------
 
 func TestTxfmDimensions_SquareSizes(t *testing.T) {

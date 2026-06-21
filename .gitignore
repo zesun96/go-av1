@@ -40,3 +40,4 @@ go.work.sum
 cov.txt
 cover
 /cmd/webrtc-av1d/*.png
+docs/plan/*

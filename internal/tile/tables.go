@@ -29,6 +29,59 @@ var BlockDimensions = [NBlockSizes][4]uint8{
 	BS4x4:     {1, 1, 0, 0},
 }
 
+// YModeSizeContext mirrors dav1d_ymode_size_context[N_BS_SIZES].
+var YModeSizeContext = [NBlockSizes]uint8{
+	BS128x128: 3,
+	BS128x64:  3,
+	BS64x128:  3,
+	BS64x64:   3,
+	BS64x32:   3,
+	BS64x16:   2,
+	BS32x64:   3,
+	BS32x32:   3,
+	BS32x16:   2,
+	BS32x8:    1,
+	BS16x64:   2,
+	BS16x32:   2,
+	BS16x16:   2,
+	BS16x8:    1,
+	BS16x4:    0,
+	BS8x32:    1,
+	BS8x16:    1,
+	BS8x8:     1,
+	BS8x4:     0,
+	BS4x16:    0,
+	BS4x8:     0,
+	BS4x4:     0,
+}
+
+// MaxTxfmSizeForBS mirrors dav1d_max_txfm_size_for_bs[N_BS_SIZES][4]
+// for {y, 420, 422, 444}.
+var MaxTxfmSizeForBS = [NBlockSizes][4]uint8{
+	BS128x128: {transform.TX64x64, transform.TX32x32, transform.TX32x32, transform.TX32x32},
+	BS128x64:  {transform.TX64x64, transform.TX32x32, transform.TX32x32, transform.TX32x32},
+	BS64x128:  {transform.TX64x64, transform.TX32x32, 0, transform.TX32x32},
+	BS64x64:   {transform.TX64x64, transform.TX32x32, transform.TX32x32, transform.TX32x32},
+	BS64x32:   {transform.RTX64x32, transform.RTX32x16, transform.TX32x32, transform.TX32x32},
+	BS64x16:   {transform.RTX64x16, transform.RTX32x8, transform.RTX32x16, transform.RTX32x16},
+	BS32x64:   {transform.RTX32x64, transform.RTX16x32, 0, transform.TX32x32},
+	BS32x32:   {transform.TX32x32, transform.TX16x16, transform.RTX16x32, transform.TX32x32},
+	BS32x16:   {transform.RTX32x16, transform.RTX16x8, transform.TX16x16, transform.RTX32x16},
+	BS32x8:    {transform.RTX32x8, transform.RTX16x4, transform.RTX16x8, transform.RTX32x8},
+	BS16x64:   {transform.RTX16x64, transform.RTX8x32, 0, transform.RTX16x32},
+	BS16x32:   {transform.RTX16x32, transform.RTX8x16, 0, transform.RTX16x32},
+	BS16x16:   {transform.TX16x16, transform.TX8x8, transform.RTX8x16, transform.TX16x16},
+	BS16x8:    {transform.RTX16x8, transform.RTX8x4, transform.TX8x8, transform.RTX16x8},
+	BS16x4:    {transform.RTX16x4, transform.RTX8x4, transform.RTX8x4, transform.RTX16x4},
+	BS8x32:    {transform.RTX8x32, transform.RTX4x16, 0, transform.RTX8x32},
+	BS8x16:    {transform.RTX8x16, transform.RTX4x8, 0, transform.RTX8x16},
+	BS8x8:     {transform.TX8x8, transform.TX4x4, transform.RTX4x8, transform.TX8x8},
+	BS8x4:     {transform.RTX8x4, transform.TX4x4, transform.TX4x4, transform.RTX8x4},
+	BS4x16:    {transform.RTX4x16, transform.RTX4x8, 0, transform.RTX4x16},
+	BS4x8:     {transform.RTX4x8, transform.TX4x4, 0, transform.RTX4x8},
+	BS4x4:     {transform.TX4x4, transform.TX4x4, transform.TX4x4, transform.TX4x4},
+}
+
 // Scans mirrors dav1d_scans[N_RECT_TX_SIZES]. Each entry is a scan
 // order table for coefficient coding, indexed by raster position to
 // produce the zigzag order index.

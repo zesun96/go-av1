@@ -198,15 +198,11 @@ func LastNonzeroColFromEOB(tx uint8, eob int) (int, bool) {
 	}
 
 	td := transform.TxfmDimensions[tx]
-	sh := int(td.H) * 4
-	if sh > 32 {
-		sh = 32
-	}
-	mask := sh - 1
+	shift := int(td.Lh) + 2
 	cols := make([]uint8, len(scan))
 	maxCol := 0
 	for i, rc := range scan {
-		col := int(rc) & mask
+		col := int(rc) >> shift
 		if col > maxCol {
 			maxCol = col
 		}

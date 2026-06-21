@@ -61,6 +61,7 @@ const (
 	V_FLIPADST
 	H_FLIPADST
 	NTxTypes
+	WHT_WHT = NTxTypes
 )
 
 // Itx1dFn is the unified signature shared by every 1D inverse kernel.

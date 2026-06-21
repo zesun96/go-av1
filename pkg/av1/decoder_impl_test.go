@@ -125,6 +125,21 @@ func TestNewDecoder_DefaultOptions(t *testing.T) {
 	}
 }
 
+func TestNewDecoder_ExplicitZeroInloopFilters(t *testing.T) {
+	dec, err := NewDecoder(DecoderOptions{
+		InloopFilters:    0,
+		InloopFiltersSet: true,
+	})
+	if err != nil {
+		t.Fatalf("NewDecoder = %v", err)
+	}
+	defer dec.Close()
+	impl := dec.(*decoderImpl)
+	if impl.opts.InloopFilters != 0 {
+		t.Fatalf("InloopFilters = %v, want 0", impl.opts.InloopFilters)
+	}
+}
+
 // TestDecoder_Flush_ReleasesRefs: Flush must release reference pictures.
 func TestDecoder_Flush_ReleasesRefs(t *testing.T) {
 	dec := newTestDecoder(t)
