@@ -127,22 +127,21 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 
 	isRect2 := w*2 == h || h*2 == w
 
-	// Compute last nonzero column (conservative approach)
+	// Compute last nonzero column following dav1d's inv_txfm_add_c().
+	// When the caller already derived the exact value from syntax-layer state,
+	// prefer that single source of truth so tile/recon do not drift.
 	lastNonzeroCol := sh - 1
-	if eob < sh*sw-1 {
-		if txtps[1] == Tx1dIDENTITY && txtps[0] != Tx1dIDENTITY {
-			lastNonzeroCol = sh - 1
-			if eob < lastNonzeroCol {
-				lastNonzeroCol = eob
-			}
-		} else if txtps[0] == Tx1dIDENTITY && txtps[1] != Tx1dIDENTITY {
-			lastNonzeroCol = eob >> (int(td.Lw) + 2)
-		} else if exactLastNonzeroCol >= 0 {
-			lastNonzeroCol = exactLastNonzeroCol
+	if exactLastNonzeroCol >= 0 {
+		lastNonzeroCol = exactLastNonzeroCol
+	} else if txtps[1] == Tx1dIDENTITY && txtps[0] != Tx1dIDENTITY {
+		if eob < lastNonzeroCol {
+			lastNonzeroCol = eob
 		}
-		if lastNonzeroCol >= sh {
-			lastNonzeroCol = sh - 1
-		}
+	} else if txtps[0] == Tx1dIDENTITY && txtps[1] != Tx1dIDENTITY {
+		lastNonzeroCol = eob >> (int(td.Lw) + 2)
+	}
+	if lastNonzeroCol >= sh {
+		lastNonzeroCol = sh - 1
 	}
 
 	// Row-first 1D transform

@@ -64,6 +64,11 @@ type DecoderOptions struct {
 
 	// Logger receives diagnostics. Nil disables logging.
 	Logger Logger
+
+	// BestEffort allows damaged or partially implemented frames to be emitted.
+	// The default is strict: syntax and tile errors are returned and failed
+	// frames never enter the output queue or reference buffer.
+	BestEffort bool
 }
 
 // Logger receives free-form diagnostic messages from the codec.

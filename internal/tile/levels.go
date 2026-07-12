@@ -109,6 +109,8 @@ const (
 
 // Av1Block holds per-block decoding state, mirroring dav1d Av1Block.
 type Av1Block struct {
+	X4       uint16 // coding-block origin in 4x4 luma units
+	Y4       uint16
 	Bl       uint8 // BlockLevel
 	Bs       uint8 // BlockSize
 	Bp       uint8 // BlockPartition
@@ -116,7 +118,8 @@ type Av1Block struct {
 	SegID    uint8
 	SkipMode bool
 	Skip     bool
-	Uvtx     uint8 // (Rect)TxfmSize for UV transform
+	LFDelta  [4]int8 // block delta-lf snapshot: YV, YH, U, V
+	Uvtx     uint8   // (Rect)TxfmSize for UV transform
 
 	// Intra fields (populated when Intra == true)
 	YMode    uint8 // IntraPredMode for luma
@@ -133,6 +136,8 @@ type Av1Block struct {
 	// Inter fields (populated when Intra == false; future milestone)
 	InterMode uint8
 	RefSlot   int8
+	RefFrame  int8
+	RefOrder  int8
 	Filter    uint8
 	FilterV   uint8
 	BaseMV    [2]int16 // [Y, X] in 1/8-pel

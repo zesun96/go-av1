@@ -21,6 +21,8 @@ func main() {
 	out := flag.String("o", "", "output Y4M file (- for stdout, empty = discard)")
 	threads := flag.Int("threads", 0, "worker threads (0 = NumCPU)")
 	filters := flag.String("filters", "all", "in-loop filters: all, none, or comma-separated deblock,cdef,restoration")
+	traceSymbols := flag.Bool("trace-symbols", false, "log tile syntax symbols and MSAC state")
+	limit := flag.Int("limit", 0, "stop after decoding this many frames (0 = all)")
 	flag.Parse()
 
 	fmt.Fprintf(os.Stderr, "go-av1d %s (M6 pipeline)\n", av1.Version)
@@ -52,10 +54,16 @@ func main() {
 		os.Exit(2)
 	}
 
+	var logger av1.Logger
+	if *traceSymbols {
+		_ = os.Setenv("GOAV1_TRACE_SYMBOLS", "1")
+		logger = stderrLogger{}
+	}
 	dec, err := av1.NewDecoder(av1.DecoderOptions{
 		Threads:          *threads,
 		InloopFilters:    inloopFilters,
 		InloopFiltersSet: true,
+		Logger:           logger,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "decoder: %v\n", err)
@@ -79,6 +87,9 @@ func main() {
 
 	frameCount := 0
 	for {
+		if *limit > 0 && frameCount >= *limit {
+			break
+		}
 		_, payload, err := dm.ReadFrame()
 		if err == io.EOF {
 			break
@@ -110,6 +121,12 @@ func main() {
 	_ = dec.Flush()
 
 	fmt.Fprintf(os.Stderr, "decoded %d frames\n", frameCount)
+}
+
+type stderrLogger struct{}
+
+func (stderrLogger) Logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
 // writeY4MFrame writes a single raw YUV frame to w.

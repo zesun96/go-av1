@@ -14,6 +14,20 @@ func makeLUT(e, i uint8) *FilterLUT {
 	return &lut
 }
 
+func TestNewFilterLUTSharpness(t *testing.T) {
+	lut0 := NewFilterLUT(0)
+	if lut0.I[32] != 32 || lut0.E[32] != 100 {
+		t.Fatalf("sharp=0 level=32 got I=%d E=%d", lut0.I[32], lut0.E[32])
+	}
+	lut7 := NewFilterLUT(7)
+	if lut7.I[32] != 2 || lut7.E[32] != 70 {
+		t.Fatalf("sharp=7 level=32 got I=%d E=%d", lut7.I[32], lut7.E[32])
+	}
+	if lut7.I[0] != 1 || lut7.E[0] != 5 {
+		t.Fatalf("sharp=7 level=0 got I=%d E=%d", lut7.I[0], lut7.E[0])
+	}
+}
+
 // flatBuf builds a flat pixel buffer (all pixels == val) with the given width,
 // height and padding such that accesses dst[base ± 7*stride] are valid.
 func flatBuf(val uint8, w, h, stride int) (buf []uint8, base int) {

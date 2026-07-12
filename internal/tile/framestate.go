@@ -12,6 +12,7 @@
 package tile
 
 import (
+	"github.com/zesun96/go-av1/internal/header"
 	"github.com/zesun96/go-av1/internal/refmvs"
 	"github.com/zesun96/go-av1/internal/transform"
 )
@@ -19,6 +20,7 @@ import (
 // FrameState holds per-4x4-unit neighbour information for one frame.
 // Rows are indexed top→bottom, columns left→right.
 type FrameState struct {
+	Tracef func(string, ...any)
 	// AboveSkip[col4] — skip flag of the block above column col4 (4-px units).
 	AboveSkip []uint8
 	// LeftSkip[row4] — skip flag of the block to the left of row row4.
@@ -38,10 +40,14 @@ type FrameState struct {
 	LeftPartition  []uint8
 	AboveTx        []uint8
 	LeftTx         []uint8
+	AboveTxIntra   []uint8
+	LeftTxIntra    []uint8
 	AbovePalY      []uint8
 	LeftPalY       []uint8
 	AbovePalUV     []uint8
 	LeftPalUV      []uint8
+	AboveUVMode    []uint8
+	LeftUVMode     []uint8
 	AbovePal       [3][][8]uint8
 	LeftPal        [3][][8]uint8
 	AboveRef       []int8
@@ -60,17 +66,29 @@ type FrameState struct {
 	// AboveSegID[col4] / LeftSegID[row4] — segment_id of decoded neighbour
 	// blocks (0..MaxSegments-1). Used by SegIDFromNeighbours for predicting
 	// the current block's segment id when segmentation is enabled.
-	AboveSegID []uint8
-	LeftSegID  []uint8
+	AboveSegID   []uint8
+	LeftSegID    []uint8
+	AboveSegPred []uint8
+	LeftSegPred  []uint8
 
-	AboveLCoef []uint8
-	LeftLCoef  []uint8
-	AboveCCoef [2][]uint8
-	LeftCCoef  [2][]uint8
-	MVFrame    *refmvs.Frame
-	BlockGrid  []Av1Block
+	AboveLCoef      []uint8
+	LeftLCoef       []uint8
+	AboveCCoef      [2][]uint8
+	LeftCCoef       [2][]uint8
+	MVFrame         *refmvs.Frame
+	BlockGrid       []Av1Block
+	ChromaBlockGrid []Av1Block
+	// TxGrid stores the luma transform leaf covering each 4x4 unit. Unset
+	// entries are 0xff so TX4x4 (zero) remains distinguishable.
+	TxGrid     []uint8
+	TxOriginX4 []uint16
+	TxOriginY4 []uint16
 	SsHor      uint8
 	SsVer      uint8
+	TileX0     int
+	TileY0     int
+	TileX1     int
+	TileY1     int
 
 	// Frame dimensions in 4-px units.
 	Width  int
@@ -80,6 +98,21 @@ type FrameState struct {
 	CH4    int
 	W8, H8 int
 	W64    int
+}
+
+func (fs *FrameState) intraAvailability(plane, bx, by int) (haveTop, haveLeft bool) {
+	x0, y0 := fs.TileX0, fs.TileY0
+	if plane > 0 {
+		x0 >>= fs.SsHor
+		y0 >>= fs.SsVer
+	}
+	return by > y0, bx > x0
+}
+
+func (fs *FrameState) tracef(format string, args ...any) {
+	if fs != nil && fs.Tracef != nil {
+		fs.Tracef(format, args...)
+	}
 }
 
 // NewFrameState allocates a FrameState for a frame of size (w×h) luma pixels.
@@ -94,6 +127,10 @@ func NewFrameState(w, h int) *FrameState {
 	for i := range cdefIndex {
 		cdefIndex[i] = -1
 	}
+	txGrid := make([]uint8, w4*h4)
+	for i := range txGrid {
+		txGrid[i] = 0xff
+	}
 	return &FrameState{
 		AboveSkip:      make([]uint8, w4),
 		LeftSkip:       make([]uint8, h4),
@@ -105,10 +142,14 @@ func NewFrameState(w, h int) *FrameState {
 		LeftPartition:  make([]uint8, h8),
 		AboveTx:        make([]uint8, w4),
 		LeftTx:         make([]uint8, h4),
+		AboveTxIntra:   make([]uint8, w4),
+		LeftTxIntra:    make([]uint8, h4),
 		AbovePalY:      make([]uint8, w4),
 		LeftPalY:       make([]uint8, h4),
 		AbovePalUV:     make([]uint8, w4),
 		LeftPalUV:      make([]uint8, h4),
+		AboveUVMode:    filledUint8(w4, DCPred),
+		LeftUVMode:     filledUint8(h4, DCPred),
 		AbovePal: [3][][8]uint8{
 			make([][8]uint8, w4),
 			make([][8]uint8, w4),
@@ -133,11 +174,13 @@ func NewFrameState(w, h int) *FrameState {
 			make([]int16, h4),
 			make([]int16, h4),
 		},
-		CDEFIndex:  cdefIndex,
-		AboveSegID: make([]uint8, w4),
-		LeftSegID:  make([]uint8, h4),
-		AboveLCoef: filledUint8(w4, 0x40),
-		LeftLCoef:  filledUint8(h4, 0x40),
+		CDEFIndex:    cdefIndex,
+		AboveSegID:   make([]uint8, w4),
+		LeftSegID:    make([]uint8, h4),
+		AboveSegPred: make([]uint8, w4),
+		LeftSegPred:  make([]uint8, h4),
+		AboveLCoef:   filledUint8(w4, 0x40),
+		LeftLCoef:    filledUint8(h4, 0x40),
 		AboveCCoef: [2][]uint8{
 			filledUint8(w4, 0x40),
 			filledUint8(w4, 0x40),
@@ -146,18 +189,22 @@ func NewFrameState(w, h int) *FrameState {
 			filledUint8(h4, 0x40),
 			filledUint8(h4, 0x40),
 		},
-		BlockGrid: make([]Av1Block, w4*h4),
-		Width:     w,
-		Height:    h,
-		SsHor:     1,
-		SsVer:     1,
-		W4:        w4,
-		H4:        h4,
-		CW4:       (w + 7) / 8,
-		CH4:       (h + 7) / 8,
-		W8:        w8,
-		H8:        h8,
-		W64:       w64,
+		BlockGrid:       make([]Av1Block, w4*h4),
+		ChromaBlockGrid: make([]Av1Block, ((w+7)/8)*((h+7)/8)),
+		TxGrid:          txGrid,
+		TxOriginX4:      make([]uint16, w4*h4),
+		TxOriginY4:      make([]uint16, w4*h4),
+		Width:           w,
+		Height:          h,
+		SsHor:           1,
+		SsVer:           1,
+		W4:              w4,
+		H4:              h4,
+		CW4:             (w + 7) / 8,
+		CH4:             (h + 7) / 8,
+		W8:              w8,
+		H8:              h8,
+		W64:             w64,
 	}
 }
 
@@ -168,6 +215,7 @@ func (fs *FrameState) SetSubsampling(ssHor, ssVer uint8) {
 	ch := (fs.Height + (1 << ssVer) - 1) >> ssVer
 	fs.CW4 = (cw + 3) >> 2
 	fs.CH4 = (ch + 3) >> 2
+	fs.ChromaBlockGrid = make([]Av1Block, fs.CW4*fs.CH4)
 }
 
 func filledUint8(n int, v uint8) []uint8 {
@@ -283,6 +331,73 @@ func (fs *FrameState) SegIDFromNeighbours(bx, by int) uint8 {
 	}
 }
 
+// SegIDPredCtx mirrors dav1d get_cur_frame_segid, including the above-left
+// equality context used by the segment-id CDF.
+func (fs *FrameState) SegIDPredCtx(bx, by int) (uint8, int) {
+	haveTop := by > fs.TileY0
+	haveLeft := bx > fs.TileX0
+	segAt := func(x, y int) uint8 {
+		if blk, ok := fs.BlockState(x, y); ok {
+			return blk.SegID
+		}
+		return 0
+	}
+	if haveTop && haveLeft {
+		left := segAt(bx-4, by)
+		above := segAt(bx, by-4)
+		aboveLeft := segAt(bx-4, by-4)
+		ctx := 0
+		if left == above && aboveLeft == left {
+			ctx = 2
+		} else if left == above || aboveLeft == left || above == aboveLeft {
+			ctx = 1
+		}
+		if above == aboveLeft {
+			return above, ctx
+		}
+		return left, ctx
+	}
+	if haveLeft {
+		return segAt(bx-4, by), 0
+	}
+	if haveTop {
+		return segAt(bx, by-4), 0
+	}
+	return 0, 0
+}
+
+// SegPredCtx returns the temporal segment-prediction context from the above
+// and left 4x4 neighbours, matching dav1d's seg_pred edge arrays.
+func (fs *FrameState) SegPredCtx(bx, by int) int {
+	ctx := 0
+	col4, row4 := bx/4, by/4
+	if by > fs.TileY0 && col4 >= 0 && col4 < len(fs.AboveSegPred) {
+		ctx += int(fs.AboveSegPred[col4])
+	}
+	if bx > fs.TileX0 && row4 >= 0 && row4 < len(fs.LeftSegPred) {
+		ctx += int(fs.LeftSegPred[row4])
+	}
+	return ctx
+}
+
+// SetSegPred records one temporal segment-prediction flag on the block edges.
+func (fs *FrameState) SetSegPred(bx, by, bw, bh int, predicted bool) {
+	v := uint8(0)
+	if predicted {
+		v = 1
+	}
+	for c, end := bx/4, (bx+bw+3)/4; c < end && c < len(fs.AboveSegPred); c++ {
+		if c >= 0 {
+			fs.AboveSegPred[c] = v
+		}
+	}
+	for r, end := by/4, (by+bh+3)/4; r < end && r < len(fs.LeftSegPred); r++ {
+		if r >= 0 {
+			fs.LeftSegPred[r] = v
+		}
+	}
+}
+
 // SetBlock records the decoded state of a block occupying (bw×bh) luma pixels
 // at position (bx,by). Called after each block is decoded.
 //
@@ -324,6 +439,11 @@ func (fs *FrameState) SetBlockSeg(bx, by, bw, bh int, skip bool, yMode int, segI
 				fs.AboveMode[c] = uint8(modeCtx)
 				fs.AbovePresent[c] = 1
 				fs.AboveSegID[c] = segID
+				fs.AboveRef[c] = -1
+				fs.AboveFilter[c] = 0
+				fs.AboveFilterV[c] = 0
+				fs.AboveMV[0][c] = 0
+				fs.AboveMV[1][c] = 0
 			}
 		}
 	}
@@ -337,12 +457,19 @@ func (fs *FrameState) SetBlockSeg(bx, by, bw, bh int, skip bool, yMode int, segI
 				fs.LeftMode[r] = uint8(modeCtx)
 				fs.LeftPresent[r] = 1
 				fs.LeftSegID[r] = segID
+				fs.LeftRef[r] = -1
+				fs.LeftFilter[r] = 0
+				fs.LeftFilterV[r] = 0
+				fs.LeftMV[0][r] = 0
+				fs.LeftMV[1][r] = 0
 			}
 		}
 	}
 }
 
 func (fs *FrameState) SetBlockState(bx, by, bw, bh int, blk Av1Block) {
+	blk.X4 = uint16(maxInt(bx/4, 0))
+	blk.Y4 = uint16(maxInt(by/4, 0))
 	col4Start := bx / 4
 	col4End := (bx + bw + 3) / 4
 	if col4End > fs.W4 {
@@ -357,6 +484,68 @@ func (fs *FrameState) SetBlockState(bx, by, bw, bh int, blk Av1Block) {
 		base := r * fs.W4
 		for c := col4Start; c < col4End; c++ {
 			fs.BlockGrid[base+c] = blk
+		}
+	}
+}
+
+func (fs *FrameState) SetChromaBlockState(bx, by, bw, bh int, blk Av1Block) {
+	blk.X4 = uint16(maxInt(bx/4, 0))
+	blk.Y4 = uint16(maxInt(by/4, 0))
+	px := bx >> fs.SsHor
+	py := by >> fs.SsVer
+	pw := (bw + (1 << fs.SsHor) - 1) >> fs.SsHor
+	ph := (bh + (1 << fs.SsVer) - 1) >> fs.SsVer
+	x0, y0 := clampInt(px/4, 0, fs.CW4), clampInt(py/4, 0, fs.CH4)
+	x1, y1 := clampInt((px+pw+3)/4, 0, fs.CW4), clampInt((py+ph+3)/4, 0, fs.CH4)
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			fs.ChromaBlockGrid[y*fs.CW4+x] = blk
+		}
+	}
+}
+
+// SetTxState records the transform leaf covering a luma rectangle.
+func (fs *FrameState) SetTxState(bx, by, bw, bh int, tx uint8) {
+	x0 := clampInt(bx/4, 0, fs.W4)
+	x1 := clampInt((bx+bw+3)/4, 0, fs.W4)
+	y0 := clampInt(by/4, 0, fs.H4)
+	y1 := clampInt((by+bh+3)/4, 0, fs.H4)
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			i := y*fs.W4 + x
+			fs.TxGrid[i] = tx
+			fs.TxOriginX4[i] = uint16(x0)
+			fs.TxOriginY4[i] = uint16(y0)
+		}
+	}
+}
+
+// MergeFilterState copies durable post-filter metadata from one independently
+// decoded tile. Rolling above/left entropy contexts must not be merged.
+func (fs *FrameState) MergeFilterState(src *FrameState) {
+	if fs == nil || src == nil || fs.W4 != src.W4 || fs.H4 != src.H4 {
+		return
+	}
+	x0 := clampInt(src.TileX0/4, 0, fs.W4)
+	x1 := clampInt((src.TileX1+3)/4, 0, fs.W4)
+	y0 := clampInt(src.TileY0/4, 0, fs.H4)
+	y1 := clampInt((src.TileY1+3)/4, 0, fs.H4)
+	for y := y0; y < y1; y++ {
+		copy(fs.BlockGrid[y*fs.W4+x0:y*fs.W4+x1], src.BlockGrid[y*src.W4+x0:y*src.W4+x1])
+		copy(fs.TxGrid[y*fs.W4+x0:y*fs.W4+x1], src.TxGrid[y*src.W4+x0:y*src.W4+x1])
+		copy(fs.TxOriginX4[y*fs.W4+x0:y*fs.W4+x1], src.TxOriginX4[y*src.W4+x0:y*src.W4+x1])
+		copy(fs.TxOriginY4[y*fs.W4+x0:y*fs.W4+x1], src.TxOriginY4[y*src.W4+x0:y*src.W4+x1])
+	}
+	cx0 := clampInt((src.TileX0>>src.SsHor)/4, 0, fs.CW4)
+	cx1 := clampInt(((src.TileX1>>src.SsHor)+3)/4, 0, fs.CW4)
+	cy0 := clampInt((src.TileY0>>src.SsVer)/4, 0, fs.CH4)
+	cy1 := clampInt(((src.TileY1>>src.SsVer)+3)/4, 0, fs.CH4)
+	for y := cy0; y < cy1; y++ {
+		copy(fs.ChromaBlockGrid[y*fs.CW4+cx0:y*fs.CW4+cx1], src.ChromaBlockGrid[y*src.CW4+cx0:y*src.CW4+cx1])
+	}
+	for i, v := range src.CDEFIndex {
+		if v >= 0 {
+			fs.CDEFIndex[i] = v
 		}
 	}
 }
@@ -383,6 +572,22 @@ func (fs *FrameState) IntraSmoothFlags(bx, by, stepX, stepY int, plane int) int 
 	if fs == nil {
 		return 0
 	}
+	if plane > 0 {
+		flags := 0
+		col4 := bx / 4
+		row4 := by / 4
+		if by > 0 && col4 >= 0 && col4 < fs.CW4 && col4 < len(fs.AboveUVMode) {
+			if isSmoothIntraMode(fs.AboveUVMode[col4]) {
+				flags |= 1 << 9
+			}
+		}
+		if bx > 0 && row4 >= 0 && row4 < fs.CH4 && row4 < len(fs.LeftUVMode) {
+			if isSmoothIntraMode(fs.LeftUVMode[row4]) {
+				flags |= 1 << 9
+			}
+		}
+		return flags
+	}
 	flags := 0
 	if stepX <= 0 {
 		stepX = 4
@@ -392,18 +597,12 @@ func (fs *FrameState) IntraSmoothFlags(bx, by, stepX, stepY int, plane int) int 
 	}
 	if above, ok := fs.BlockState(bx, by-stepY); ok && above.Intra {
 		mode := above.YMode
-		if plane > 0 {
-			mode = above.UvMode
-		}
 		if isSmoothIntraMode(mode) {
 			flags |= 1 << 9
 		}
 	}
 	if left, ok := fs.BlockState(bx-stepX, by); ok && left.Intra {
 		mode := left.YMode
-		if plane > 0 {
-			mode = left.UvMode
-		}
 		if isSmoothIntraMode(mode) {
 			flags |= 1 << 9
 		}
@@ -417,6 +616,10 @@ func (fs *FrameState) IntraSmoothFlags(bx, by, stepX, stepY int, plane int) int 
 // reference/motion-vector syntax.
 func (fs *FrameState) SetInterBlock(bx, by, bw, bh int, skip bool, segID uint8, refSlot, refFrame int, filter, filterV uint8, interMode int, mv refmvs.MV) {
 	fs.SetBlockSeg(bx, by, bw, bh, skip, DCPred, segID)
+	if len(fs.AboveUVMode) > 0 && len(fs.LeftUVMode) > 0 {
+		cbx, cby, cbw, cbh := chromaRect(&header.SequenceHeader{SsHor: fs.SsHor, SsVer: fs.SsVer}, bx, by, bw, bh)
+		fs.SetUVModeState(cbx, cby, cbw, cbh, DCPred)
+	}
 
 	col4Start := bx / 4
 	col4End := (bx + bw + 3) / 4
@@ -452,11 +655,14 @@ func (fs *FrameState) SetInterBlock(bx, by, bw, bh int, skip bool, segID uint8, 
 		}
 	}
 
-	fs.setTemporalMVBlock(bx, by, bw, bh, refSlot, mv)
+	fs.setTemporalMVBlock(bx, by, bw, bh, refFrame, mv)
 	fs.setCurrentMVBlock(bx, by, bw, bh, refFrame, interMode, mv)
 }
 
 func (fs *FrameState) CommitInterBlock(bx, by, bw, bh int, blk Av1Block, refFrame int) {
+	if blk.RefFrame > 0 {
+		refFrame = int(blk.RefFrame)
+	}
 	fs.SetBlockState(bx, by, bw, bh, blk)
 	fs.SetInterBlock(
 		bx, by, bw, bh,
@@ -471,7 +677,7 @@ func (fs *FrameState) CommitInterBlock(bx, by, bw, bh int, blk Av1Block, refFram
 	)
 }
 
-func (fs *FrameState) setTemporalMVBlock(bx, by, bw, bh int, refSlot int, mv refmvs.MV) {
+func (fs *FrameState) setTemporalMVBlock(bx, by, bw, bh int, refFrame int, mv refmvs.MV) {
 	if fs.MVFrame == nil || fs.MVFrame.RPStride == 0 {
 		return
 	}
@@ -486,8 +692,8 @@ func (fs *FrameState) setTemporalMVBlock(bx, by, bw, bh int, refSlot int, mv ref
 		row8End = fs.MVFrame.IH8
 	}
 	refVal := uint8(0)
-	if refSlot >= 0 {
-		refVal = uint8(refSlot + 1)
+	if refFrame > 0 && refFrame <= header.RefsPerFrame {
+		refVal = uint8(refFrame)
 	}
 	for y := row8Start; y < row8End; y++ {
 		base := y * fs.MVFrame.RPStride
@@ -551,22 +757,6 @@ func (fs *FrameState) NeighbourInterMV(bx, by int) (mv refmvs.MV, ok bool) {
 		return refmvs.MV{Y: fs.LeftMV[0][row4], X: fs.LeftMV[1][row4]}, true
 	}
 	return refmvs.MV{}, false
-}
-
-func (fs *FrameState) TemporalInterMV(bx, by int) (mv refmvs.MV, refSlot int, ok bool) {
-	if fs.MVFrame == nil || fs.MVFrame.RPStride == 0 {
-		return refmvs.MV{}, -1, false
-	}
-	col8 := bx >> 3
-	row8 := by >> 3
-	if col8 < 0 || col8 >= fs.MVFrame.IW8 || row8 < 0 || row8 >= fs.MVFrame.IH8 {
-		return refmvs.MV{}, -1, false
-	}
-	tb := fs.MVFrame.RP[row8*fs.MVFrame.RPStride+col8]
-	if tb.Ref == 0 {
-		return refmvs.MV{}, -1, false
-	}
-	return tb.MV, int(tb.Ref) - 1, true
 }
 
 func (fs *FrameState) GridInterBlock(bx, by int) (refmvs.Block, bool) {
@@ -665,6 +855,25 @@ func (fs *FrameState) SetPaletteColors(bx, by, bw, bh int, pal [3][8]uint8) {
 	}
 }
 
+func (fs *FrameState) SetUVModeState(bx, by, bw, bh int, mode uint8) {
+	col4Start := bx / 4
+	col4End := (bx + bw + 3) / 4
+	if col4End > fs.CW4 {
+		col4End = fs.CW4
+	}
+	row4Start := by / 4
+	row4End := (by + bh + 3) / 4
+	if row4End > fs.CH4 {
+		row4End = fs.CH4
+	}
+	for c := col4Start; c < col4End && c < len(fs.AboveUVMode); c++ {
+		fs.AboveUVMode[c] = mode
+	}
+	for r := row4Start; r < row4End && r < len(fs.LeftUVMode); r++ {
+		fs.LeftUVMode[r] = mode
+	}
+}
+
 func (fs *FrameState) coefEdges(plane int) (above, left []uint8) {
 	if plane == 0 {
 		return fs.AboveLCoef, fs.LeftLCoef
@@ -693,13 +902,15 @@ func (fs *FrameState) CoefSkipCtx(plane, bx, by, bw, bh int, tx uint8) int {
 	row4 := by >> 2
 	bwLog := blockDimLog4(bw)
 	bhLog := blockDimLog4(bh)
+	txw4 := txSpan4(int(td.Lw))
+	txh4 := txSpan4(int(td.Lh))
 
 	if plane == 0 {
 		if bwLog == int(td.Lw) && bhLog == int(td.Lh) {
 			return 0
 		}
-		a := mergedCoefLow(above, col4, int(td.W), edgeW4)
-		l := mergedCoefLow(left, row4, int(td.H), edgeH4)
+		a := mergedCoefLow(above, col4, txw4, edgeW4)
+		l := mergedCoefLow(left, row4, txh4, edgeH4)
 		if a > 4 {
 			a = 4
 		}
@@ -709,19 +920,21 @@ func (fs *FrameState) CoefSkipCtx(plane, bx, by, bw, bh int, tx uint8) int {
 		return int(DAV1DSkipCtx[a][l])
 	}
 
-	// Chroma callers pass plane-local pixel dimensions, so bwLog/bhLog already
-	// describe the chroma block extent in 4x4 units.
-	chromaBwLog := bwLog
-	chromaBhLog := bhLog
+	ssHor := int(fs.SsHor)
+	ssVer := int(fs.SsVer)
+	lumaBwLog := bwLog + ssHor
+	lumaBhLog := bhLog + ssVer
+	chromaBwLog := lumaBwLog
+	chromaBhLog := lumaBhLog
+	if chromaBwLog > 0 && ssHor != 0 {
+		chromaBwLog--
+	}
+	if chromaBhLog > 0 && ssVer != 0 {
+		chromaBhLog--
+	}
 	notOneBlk := boolInt(chromaBwLog > int(td.Lw) || chromaBhLog > int(td.Lh))
-	ca := 0
-	if !allCoefNeutral(above, col4, int(td.W), edgeW4) {
-		ca = 1
-	}
-	cl := 0
-	if !allCoefNeutral(left, row4, int(td.H), edgeH4) {
-		cl = 1
-	}
+	ca := boolInt(!allCoefNeutral(above, col4, txw4, edgeW4))
+	cl := boolInt(!allCoefNeutral(left, row4, txh4, edgeH4))
 	return 7 + notOneBlk*3 + ca + cl
 }
 
@@ -731,7 +944,20 @@ func (fs *FrameState) DCSignCtx(plane, bx, by int, tx uint8) int {
 	td := transform.TxfmDimensions[tx]
 	col4 := bx >> 2
 	row4 := by >> 2
-	s := coefSignSum(above, col4, int(td.W), edgeW4) + coefSignSum(left, row4, int(td.H), edgeH4)
+	txw4 := txSpan4(int(td.Lw))
+	txh4 := txSpan4(int(td.Lh))
+	s := coefSignSum(above, col4, txw4, edgeW4) + coefSignSum(left, row4, txh4, edgeH4)
+	return boolInt(s != 0) + boolInt(s > 0)
+}
+
+func (fs *FrameState) DCSignCtxBlock(plane, bx, by, bw, bh int) int {
+	above, left := fs.coefEdges(plane)
+	edgeW4, edgeH4 := fs.coefEdgeLimits(plane)
+	col4 := bx >> 2
+	row4 := by >> 2
+	w4 := blockDim4Units(bw)
+	h4 := blockDim4Units(bh)
+	s := coefSignSum(above, col4, w4, edgeW4) + coefSignSum(left, row4, h4, edgeH4)
 	return boolInt(s != 0) + boolInt(s > 0)
 }
 
@@ -770,14 +996,50 @@ func (fs *FrameState) TxCtx(bx, by int, maxTx uint8) int {
 	row4 := by >> 2
 
 	above := 0
-	if col4 < len(fs.AboveTx) && fs.AboveTx[col4] >= td.Lw {
+	if by > fs.TileY0 && col4 < len(fs.AboveTx) && fs.AboveTx[col4] < td.Lw {
 		above = 1
 	}
 	left := 0
-	if row4 < len(fs.LeftTx) && fs.LeftTx[row4] >= td.Lh {
+	if bx > fs.TileX0 && row4 < len(fs.LeftTx) && fs.LeftTx[row4] < td.Lh {
 		left = 1
 	}
 	return above + left
+}
+
+// IntraTxCtx mirrors dav1d get_tx_ctx and uses the separate tx_intra edge
+// state. Larger or equal neighbouring transforms contribute to the context.
+func (fs *FrameState) IntraTxCtx(bx, by int, maxTx uint8) int {
+	td := transform.TxfmDimensions[maxTx]
+	col4 := bx >> 2
+	row4 := by >> 2
+	ctx := 0
+	if col4 < len(fs.AboveTxIntra) && fs.AboveTxIntra[col4] >= td.Lw {
+		ctx++
+	}
+	if row4 < len(fs.LeftTxIntra) && fs.LeftTxIntra[row4] >= td.Lh {
+		ctx++
+	}
+	return ctx
+}
+
+func (fs *FrameState) setTxIntraEdges(bx, by, bw, bh, txw, txh int) {
+	col4, row4 := bx>>2, by>>2
+	for i, n := 0, blockDim4Units(bw); i < n && col4+i < len(fs.AboveTxIntra); i++ {
+		fs.AboveTxIntra[col4+i] = uint8(txw)
+	}
+	for i, n := 0, blockDim4Units(bh); i < n && row4+i < len(fs.LeftTxIntra); i++ {
+		fs.LeftTxIntra[row4+i] = uint8(txh)
+	}
+}
+
+func (fs *FrameState) SetIntraTxCtx(bx, by, bw, bh int, tx uint8) {
+	td := transform.TxfmDimensions[tx]
+	fs.SetTxCtx(bx, by, bw, bh, tx, true, false)
+	fs.setTxIntraEdges(bx, by, bw, bh, int(td.Lw), int(td.Lh))
+}
+
+func (fs *FrameState) SetInterTxIntraCtx(bx, by, bw, bh int) {
+	fs.setTxIntraEdges(bx, by, bw, bh, blockDimLog4(bw), blockDimLog4(bh))
 }
 
 func (fs *FrameState) SetTxCtx(bx, by, bw, bh int, tx uint8, switchable, skip bool) {
@@ -821,6 +1083,24 @@ func mergedCoefLow(v []uint8, start, n, limit int) int {
 	return merged & 0x3f
 }
 
+func coefEdgeMergeLow(v []uint8, start, txLog, limit int) int {
+	n := 1 << txLog
+	if txLog >= 4 {
+		n = 16
+	}
+	return mergedCoefLow(v, start, n, limit)
+}
+
+func txSpan4(txLog int) int {
+	if txLog <= 0 {
+		return 1
+	}
+	if txLog >= 4 {
+		return 16
+	}
+	return 1 << txLog
+}
+
 func allCoefNeutral(v []uint8, start, n, limit int) bool {
 	for i := 0; i < n && start+i < len(v) && start+i < limit; i++ {
 		if v[start+i] != 0x40 {
@@ -828,6 +1108,14 @@ func allCoefNeutral(v []uint8, start, n, limit int) bool {
 		}
 	}
 	return true
+}
+
+func coefEdgeAllNeutral(v []uint8, start, txLog, limit int) bool {
+	n := 1 << txLog
+	if txLog >= 4 {
+		n = 16
+	}
+	return allCoefNeutral(v, start, n, limit)
 }
 
 func coefSignSum(v []uint8, start, n, limit int) int {

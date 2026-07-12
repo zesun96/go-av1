@@ -11,6 +11,7 @@ import (
 
 func TestFrameStateCoefSkipCtxUsesMergedResidualLowBits(t *testing.T) {
 	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
 	bx, by := 0, 16
 
 	// dav1d merges neighbour res_ctx bytes with bitwise OR before clamping the
@@ -36,17 +37,115 @@ func TestFrameStateCoefSkipCtxSingleTransformBlockIsZero(t *testing.T) {
 
 func TestFrameStateTxCtxUsesNeighbourTransformLogs(t *testing.T) {
 	fs := NewFrameState(64, 64)
-
-	fs.SetTxCtx(0, 0, 32, 16, transform.TX16x16, true, false)
-	got := fs.TxCtx(0, 16, transform.TX16x16)
+	fs.AboveTx[1] = 1 // TX8 width is smaller than the current TX16 width.
+	fs.LeftTx[1] = 2  // Equal height does not contribute.
+	got := fs.TxCtx(4, 4, transform.TX16x16)
 	if got != 1 {
-		t.Fatalf("TxCtx top-only = %d, want 1", got)
+		t.Fatalf("TxCtx smaller-above = %d, want 1", got)
 	}
 
-	fs.SetTxCtx(0, 16, 16, 32, transform.TX16x16, true, false)
-	got = fs.TxCtx(16, 16, transform.TX16x16)
+	fs.LeftTx[1] = 0
+	got = fs.TxCtx(4, 4, transform.TX16x16)
 	if got != 2 {
-		t.Fatalf("TxCtx left-only = %d, want 2", got)
+		t.Fatalf("TxCtx two-smaller-neighbours = %d, want 2", got)
+	}
+	if got = fs.TxCtx(0, 0, transform.TX16x16); got != 0 {
+		t.Fatalf("TxCtx unavailable tile edges = %d, want 0", got)
+	}
+}
+
+func TestSingleRefModeContextsCountsTopAndLeftMatchesBeforeDedup(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
+	fhdr := &header.FrameHeader{}
+	fhdr.Refidx[0] = 0
+	blk := Av1Block{Intra: false, RefSlot: 0, MV: [2]int16{0, 0}}
+	fs.SetBlockState(16, 0, 16, 16, blk)
+	fs.SetBlockState(0, 16, 16, 16, blk)
+	mvBlk := refmvs.Block{Ref: refmvs.RefPair{1, -1}, BS: BS16x16}
+	fs.MVFrame.PutGridBlock(4, 0, 4, 4, mvBlk)
+	fs.MVFrame.PutGridBlock(0, 4, 4, 4, mvBlk)
+
+	newCtx, globalCtx, refCtx := singleRefModeContexts(fs, fhdr, nil, 0, 1, 16, 16, 16, 16)
+	if newCtx != 5 || globalCtx != 0 || refCtx != 5 {
+		t.Fatalf("mode contexts = %d/%d/%d, want 5/0/5", newCtx, globalCtx, refCtx)
+	}
+}
+
+func TestSingleRefModeContextsIncludesSecondaryLeftMatch(t *testing.T) {
+	fs := NewFrameState(320, 64)
+	fs.MVFrame = refmvs.NewFrame(320, 64)
+	fhdr := &header.FrameHeader{}
+	fhdr.Refidx[0] = 0
+	fs.SetBlockState(220, 0, 4, 16, Av1Block{Intra: false, RefSlot: 0, InterMode: InterModeNearestMV})
+	fs.SetBlockState(224, 0, 16, 16, Av1Block{Intra: true, RefSlot: -1})
+	fs.MVFrame.PutGridBlock(55, 0, 1, 4, refmvs.Block{Ref: refmvs.RefPair{1, -1}, BS: BS4x16})
+
+	newCtx, globalCtx, refCtx := singleRefModeContexts(fs, fhdr, nil, 0, 1, 240, 0, 16, 16)
+	if newCtx != 1 || globalCtx != 0 || refCtx != 1 {
+		t.Fatalf("secondary mode contexts = %d/%d/%d, want 1/0/1", newCtx, globalCtx, refCtx)
+	}
+}
+
+func TestSingleRefModeContextsCombinesDirectAndSecondaryDirections(t *testing.T) {
+	fs := NewFrameState(320, 64)
+	fs.MVFrame = refmvs.NewFrame(320, 64)
+	fhdr := &header.FrameHeader{}
+	fhdr.Refidx[0] = 0
+	match := Av1Block{Intra: false, RefSlot: 0, InterMode: InterModeNearestMV}
+	topNew := match
+	topNew.InterMode = InterModeNewMV
+	fs.SetBlockState(240, 0, 16, 16, topNew)
+	fs.SetBlockState(220, 16, 4, 16, match)
+	fs.SetBlockState(224, 16, 16, 16, Av1Block{Intra: true, RefSlot: -1})
+	fs.MVFrame.PutGridBlock(60, 0, 4, 4, refmvs.Block{Ref: refmvs.RefPair{1, -1}, BS: BS16x16, MF: 2})
+	fs.MVFrame.PutGridBlock(55, 4, 1, 4, refmvs.Block{Ref: refmvs.RefPair{1, -1}, BS: BS4x16})
+
+	newCtx, globalCtx, refCtx := singleRefModeContexts(fs, fhdr, nil, 0, 1, 240, 16, 16, 16)
+	if newCtx != 2 || globalCtx != 0 || refCtx != 4 {
+		t.Fatalf("combined mode contexts = %d/%d/%d, want 2/0/4", newCtx, globalCtx, refCtx)
+	}
+}
+
+func TestRefCtxCountsAllForwardAndBackwardRefs(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}}
+	fs.SetBlockState(16, 0, 16, 16, Av1Block{Intra: false, RefSlot: 3})
+	fs.AbovePresent[4] = 1
+	if got := refCtx(fs, fhdr, 16, 16); got != 2 {
+		t.Fatalf("forward ref context = %d, want 2", got)
+	}
+	fs.SetBlockState(16, 0, 16, 16, Av1Block{Intra: false, RefSlot: 5})
+	if got := refCtx(fs, fhdr, 16, 16); got != 0 {
+		t.Fatalf("backward ref context = %d, want 0", got)
+	}
+}
+
+func TestSingleRefModeContextsDoNotCrossTileBoundary(t *testing.T) {
+	fs := NewFrameState(640, 64)
+	fs.TileX0 = 320
+	fs.TileY0 = 0
+	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}}
+
+	newCtx, globalCtx, refCtx := singleRefModeContexts(fs, fhdr, nil, 0, 1, 320, 0, 64, 64)
+	if newCtx != 0 || globalCtx != 0 || refCtx != 0 {
+		t.Fatalf("tile-boundary mode contexts = %d/%d/%d, want 0/0/0", newCtx, globalCtx, refCtx)
+	}
+}
+
+func TestFrameStateIntraTxCtxUsesSeparateBlockEdges(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fs.SetIntraTxCtx(16, 0, 16, 16, transform.TX16x16)
+	fs.SetInterTxIntraCtx(0, 16, 16, 16)
+	if got := fs.IntraTxCtx(16, 16, transform.TX16x16); got != 2 {
+		t.Fatalf("IntraTxCtx = %d, want 2", got)
+	}
+
+	// Var-tx edges remain independent and still use the smaller-neighbour rule.
+	fs.AboveTx[4] = 2
+	fs.LeftTx[4] = 1
+	if got := fs.TxCtx(16, 16, transform.TX16x16); got != 1 {
+		t.Fatalf("var TxCtx = %d, want 1", got)
 	}
 }
 
@@ -77,6 +176,39 @@ func TestFrameStateSetCoefCtxClipsToChromaPlaneBounds(t *testing.T) {
 	}
 	if fs.AboveCCoef[0][2] != 0x40 {
 		t.Fatalf("AboveCCoef[2] = 0x%x, want neutral 0x40", fs.AboveCCoef[0][2])
+	}
+}
+
+func TestFrameStateDCSignCtxBlockUsesVisibleSpan(t *testing.T) {
+	fs := NewFrameState(14, 10)
+	// Visible width is one 4x4 unit at bx=8, but the next neighbour slot
+	// carries stale negative state. The block-scoped ctx must ignore it.
+	fs.AboveLCoef[2] = 0x80
+	fs.AboveLCoef[3] = 0x00
+	got := fs.DCSignCtxBlock(0, 8, 0, 2, 4)
+	if got != 2 {
+		t.Fatalf("DCSignCtxBlock = %d, want 2", got)
+	}
+}
+
+func TestBlockHasChromaUsesSyntaxBlockSizeAtFrameEdge(t *testing.T) {
+	seq420 := &header.SequenceHeader{SsHor: 1, SsVer: 1}
+	fb := &FrameBuf{
+		Width:      14,
+		Height:     10,
+		ChromaW:    7,
+		ChromaH:    5,
+		StrideY:    14,
+		StrideUV:   7,
+		Y:          make([]byte, 140),
+		U:          make([]byte, 35),
+		V:          make([]byte, 35),
+		Monochrome: false,
+	}
+	// bx=12 leaves only 2 visible luma pixels, but a 4x4 syntax block at an odd
+	// 4x4 column and row still has chroma per dav1d's block-level test.
+	if !blockHasChroma(seq420, fb, 12, 4, 4, 4) {
+		t.Fatal("blockHasChroma clipped edge block = false, want true")
 	}
 }
 
@@ -147,7 +279,7 @@ func TestMaxTxForBlockSize(t *testing.T) {
 }
 
 func TestCollectTxBlocksFromSplits(t *testing.T) {
-	blocks := collectTxBlocksFromSplits(32, 32, transform.TX16x16, 1, 0)
+	blocks := collectTxBlocksFromSplits(0, 0, 32, 32, 32, 32, transform.TX16x16, 1, 0)
 	if len(blocks) != 4 {
 		t.Fatalf("split root block count = %d, want 4", len(blocks))
 	}
@@ -157,12 +289,34 @@ func TestCollectTxBlocksFromSplits(t *testing.T) {
 		}
 	}
 
-	blocks = collectTxBlocksFromSplits(32, 16, transform.RTX32x16, 0, 0)
+	blocks = collectTxBlocksFromSplits(0, 0, 8, 8, 8, 8, transform.TX8x8, 1, 0)
+	if len(blocks) != 4 {
+		t.Fatalf("split TX8 block count = %d, want 4", len(blocks))
+	}
+	for _, blk := range blocks {
+		if blk.tx != transform.TX4x4 || blk.w != 4 || blk.h != 4 {
+			t.Fatalf("split TX8 child = %+v, want TX4x4 4x4", blk)
+		}
+	}
+
+	blocks = collectTxBlocksFromSplits(0, 0, 32, 16, 32, 16, transform.RTX32x16, 0, 0)
 	if len(blocks) != 1 {
 		t.Fatalf("unsplit rect block count = %d, want 1", len(blocks))
 	}
 	if blocks[0].tx != transform.RTX32x16 || blocks[0].w != 32 || blocks[0].h != 16 {
 		t.Fatalf("unsplit rect block = %+v, want RTX32x16 32x16", blocks[0])
+	}
+}
+
+func TestCollectTxBlocksFromSplitsClipsAgainstFrameEdge(t *testing.T) {
+	// Mirror dav1d read_coef_tree() semantics: child existence is checked
+	// against absolute frame bounds, not just the local block size.
+	blocks := collectTxBlocksFromSplits(16, 0, 32, 16, 32, 16, transform.RTX32x16, 1, 0)
+	if len(blocks) != 1 {
+		t.Fatalf("frame-edge split block count = %d, want 1", len(blocks))
+	}
+	if blocks[0].x != 0 || blocks[0].y != 0 {
+		t.Fatalf("frame-edge split block = %+v, want first child only", blocks[0])
 	}
 }
 
@@ -208,6 +362,17 @@ func TestInterTxtpGridSamplesPerChromaBlock(t *testing.T) {
 	}
 	if got := grid.sampleChroma(seq420, 8, 0); got != uint8(transform.ADST_DCT) {
 		t.Fatalf("sampleChroma right = %d, want ADST_DCT", got)
+	}
+}
+
+func TestInterTxtpGridFillBlockKeepsTxGeometryAtFrameEdge(t *testing.T) {
+	grid := newInterTxtpGrid(0, 0, 32, 32, uint8(transform.DCT_DCT))
+	// Simulate a border tx block whose visible luma area might be clipped,
+	// but whose txtp footprint must still cover the full tx geometry.
+	grid.fillBlock(16, 0, 16, 16, uint8(transform.IDTX))
+	seq420 := &header.SequenceHeader{SsHor: 1, SsVer: 1}
+	if got := grid.sampleChroma(seq420, 8, 0); got != uint8(transform.IDTX) {
+		t.Fatalf("sampleChroma frame-edge = %d, want IDTX", got)
 	}
 }
 
@@ -274,7 +439,7 @@ func TestApplySkipModeMotionUsesMatchingRefCandidate(t *testing.T) {
 	})
 
 	st := interState{skipMode: true, refSlot: 3}
-	if !applySkipModeMotion(&st, fs, fb, fhdr, 4, 4) {
+	if !applySkipModeMotion(&st, fs, fb, fhdr, 4, 4, 8, 8) {
 		t.Fatalf("applySkipModeMotion returned false")
 	}
 	if st.mv != (refmvs.MV{Y: 12, X: -4}) {
@@ -284,6 +449,7 @@ func TestApplySkipModeMotionUsesMatchingRefCandidate(t *testing.T) {
 
 func TestSingleRefInterCandidatesUsesDecodedNeighbourBlocks(t *testing.T) {
 	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
 	fhdr := &header.FrameHeader{}
 	fhdr.Refidx[0] = 2
 	fb := &FrameBuf{}
@@ -294,8 +460,9 @@ func TestSingleRefInterCandidatesUsesDecodedNeighbourBlocks(t *testing.T) {
 		RefSlot: 2,
 		MV:      [2]int16{16, -8},
 	})
+	fs.MVFrame.PutGridBlock(0, 1, 1, 1, refmvs.Block{Ref: refmvs.RefPair{1, -1}, MV: refmvs.MVPair{{Y: 16, X: -8}}})
 
-	cnt, stack := singleRefInterCandidates(fs, fhdr, fb, 4, 4)
+	cnt, stack := singleRefInterCandidates(fs, fhdr, fb, 2, 1, 4, 4, 8, 8)
 	if cnt == 0 {
 		t.Fatalf("singleRefInterCandidates returned no candidates")
 	}
@@ -306,6 +473,7 @@ func TestSingleRefInterCandidatesUsesDecodedNeighbourBlocks(t *testing.T) {
 
 func TestSingleRefInterCandidatesIncludesDiagonalDecodedBlock(t *testing.T) {
 	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
 	fhdr := &header.FrameHeader{}
 	fhdr.Refidx[0] = 1
 	fb := &FrameBuf{}
@@ -316,8 +484,9 @@ func TestSingleRefInterCandidatesIncludesDiagonalDecodedBlock(t *testing.T) {
 		RefSlot: 1,
 		MV:      [2]int16{24, 12},
 	})
+	fs.MVFrame.PutGridBlock(0, 0, 1, 1, refmvs.Block{Ref: refmvs.RefPair{1, -1}, MV: refmvs.MVPair{{Y: 24, X: 12}}})
 
-	cnt, stack := singleRefInterCandidates(fs, fhdr, fb, 4, 4)
+	cnt, stack := singleRefInterCandidates(fs, fhdr, fb, 1, 1, 4, 4, 8, 8)
 	if cnt == 0 {
 		t.Fatalf("singleRefInterCandidates returned no candidates")
 	}

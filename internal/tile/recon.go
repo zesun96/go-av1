@@ -32,13 +32,40 @@ func shiftFromTx(tx uint8) int {
 func applyResidualAdd(dst []uint8, stride int, coeff []int32,
 	eob int, tx uint8, txtp uint8, bitDepth int) {
 	shift := shiftFromTx(tx)
-	exactLastNonzeroCol := -1
-	if col, ok := LastNonzeroColFromEOB(tx, eob); ok {
-		exactLastNonzeroCol = col
-	}
+	exactLastNonzeroCol := lastNonzeroColForRecon(tx, txtp, eob)
 
 	// Apply inverse transform and add residual to dst
 	transform.InvTxfmAddWithLastNonzeroCol(dst, stride, coeff, eob, tx, shift, txtp, exactLastNonzeroCol, bitDepth)
+}
+
+func lastNonzeroColForRecon(tx uint8, txtp uint8, eob int) int {
+	txtps := transform.Tx1dTypes[txtp]
+	switch {
+	case txtps[1] == transform.Tx1dIDENTITY && txtps[0] != transform.Tx1dIDENTITY:
+		td := transform.TxfmDimensions[tx]
+		sh := int(td.H) * 4
+		if sh > 32 {
+			sh = 32
+		}
+		if eob < 0 {
+			return 0
+		}
+		if eob >= sh {
+			return sh - 1
+		}
+		return eob
+	case txtps[0] == transform.Tx1dIDENTITY && txtps[1] != transform.Tx1dIDENTITY:
+		td := transform.TxfmDimensions[tx]
+		if eob < 0 {
+			return 0
+		}
+		return eob >> (td.Lw + 2)
+	default:
+		if col, ok := LastNonzeroColFromEOB(tx, eob); ok {
+			return col
+		}
+		return -1
+	}
 }
 
 func ReconBlock(dst []uint8, stride int, coeff []int32,
@@ -55,6 +82,36 @@ func ReconBlock(dst []uint8, stride int, coeff []int32,
 func ReconBlockDequantized(dst []uint8, stride int, coeff []int32,
 	eob int, tx uint8, txtp uint8, bitDepth int) {
 	applyResidualAdd(dst, stride, coeff, eob, tx, txtp, bitDepth)
+}
+
+// ReconBlockDequantizedVisible applies residual add for a transform block whose
+// visible area may be clipped by the right/bottom frame edge.
+//
+// dav1d can write full transform footprints because its frame buffers carry
+// sufficient padding. The Go decoder keeps tightly-sized plane slices, so
+// border tx blocks must reconstruct through a temporary full-size block and
+// copy the visible rectangle back.
+func ReconBlockDequantizedVisible(dst []uint8, stride int, coeff []int32,
+	eob int, tx uint8, txtp uint8, bitDepth int, visW, visH int) {
+	td := transform.TxfmDimensions[tx]
+	fullW := int(td.W) * 4
+	fullH := int(td.H) * 4
+	if visW <= 0 || visH <= 0 {
+		return
+	}
+	if visW >= fullW && visH >= fullH {
+		applyResidualAdd(dst, stride, coeff, eob, tx, txtp, bitDepth)
+		return
+	}
+
+	tmp := make([]uint8, fullW*fullH)
+	for y := 0; y < visH; y++ {
+		copy(tmp[y*fullW:y*fullW+visW], dst[y*stride:y*stride+visW])
+	}
+	applyResidualAdd(tmp, fullW, coeff, eob, tx, txtp, bitDepth)
+	for y := 0; y < visH; y++ {
+		copy(dst[y*stride:y*stride+visW], tmp[y*fullW:y*fullW+visW])
+	}
 }
 
 // ReconBIntra reconstructs an intra-coded block by iterating over its

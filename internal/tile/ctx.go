@@ -1,5 +1,7 @@
 package tile
 
+import "reflect"
+
 // TileCtx holds all adaptive CDF state for one tile.
 // It is initialised from the multi-context default tables in cdfs_full.go
 // and discarded after the tile is decoded (cross-tile CDF propagation is
@@ -121,9 +123,10 @@ type TileCtx struct {
 	CFLAlphaCDF [6][16]uint16
 
 	// -----------------------------------------------------------------------
-	// Segment ID CDF [3 ctx][8 syms+counter].
+	// Segmentation CDFs.
 	// -----------------------------------------------------------------------
-	SegIDCDF [3][8]uint16
+	SegPredCDF [3][2]uint16
+	SegIDCDF   [3][8]uint16
 
 	// Delta-q / delta-lf CDFs and tile-local state.
 	DeltaQCDF     [5]uint16
@@ -208,6 +211,125 @@ type TileCtx struct {
 	FilterCDF [2][8][4]uint16
 }
 
+// Clone returns an independent adaptive-CDF context for one tile.
+func (ctx *TileCtx) Clone() *TileCtx {
+	if ctx == nil {
+		return nil
+	}
+	out := *ctx
+	return &out
+}
+
+// CloneForFrame copies inherited probabilities and resets adaptation counters,
+// matching dav1d_cdf_thread_update at a reference-frame boundary.
+func (ctx *TileCtx) CloneForFrame() *TileCtx {
+	out := ctx.Clone()
+	if out != nil {
+		out.resetCDFCounts()
+		// Delta-q and delta-lf predictors are tile-local syntax state. They are
+		// initialized from the current frame header and must not follow the
+		// probability state inherited through primary_ref_frame.
+		out.LastQIdx = 0
+		out.LastQIdxValid = false
+		out.LastDeltaLF = [4]int8{}
+	}
+	return out
+}
+
+func zeroInnermostUint16ArrayTails(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint16 {
+			v.Index(v.Len() - 1).SetUint(0)
+			return
+		}
+		for i := 0; i < v.Len(); i++ {
+			zeroInnermostUint16ArrayTails(v.Index(i))
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			zeroInnermostUint16ArrayTails(v.Field(i))
+		}
+	}
+}
+
+func (ctx *TileCtx) resetCDFCounts() {
+	// Most Go tables store the counter in the final uint16 slot.
+	zeroInnermostUint16ArrayTails(reflect.ValueOf(ctx).Elem())
+
+	// These tables retain dav1d alignment padding or have a dynamic symbol
+	// count, so their counter is not necessarily the final array element.
+	for i := range ctx.Partition128CDF {
+		ctx.Partition128CDF[i][7] = 0
+		ctx.Partition64CDF[i][9] = 0
+		ctx.Partition32CDF[i][9] = 0
+		ctx.Partition16CDF[i][9] = 0
+		ctx.Partition8CDF[i][3] = 0
+	}
+	for i := range ctx.SkipCDF {
+		ctx.SkipCDF[i][1] = 0
+	}
+	for cfl := range ctx.UVModeCDF {
+		counter := NUVIntraModes - 1
+		if cfl == 0 {
+			counter--
+		}
+		for mode := range ctx.UVModeCDF[cfl] {
+			ctx.UVModeCDF[cfl][mode][counter] = 0
+		}
+	}
+	for p := range ctx.EobBin16Full {
+		for d := range ctx.EobBin16Full[p] {
+			ctx.EobBin16Full[p][d][4] = 0
+			ctx.EobBin32Full[p][d][5] = 0
+			ctx.EobBin64Full[p][d][6] = 0
+			ctx.EobBin128Full[p][d][7] = 0
+			ctx.EobBin256Full[p][d][8] = 0
+		}
+		ctx.EobBin512Full[p][9] = 0
+		ctx.EobBin1024Full[p][10] = 0
+	}
+	for tx := range ctx.EobBaseTokFull {
+		for p := range ctx.EobBaseTokFull[tx] {
+			for c := range ctx.EobBaseTokFull[tx][p] {
+				ctx.EobBaseTokFull[tx][p][c][2] = 0
+			}
+			for c := range ctx.BaseTokFull[tx][p] {
+				ctx.BaseTokFull[tx][p][c][3] = 0
+			}
+		}
+	}
+	for tx := range ctx.BrTokFull {
+		for p := range ctx.BrTokFull[tx] {
+			for c := range ctx.BrTokFull[tx][p] {
+				ctx.BrTokFull[tx][p][c][3] = 0
+			}
+		}
+	}
+	for p := range ctx.PaletteSizeCDF {
+		for sz := range ctx.PaletteSizeCDF[p] {
+			ctx.PaletteSizeCDF[p][sz][6] = 0
+		}
+		for palIdx := range ctx.ColorMapCDF[p] {
+			counter := palIdx + 1
+			for c := range ctx.ColorMapCDF[p][palIdx] {
+				ctx.ColorMapCDF[p][palIdx][c][counter] = 0
+			}
+		}
+	}
+	for maxIdx := range ctx.TxSzCDF {
+		counter := minInt(maxIdx+2, 3) - 1
+		for c := range ctx.TxSzCDF[maxIdx] {
+			ctx.TxSzCDF[maxIdx][c][counter] = 0
+		}
+	}
+	for d := range ctx.FilterCDF {
+		for c := range ctx.FilterCDF[d] {
+			ctx.FilterCDF[d][c][2] = 0
+		}
+	}
+}
+
 // NewTileCtx allocates a TileCtx and copies the default CDF values into it.
 func NewTileCtx() *TileCtx {
 	return NewTileCtxForQIdx(0)
@@ -263,6 +385,7 @@ func NewTileCtxForQIdx(qidx int) *TileCtx {
 	ctx.CFLAlphaCDF = CFLAlphaDefault
 
 	// Segment
+	ctx.SegPredCDF = SegPredCDFDefault
 	ctx.SegIDCDF = SegIDCDFDefault
 
 	// Delta-q / delta-lf

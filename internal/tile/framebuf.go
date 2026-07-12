@@ -2,6 +2,8 @@
 // used internally by the tile package to avoid an import cycle with pkg/av1.
 package tile
 
+import "github.com/zesun96/go-av1/internal/refmvs"
+
 // PlaneBuf describes one decoded reference frame in the same layout as
 // FrameBuf. It intentionally has no ownership semantics; the caller keeps the
 // referenced picture alive while tile decoding runs.
@@ -39,5 +41,12 @@ type FrameBuf struct {
 
 	// Refs holds decoded reference frames, indexed by AV1 reference-frame slot.
 	// Nil entries indicate unavailable references.
-	Refs [8]*PlaneBuf
+	Refs    [8]*PlaneBuf
+	MVFrame *refmvs.Frame
+	RefMVs  [8]*refmvs.Frame
+
+	// FilterState retains full-frame block metadata assembled from the
+	// independently decoded tile states. Post-filters consume this after tile
+	// entropy and neighbour contexts have gone out of scope.
+	FilterState *FrameState
 }

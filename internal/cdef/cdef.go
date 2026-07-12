@@ -133,13 +133,12 @@ func padding(tmp []int16, tmpBase int,
 	tb := topBase
 	for y := yStart; y < 0; y++ {
 		for x := xStart; x < xEnd; x++ {
-			xi := x
-			if xi < 0 {
-				xi = 0
-			} else if xi >= w {
-				xi = w - 1
+			xi := tb + x
+			rowStart, rowEnd := tb-(tb%topStride), tb-(tb%topStride)+topStride
+			if xi < rowStart || xi >= rowEnd || xi < 0 || xi >= len(top) {
+				xi = tb + iclip(x, 0, w-1)
 			}
-			tmp[tmpBase+x+y*tmpStride] = int16(top[tb+xi])
+			tmp[tmpBase+x+y*tmpStride] = int16(top[xi])
 		}
 		tb += topStride
 	}
@@ -158,7 +157,10 @@ func padding(tmp []int16, tmpBase int,
 		for x := 0; x < xEnd; x++ {
 			xi := x
 			if xi >= w {
-				xi = w - 1
+				rowEnd := sb - (sb % dstStride) + dstStride
+				if edges&HaveRight == 0 || sb+xi >= rowEnd || sb+xi >= len(dst) {
+					xi = w - 1
+				}
 			}
 			tmp[tt+x] = int16(dst[sb+xi])
 		}
@@ -171,13 +173,12 @@ func padding(tmp []int16, tmpBase int,
 	tt = tmpBase + h*tmpStride
 	for y := h; y < yEnd; y++ {
 		for x := xStart; x < xEnd; x++ {
-			xi := x
-			if xi < 0 {
-				xi = 0
-			} else if xi >= w {
-				xi = w - 1
+			xi := bb + x
+			rowStart, rowEnd := bb-(bb%bottomStride), bb-(bb%bottomStride)+bottomStride
+			if xi < rowStart || xi >= rowEnd || xi < 0 || xi >= len(bottom) {
+				xi = bb + iclip(x, 0, w-1)
 			}
-			tmp[tt+x] = int16(bottom[bb+xi])
+			tmp[tt+x] = int16(bottom[xi])
 		}
 		bb += bottomStride
 		tt += tmpStride

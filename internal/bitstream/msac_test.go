@@ -298,19 +298,19 @@ func TestMSAC_HiTokWalksBranches(t *testing.T) {
 		var tok uint32
 		var sub uint32
 		sub = uint32(rng.Intn(4))
-		enc.encodeCDFQ15(int(sub), icdf, branches)
+		enc.encodeCDFQ15(int(sub), icdf, branches-1)
 		tok = 3 + sub
 		if sub == 3 {
 			sub = uint32(rng.Intn(4))
-			enc.encodeCDFQ15(int(sub), icdf, branches)
+			enc.encodeCDFQ15(int(sub), icdf, branches-1)
 			tok = 6 + sub
 			if sub == 3 {
 				sub = uint32(rng.Intn(4))
-				enc.encodeCDFQ15(int(sub), icdf, branches)
+				enc.encodeCDFQ15(int(sub), icdf, branches-1)
 				tok = 9 + sub
 				if sub == 3 {
 					sub = uint32(rng.Intn(4))
-					enc.encodeCDFQ15(int(sub), icdf, branches)
+					enc.encodeCDFQ15(int(sub), icdf, branches-1)
 					tok = 12 + sub
 				}
 			}
@@ -537,5 +537,39 @@ func TestMSAC_SymbolAdaptUpdatesNonZeroVal(t *testing.T) {
 	// Counter slot must have advanced once.
 	if cdf[n] != 1 {
 		t.Fatalf("counter = %d, want 1", cdf[n])
+	}
+}
+
+func TestMSACSymbolAdaptDav1dNativeLayout(t *testing.T) {
+	const (
+		nSymbols = 7
+		outcomes = nSymbols + 1
+		want     = 6
+	)
+	explicit := makeUniformDav1dCDF(outcomes)
+	native := make([]uint16, nSymbols+1)
+	copy(native[:nSymbols], explicit[:nSymbols])
+
+	enc := newMSACEncoder()
+	enc.encodeCDFQ15(want, explicit[:outcomes], nSymbols)
+	dec := NewMSAC(enc.done(), false)
+	if got := dec.SymbolAdaptDav1d(native, nSymbols); got != want {
+		t.Fatalf("SymbolAdaptDav1d = %d, want %d", got, want)
+	}
+	if native[nSymbols] != 1 {
+		t.Fatalf("counter = %d, want 1", native[nSymbols])
+	}
+}
+
+func TestMSACStateSnapshot(t *testing.T) {
+	m := NewMSAC([]byte{0x12, 0x34, 0x56}, true)
+	before := m.State()
+	_ = m.BoolEqui()
+	after := m.State()
+	if before.Range == 0 || after.Range == 0 {
+		t.Fatal("snapshot reported a zero range")
+	}
+	if before == after {
+		t.Fatal("snapshot did not change after decoding a symbol")
 	}
 }

@@ -290,6 +290,41 @@ func TestTemporalBlock_ZeroValue(t *testing.T) {
 	}
 }
 
+func TestDRLContext(t *testing.T) {
+	tests := []struct {
+		name    string
+		weights []int
+		idx     int
+		want    int
+	}{
+		{"strong-strong", []int{648, 644}, 0, 0},
+		{"strong-weak", []int{648, 4}, 0, 1},
+		{"weak-weak", []int{4, 2}, 0, 2},
+		{"missing-next", []int{648}, 0, 0},
+		{"negative-index", []int{648, 4}, -1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DRLContext(tt.weights, tt.idx); got != tt.want {
+				t.Fatalf("DRLContext(%v,%d)=%d want %d", tt.weights, tt.idx, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeMVPrecision(t *testing.T) {
+	mv := MV{Y: 5, X: -5}
+	if got := NormalizeMVPrecision(mv, false, false); got != (MV{Y: 4, X: -4}) {
+		t.Fatalf("low precision MV=%+v want {4,-4}", got)
+	}
+	if got := NormalizeMVPrecision(mv, true, true); got != (MV{Y: 8, X: -8}) {
+		t.Fatalf("integer MV=%+v want {8,-8}", got)
+	}
+	if got := NormalizeMVPrecision(mv, true, false); got != mv {
+		t.Fatalf("high precision MV=%+v want %+v", got, mv)
+	}
+}
+
 func TestFrameGridBlock(t *testing.T) {
 	f := NewFrame(32, 32)
 	blk := Block{

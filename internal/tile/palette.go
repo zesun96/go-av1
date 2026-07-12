@@ -196,7 +196,7 @@ func readPalIndices(m *bitstream.MSAC, colorMapCDF *[5][8]uint16, palSz, w, h, b
 		last := maxInt(0, i-h+1)
 		orderPalette(idx, bw, i, first, last, &order, &ctx)
 		for j, n := first, 0; j >= last; j, n = j-1, n+1 {
-			colorIdx := int(m.SymbolAdapt(colorMapCDF[ctx[n]][:], palSz))
+			colorIdx := int(m.SymbolAdaptDav1d(colorMapCDF[ctx[n]][:], palSz-1))
 			idx[(i-j)*bw+j] = order[n][colorIdx]
 		}
 	}

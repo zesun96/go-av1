@@ -326,3 +326,39 @@ func TestReconBlock_UsesExactLastNonzeroColPath(t *testing.T) {
 		}
 	}
 }
+
+func TestLastNonzeroColForReconFollowsDav1d1DRules(t *testing.T) {
+	if got := lastNonzeroColForRecon(transform.RTX16x8, transform.H_DCT, 19); got != 1 {
+		t.Fatalf("H_DCT lastNonzeroCol = %d, want 1", got)
+	}
+	if got := lastNonzeroColForRecon(transform.RTX8x16, transform.V_DCT, 9); got != 9 {
+		t.Fatalf("V_DCT lastNonzeroCol = %d, want 9", got)
+	}
+	if exact, ok := LastNonzeroColFromEOB(transform.TX8x8, 15); !ok {
+		t.Fatal("expected exact 2D last-nonzero-col table for TX8x8")
+	} else if got := lastNonzeroColForRecon(transform.TX8x8, transform.DCT_DCT, 15); got != exact {
+		t.Fatalf("DCT_DCT lastNonzeroCol = %d, want %d", got, exact)
+	}
+}
+
+func TestReconBlockDequantizedVisibleMatchesFullPathWhenUnclipped(t *testing.T) {
+	dstA := make([]uint8, 8*8)
+	dstB := make([]uint8, 8*8)
+	coeffA := make([]int32, 8*8)
+	coeffB := make([]int32, 8*8)
+	for i := range dstA {
+		dstA[i] = 90
+		dstB[i] = 90
+	}
+	coeffA[0], coeffA[1], coeffA[8] = 5, -3, 2
+	copy(coeffB, coeffA)
+
+	ReconBlockDequantized(dstA, 8, coeffA, 3, transform.TX8x8, transform.DCT_DCT, 8)
+	ReconBlockDequantizedVisible(dstB, 8, coeffB, 3, transform.TX8x8, transform.DCT_DCT, 8, 8, 8)
+
+	for i := range dstA {
+		if dstA[i] != dstB[i] {
+			t.Fatalf("dst[%d]=%d want %d", i, dstB[i], dstA[i])
+		}
+	}
+}

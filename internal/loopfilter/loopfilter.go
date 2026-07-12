@@ -4,11 +4,50 @@
 package loopfilter
 
 // FilterLUT holds the E and I threshold lookup tables for all 64 filter
-// strength levels (indices 0..63).  E and I are indexed by the combined
-// "L" value (lower 4 bits = H, upper 4 bits = E/I selector).
+// strength levels (indices 0..63).
 type FilterLUT struct {
 	E [64]uint8
 	I [64]uint8
+}
+
+// NewFilterLUT builds the normative 8-bit E/I threshold tables for a frame's
+// loop-filter sharpness value.
+func NewFilterLUT(sharpness int) FilterLUT {
+	sharpness = iclip(sharpness, 0, 7)
+	var lut FilterLUT
+	for level := 0; level < 64; level++ {
+		limit := level
+		if sharpness > 0 {
+			limit >>= (sharpness + 3) >> 2
+			if limit > 9-sharpness {
+				limit = 9 - sharpness
+			}
+		}
+		if limit < 1 {
+			limit = 1
+		}
+		lut.I[level] = uint8(limit)
+		lut.E[level] = uint8(2*(level+2) + limit)
+	}
+	return lut
+}
+
+// FilterEdgeH filters four pixels along one horizontal edge.
+func FilterEdgeH(dst []uint8, base, stride, level, width int, lut *FilterLUT) {
+	level = iclip(level, 0, 63)
+	if level == 0 || lut == nil {
+		return
+	}
+	loopFilter(dst, base, int(lut.E[level]), int(lut.I[level]), level>>4, 1, stride, width)
+}
+
+// FilterEdgeV filters four pixels along one vertical edge.
+func FilterEdgeV(dst []uint8, base, stride, level, width int, lut *FilterLUT) {
+	level = iclip(level, 0, 63)
+	if level == 0 || lut == nil {
+		return
+	}
+	loopFilter(dst, base, int(lut.E[level]), int(lut.I[level]), level>>4, stride, 1, width)
 }
 
 // iclip clamps v to [lo, hi].
@@ -188,7 +227,6 @@ func LoopFilterH(dst []uint8, dstBase int, stride int,
 				}
 			}
 			if lv != 0 {
-				H := int(lv >> 4)
 				L := int(lv)
 				E := int(lut.E[L&63])
 				I := int(lut.I[L&63])
@@ -205,7 +243,7 @@ func LoopFilterH(dst []uint8, dstBase int, stride int,
 					}
 				}
 				wd := 4 << idx
-				loopFilter(dst, base, E, I, H, stride, 1, wd)
+				loopFilter(dst, base, E, I, L>>4, stride, 1, wd)
 			}
 		}
 		base += 4 * stride
@@ -238,7 +276,6 @@ func LoopFilterV(dst []uint8, dstBase int, stride int,
 				}
 			}
 			if lv != 0 {
-				H := int(lv >> 4)
 				L := int(lv)
 				E := int(lut.E[L&63])
 				I := int(lut.I[L&63])
@@ -255,7 +292,7 @@ func LoopFilterV(dst []uint8, dstBase int, stride int,
 					}
 				}
 				wd := 4 << idx
-				loopFilter(dst, base, E, I, H, 1, stride, wd)
+				loopFilter(dst, base, E, I, L>>4, 1, stride, wd)
 			}
 		}
 		base += 4

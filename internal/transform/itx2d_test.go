@@ -352,6 +352,34 @@ func TestInvTxfmAdd_WHTDispatchMatchesDedicatedPath(t *testing.T) {
 	}
 }
 
+func TestInvTxfmAddWithLastNonzeroColPrefersCallerValue(t *testing.T) {
+	dstA := make([]uint8, 8*16)
+	dstB := make([]uint8, 8*16)
+	coeffA := make([]int32, 8*16)
+	coeffB := make([]int32, 8*16)
+	for i := range coeffA {
+		coeffA[i] = int32((i % 7) - 3)
+		coeffB[i] = coeffA[i]
+	}
+
+	// For H_DCT, the internal fallback path would derive last_nonzero_col from
+	// the transform type. Passing the same explicit value should produce the
+	// identical reconstruction and leave no second source of truth.
+	InvTxfmAdd(dstA, 8, coeffA, 19, RTX16x8, 1, H_DCT, 8)
+	InvTxfmAddWithLastNonzeroCol(dstB, 8, coeffB, 19, RTX16x8, 1, H_DCT, 1, 8)
+
+	for i := range dstA {
+		if dstA[i] != dstB[i] {
+			t.Fatalf("dst[%d]=%d want %d", i, dstB[i], dstA[i])
+		}
+	}
+	for i := range coeffA {
+		if coeffA[i] != coeffB[i] {
+			t.Fatalf("coeff[%d]=%d want %d", i, coeffB[i], coeffA[i])
+		}
+	}
+}
+
 // ---- TxfmDimensions table -------------------------------------------------
 
 func TestTxfmDimensions_SquareSizes(t *testing.T) {

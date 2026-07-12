@@ -3,6 +3,9 @@
 package tile
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/zesun96/go-av1/internal/header"
 	"github.com/zesun96/go-av1/internal/refmvs"
 )
@@ -12,9 +15,6 @@ import (
 //
 // logf, if non-nil, receives diagnostic messages (tile boundaries, parse
 // errors). Pass nil to suppress all logging.
-//
-// Errors in individual tiles are logged and skipped so that the caller always
-// receives a (possibly partial) picture rather than a hard failure.
 func DecodeTileGroup(
 	payload []byte,
 	fhdr *header.FrameHeader,
@@ -22,6 +22,20 @@ func DecodeTileGroup(
 	fb *FrameBuf,
 	logf func(string, ...any),
 ) error {
+	_, err := DecodeTileGroupWithContext(payload, fhdr, seq, fb, nil, logf)
+	return err
+}
+
+// DecodeTileGroupWithContext decodes all tiles from the same frame CDF state
+// and returns the context-update tile's final adaptive state.
+func DecodeTileGroupWithContext(
+	payload []byte,
+	fhdr *header.FrameHeader,
+	seq *header.SequenceHeader,
+	fb *FrameBuf,
+	initial *TileCtx,
+	logf func(string, ...any),
+) (*TileCtx, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -29,19 +43,83 @@ func DecodeTileGroup(
 		len(payload), fhdr.Tiling.Cols, fhdr.Tiling.Rows, fhdr.Tiling.NBytes)
 	tiles, err := ParseTileGroup(payload, fhdr)
 	if err != nil {
-		logf("tile: ParseTileGroup: %v (parsed %d tiles so far)", err, len(tiles))
+		return nil, fmt.Errorf("parse tile group: %w", err)
+	}
+	if len(tiles) == 0 {
+		return nil, fmt.Errorf("parse tile group: no tiles")
 	}
 	logf("tile: ParseTileGroup → %d tiles", len(tiles))
 
-	// Allocate frame-level neighbour state (shared across tiles in raster order).
-	fs := NewFrameState(fb.Width, fb.Height)
-	fs.SetSubsampling(seq.SsHor, seq.SsVer)
-	fs.MVFrame = refmvs.NewFrame(fb.Width, fb.Height)
+	chromaDbg := newChromaDebugStats()
+	activeChromaDebug = chromaDbg
+	defer func() {
+		activeChromaDebug = nil
+	}()
 
-	for _, td := range tiles {
-		if err2 := DecodeTile(td, fhdr, seq, fb, fs, logf); err2 != nil {
-			logf("tile: DecodeTile row=%d col=%d: %v", td.Row, td.Col, err2)
+	if fb.MVFrame == nil {
+		fb.MVFrame = refmvs.NewFrame(fb.Width, fb.Height)
+	}
+	if fb.FilterState == nil || fb.FilterState.Width != fb.Width || fb.FilterState.Height != fb.Height {
+		fb.FilterState = NewFrameState(fb.Width, fb.Height)
+		fb.FilterState.SetSubsampling(seq.SsHor, seq.SsVer)
+	}
+	fb.MVFrame.OrderHint = int(fhdr.FrameOffset)
+	fb.MVFrame.OrderBits = seq.OrderHintNBits
+	fb.MVFrame.HighPrecision = fhdr.HP != 0
+	fb.MVFrame.ForceInteger = fhdr.ForceIntegerMV != 0
+	for i, ref := range fb.RefMVs {
+		if ref != nil {
+			fb.MVFrame.RefOrderHints[i] = ref.OrderHint
 		}
 	}
-	return nil
+	for i, slot := range fhdr.Refidx {
+		fb.MVFrame.RefSlots[i] = slot
+		if slot >= 0 && int(slot) < len(fb.RefMVs) && fb.RefMVs[slot] != nil {
+			fb.MVFrame.RefFrameOrderHints[i] = fb.RefMVs[slot].OrderHint
+		}
+	}
+	var updateCtx *TileCtx
+	for tileIndex, td := range tiles {
+		// Tile entropy and neighbour state is independent. Full-frame indexing
+		// is retained so block coordinates remain absolute, but no above/left
+		// context may leak across a tile boundary.
+		fs := NewFrameState(fb.Width, fb.Height)
+		if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
+			fs.Tracef = logf
+		}
+		fs.SetSubsampling(seq.SsHor, seq.SsVer)
+		sbSize := 64
+		if seq.SB128 {
+			sbSize = 128
+		}
+		fs.TileX0 = int(fhdr.Tiling.ColStartSB[td.Col]) * sbSize
+		fs.TileX1 = int(fhdr.Tiling.ColStartSB[int(td.Col)+1]) * sbSize
+		fs.TileY0 = int(fhdr.Tiling.RowStartSB[td.Row]) * sbSize
+		fs.TileY1 = int(fhdr.Tiling.RowStartSB[int(td.Row)+1]) * sbSize
+		logf("tile: bounds row=%d col=%d x=[%d,%d) y=[%d,%d) payload=%d",
+			td.Row, td.Col, fs.TileX0, fs.TileX1, fs.TileY0, fs.TileY1, len(td.Data))
+		fs.MVFrame = fb.MVFrame
+		for row8 := fs.TileY0 >> 3; row8 < (fs.TileY1+7)>>3; row8 += 16 {
+			refmvs.BuildTemporalProjectionRegion(
+				fb.MVFrame, fb.RefMVs,
+				fs.TileX0>>3, (fs.TileX1+7)>>3,
+				row8, minInt(row8+16, (fs.TileY1+7)>>3),
+			)
+		}
+		base := initial
+		if base == nil {
+			base = NewTileCtxForQIdx(int(fhdr.Quant.YAC))
+		}
+		tileCtx := base.Clone()
+		if err2 := DecodeTileWithContext(td, fhdr, seq, fb, fs, tileCtx, logf); err2 != nil {
+			return nil, fmt.Errorf("tile row=%d col=%d: %w", td.Row, td.Col, err2)
+		}
+		fb.FilterState.MergeFilterState(fs)
+		absoluteTile := int(td.Row)*int(fhdr.Tiling.Cols) + int(td.Col)
+		if absoluteTile == int(fhdr.Tiling.Update) || (updateCtx == nil && tileIndex == len(tiles)-1) {
+			updateCtx = tileCtx
+		}
+	}
+	chromaDbg.dump(logf)
+	return updateCtx, nil
 }

@@ -17,6 +17,15 @@ type MSAC struct {
 	allowUpdateCDF bool
 }
 
+// MSACState is a read-only arithmetic decoder snapshot used by differential
+// traces. Dif is the complemented decoder window used internally by dav1d.
+type MSACState struct {
+	BufferPosition int
+	Dif            uint64
+	Range          uint32
+	Count          int
+}
+
 const (
 	ecProbShift = 6
 	ecMinProb   = 4
@@ -47,6 +56,25 @@ func (m *MSAC) AllowUpdateCDF() bool { return m.allowUpdateCDF }
 
 // SetAllowUpdateCDF toggles CDF adaptation.
 func (m *MSAC) SetAllowUpdateCDF(v bool) { m.allowUpdateCDF = v }
+
+// State returns the current arithmetic decoder state without modifying it.
+func (m *MSAC) State() MSACState {
+	return MSACState{
+		BufferPosition: m.bufPos,
+		Dif:            m.dif,
+		Range:          m.rng,
+		Count:          m.cnt,
+	}
+}
+
+// Clone returns an independent arithmetic state over the same immutable input.
+func (m *MSAC) Clone() *MSAC {
+	if m == nil {
+		return nil
+	}
+	out := *m
+	return &out
+}
 
 func (m *MSAC) refill() {
 	c := ecWinSize - m.cnt - 24
@@ -122,10 +150,9 @@ func (m *MSAC) Bool(f uint32) uint32 {
 // for the last symbol is implicitly 0). Use SymbolAdapt for the adaptive
 // flavour with the per-context counter trailing the table.
 //
-// The boost term follows dav1d/src/msac.c exactly:
-// EC_MIN_PROB * (n - val), where n is the symbol count. This intentionally
-// matches the local dav1d reference rather than an alternative spec reading,
-// because the goal of this decoder is bitstream parity with dav1d.
+// The boost term follows the Go port's dav1d-compatible table layout:
+// CDFs carry an explicit 0 sentinel at cdf[n-1] plus a counter at cdf[n],
+// so callers pass the symbol count directly here.
 func (m *MSAC) Symbol(cdf []uint16, n int) uint32 {
 	if n < 1 || n > 16 {
 		panic("bitstream: Symbol n out of range")
@@ -135,7 +162,6 @@ func (m *MSAC) Symbol(cdf []uint16, n int) uint32 {
 	var u, v uint32 = 0, m.rng
 	val := uint32(0xFFFFFFFF)
 	nSymbols := uint32(n)
-	nMinus1 := uint32(n - 1)
 	for {
 		val++
 		u = v
@@ -150,10 +176,6 @@ func (m *MSAC) Symbol(cdf []uint16, n int) uint32 {
 		// have non-zero cdf[n-1] (counter doubling as sentinel), which can
 		// let val advance past n-1 and read cdf[n] (counter slot). Cap val
 		// at n-1 to avoid out-of-bounds while still terminating correctly.
-		if val >= nMinus1 {
-			val = nMinus1
-			break
-		}
 	}
 	m.ctxNorm(m.dif-(uint64(v)<<(ecWinSize-16)), u-v)
 	return val
@@ -182,6 +204,48 @@ func (m *MSAC) SymbolAdapt(cdf []uint16, n int) uint32 {
 	}
 	if count < 32 {
 		cdf[n] = uint16(count + 1)
+	}
+	return val
+}
+
+// SymbolAdaptDav1d decodes a native dav1d inverse CDF. nSymbols is the
+// maximum symbol value, cdf[0:nSymbols] are probability entries, and
+// cdf[nSymbols] is the adaptation counter. The result is in [0,nSymbols].
+func (m *MSAC) SymbolAdaptDav1d(cdf []uint16, nSymbols int) uint32 {
+	if nSymbols < 1 || nSymbols > 15 || len(cdf) <= nSymbols {
+		panic("bitstream: SymbolAdaptDav1d invalid CDF")
+	}
+	c := uint32(m.dif >> (ecWinSize - 16))
+	r := m.rng >> 8
+	u, v := uint32(0), m.rng
+	val := uint32(0xFFFFFFFF)
+	for {
+		val++
+		u = v
+		v = r * uint32(cdf[val]>>ecProbShift)
+		v >>= 7 - ecProbShift
+		v += ecMinProb * (uint32(nSymbols) - val)
+		if c >= v {
+			break
+		}
+	}
+	m.ctxNorm(m.dif-(uint64(v)<<(ecWinSize-16)), u-v)
+	if !m.allowUpdateCDF {
+		return val
+	}
+	count := uint32(cdf[nSymbols])
+	rate := 4 + (count >> 4)
+	if nSymbols > 2 {
+		rate++
+	}
+	for i := uint32(0); i < val; i++ {
+		cdf[i] += uint16((32768 - uint32(cdf[i])) >> rate)
+	}
+	for i := val; i < uint32(nSymbols); i++ {
+		cdf[i] -= uint16(uint32(cdf[i]) >> rate)
+	}
+	if count < 32 {
+		cdf[nSymbols] = uint16(count + 1)
 	}
 	return val
 }
@@ -262,16 +326,16 @@ func (m *MSAC) Subexp(ref, n int32, k uint32) int32 {
 // high-token call passes 3 for the 4-symbol CDF. Our SymbolAdapt takes the
 // number of symbols directly, hence n=4 here.
 func (m *MSAC) HiTok(cdf []uint16) uint32 {
-	tokBr := m.SymbolAdapt(cdf, 4)
+	tokBr := m.SymbolAdaptDav1d(cdf, 3)
 	tok := 3 + tokBr
 	if tokBr == 3 {
-		tokBr = m.SymbolAdapt(cdf, 4)
+		tokBr = m.SymbolAdaptDav1d(cdf, 3)
 		tok = 6 + tokBr
 		if tokBr == 3 {
-			tokBr = m.SymbolAdapt(cdf, 4)
+			tokBr = m.SymbolAdaptDav1d(cdf, 3)
 			tok = 9 + tokBr
 			if tokBr == 3 {
-				tok = 12 + m.SymbolAdapt(cdf, 4)
+				tok = 12 + m.SymbolAdaptDav1d(cdf, 3)
 			}
 		}
 	}

@@ -4,7 +4,46 @@ import (
 	"bytes"
 	"errors"
 	"testing"
+
+	"github.com/zesun96/go-av1/internal/header"
+	"github.com/zesun96/go-av1/internal/refmvs"
+	"github.com/zesun96/go-av1/internal/tile"
 )
+
+func TestReferenceSlotsRetainMotionField(t *testing.T) {
+	d := &decoderImpl{}
+	pic := &Picture{Y: make([]byte, 16), StrideY: 4, Width: 4, Height: 4, Chroma: ChromaMonochrome}
+	pic.Retain()
+	fhdr := &header.FrameHeader{FrameType: header.FrameTypeInter, RefreshFrameFlags: 0x05}
+	mv := refmvs.NewFrame(4, 4)
+	d.updateRefs(pic, fhdr, tile.NewTileCtxForQIdx(0), mv)
+
+	if d.refs[0].mv != mv || d.refs[2].mv != mv || d.refs[1].mv != nil {
+		t.Fatalf("retained motion fields = [%p %p %p], want [mv nil mv]", d.refs[0].mv, d.refs[1].mv, d.refs[2].mv)
+	}
+	fb := d.picToFrameBuf(pic)
+	if fb.RefMVs[0] != mv || fb.RefMVs[2] != mv || fb.RefMVs[1] != nil {
+		t.Fatalf("frame buffer motion fields were not restored by slot")
+	}
+	for i := range d.refs {
+		if d.refs[i].pic != nil {
+			d.refs[i].pic.Release()
+		}
+	}
+	pic.Release()
+}
+
+func TestIntraReferenceDoesNotRetainMotionField(t *testing.T) {
+	d := &decoderImpl{}
+	pic := &Picture{Y: make([]byte, 16), StrideY: 4, Width: 4, Height: 4, Chroma: ChromaMonochrome}
+	pic.Retain()
+	d.updateRefs(pic, &header.FrameHeader{FrameType: header.FrameTypeKey, RefreshFrameFlags: 1}, tile.NewTileCtxForQIdx(0), refmvs.NewFrame(4, 4))
+	if d.refs[0].pic == nil || d.refs[0].mv != nil {
+		t.Fatalf("key reference picture=%p motion=%p, want picture and nil motion", d.refs[0].pic, d.refs[0].mv)
+	}
+	d.refs[0].pic.Release()
+	pic.Release()
+}
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -138,6 +177,95 @@ func TestNewDecoder_ExplicitZeroInloopFilters(t *testing.T) {
 	if impl.opts.InloopFilters != 0 {
 		t.Fatalf("InloopFilters = %v, want 0", impl.opts.InloopFilters)
 	}
+}
+
+func TestApplyLoopFilterZeroChromaLevelsLeaveChromaUntouched(t *testing.T) {
+	pic := loopFilterTestPicture()
+	wantU := append([]byte(nil), pic.U...)
+	wantV := append([]byte(nil), pic.V...)
+	(&decoderImpl{}).applyLoopFilter(pic, &header.FrameHeader{LoopFilter: header.FrameHeaderLoopFilter{
+		LevelY: [2]uint8{16, 16},
+	}})
+	if !bytes.Equal(pic.U, wantU) || !bytes.Equal(pic.V, wantV) {
+		t.Fatal("zero chroma loop-filter levels modified a chroma plane")
+	}
+}
+
+func TestApplyLoopFilterSecondYLevelIsIndependent(t *testing.T) {
+	pic := loopFilterTestPicture()
+	wantY := append([]byte(nil), pic.Y...)
+	(&decoderImpl{}).applyLoopFilter(pic, &header.FrameHeader{LoopFilter: header.FrameHeaderLoopFilter{
+		LevelY: [2]uint8{0, 16},
+	}})
+	if bytes.Equal(pic.Y, wantY) {
+		t.Fatal("non-zero second luma loop-filter level did not filter horizontal edges")
+	}
+}
+
+func TestApplyLumaLoopFilterUsesRecordedEdges(t *testing.T) {
+	pic := &Picture{Width: 12, Height: 8, StrideY: 12, Chroma: Chroma420}
+	pic.Y = make([]byte, 12*8)
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 12; x++ {
+			pic.Y[y*12+x] = 100
+			if x >= 8 {
+				pic.Y[y*12+x] = 108
+			}
+		}
+	}
+	fs := tile.NewFrameState(12, 8)
+	fs.SetBlockState(0, 0, 8, 8, tile.Av1Block{Intra: true})
+	fs.SetBlockState(8, 0, 4, 8, tile.Av1Block{Intra: true})
+	fs.SetTxState(0, 0, 8, 8, 1)
+	fs.SetTxState(8, 0, 4, 8, 0)
+	beforeAt4 := pic.Y[4]
+	beforeAt8 := pic.Y[8]
+	(&decoderImpl{}).applyLoopFilterWithState(pic, &header.FrameHeader{LoopFilter: header.FrameHeaderLoopFilter{
+		LevelY: [2]uint8{16, 0},
+	}}, fs)
+	if pic.Y[8] == beforeAt8 {
+		t.Fatal("recorded coding-block edge was not filtered")
+	}
+	if pic.Y[4] != beforeAt4 {
+		t.Fatal("non-edge 4-pixel grid line was filtered")
+	}
+}
+
+func TestCDEFBlockHasNonSkip(t *testing.T) {
+	fs := tile.NewFrameState(16, 16)
+	fs.SetSubsampling(1, 1)
+	fs.SetBlockState(0, 0, 16, 16, tile.Av1Block{Skip: true})
+	if cdefBlockHasNonSkip(fs, 0, 0, 8, 8, 0) {
+		t.Fatal("all-skip luma CDEF block reported non-skip")
+	}
+	fs.SetBlockState(4, 4, 4, 4, tile.Av1Block{Skip: false})
+	if !cdefBlockHasNonSkip(fs, 0, 0, 8, 8, 0) {
+		t.Fatal("mixed luma CDEF block reported all-skip")
+	}
+	if !cdefBlockHasNonSkip(fs, 0, 0, 4, 4, 1) {
+		t.Fatal("chroma CDEF block did not map to its luma non-skip region")
+	}
+}
+
+func loopFilterTestPicture() *Picture {
+	p := &Picture{Width: 8, Height: 8, StrideY: 8, StrideUV: 4, Chroma: Chroma420}
+	p.Y = make([]byte, 64)
+	p.U = make([]byte, 16)
+	p.V = make([]byte, 16)
+	for y := 0; y < 8; y++ {
+		v := byte(100)
+		if y >= 4 {
+			v = 108
+		}
+		for x := 0; x < 8; x++ {
+			p.Y[y*8+x] = v
+		}
+	}
+	for i := range p.U {
+		p.U[i] = byte(80 + i%4)
+		p.V[i] = byte(120 + i/4)
+	}
+	return p
 }
 
 // TestDecoder_Flush_ReleasesRefs: Flush must release reference pictures.

@@ -199,20 +199,28 @@ func TestDeriveInterFallbackUseRefFrameMVs(t *testing.T) {
 
 	fs := NewFrameState(32, 32)
 	fs.MVFrame = refmvs.NewFrame(32, 32)
-	fs.MVFrame.RP[1*fs.MVFrame.RPStride+1] = refmvs.TemporalBlock{
+	fs.MVFrame.OrderHint, fs.MVFrame.OrderBits = 10, 5
+	fs.MVFrame.RefOrderHints[6] = 8
+	source := refmvs.NewFrame(32, 32)
+	source.OrderHint, source.OrderBits = 8, 5
+	source.RefFrameOrderHints[3] = 6
+	source.RP[1*source.RPStride+1] = refmvs.TemporalBlock{
 		MV:  refmvs.MV{Y: 18, X: -10},
 		Ref: 4,
 	}
+	fb.RefMVs[6] = source
+	fs.MVFrame.RefSlots[1] = 6
+	refmvs.BuildTemporalProjection(fs.MVFrame, fb.RefMVs)
 
 	refSlot, refFrame, refOrder, mv, _, interMode, skipMode, ref := deriveInterFallback(fs, fb, fhdr, 0, false, 8, 8)
 	if ref == nil {
 		t.Fatal("ref_frame_mvs derive ref=nil")
 	}
-	if refSlot != 3 || refOrder != 3 || skipMode {
-		t.Fatalf("ref_frame_mvs derive=(%d,%d,%v) want (3,3,false)", refSlot, refOrder, skipMode)
+	if refSlot != 6 || refOrder != 0 || skipMode {
+		t.Fatalf("ref_frame_mvs derive=(%d,%d,%v) want (6,0,false)", refSlot, refOrder, skipMode)
 	}
-	if refFrame != 4 {
-		t.Fatalf("ref_frame_mvs refFrame=%d want 4", refFrame)
+	if refFrame != 1 {
+		t.Fatalf("ref_frame_mvs refFrame=%d want 1", refFrame)
 	}
 	if interMode != InterModeZeroMV || mv.Y != 18 || mv.X != -10 {
 		t.Fatalf("temporal mv=(mode=%d y=%d x=%d) want zero/18/-10", interMode, mv.Y, mv.X)
@@ -265,10 +273,10 @@ func TestSingleRefInterCandidatesSorted(t *testing.T) {
 	})
 	fs.MVFrame.PutGridBlock(1, 2, 2, 2, refmvs.Block{
 		MV:  refmvs.MVPair{refmvs.MV{Y: 4, X: 2}, {}},
-		Ref: refmvs.RefPair{5, -1},
+		Ref: refmvs.RefPair{3, -1},
 	})
 
-	cnt, stack := singleRefInterCandidates(fs, fhdr, fb, 8, 8)
+	cnt, stack := singleRefInterCandidates(fs, fhdr, fb, 4, 3, 8, 8, 8, 8)
 	if cnt != 2 {
 		t.Fatalf("candidate cnt=%d want 2", cnt)
 	}
@@ -290,16 +298,16 @@ func TestSingleRefInterCandidatesIncludeTopRight(t *testing.T) {
 
 	fs := NewFrameState(32, 32)
 	fs.MVFrame = refmvs.NewFrame(32, 32)
-	fs.MVFrame.PutGridBlock(3, 1, 1, 1, refmvs.Block{
+	fs.MVFrame.PutGridBlock(4, 1, 1, 1, refmvs.Block{
 		MV:  refmvs.MVPair{refmvs.MV{Y: 9, X: 1}, {}},
 		Ref: refmvs.RefPair{3, -1},
 	})
 	fs.MVFrame.PutGridBlock(1, 2, 1, 1, refmvs.Block{
 		MV:  refmvs.MVPair{refmvs.MV{Y: 4, X: 2}, {}},
-		Ref: refmvs.RefPair{5, -1},
+		Ref: refmvs.RefPair{3, -1},
 	})
 
-	cnt, stack := singleRefInterCandidates(fs, fhdr, fb, 8, 8)
+	cnt, stack := singleRefInterCandidates(fs, fhdr, fb, 4, 3, 8, 8, 8, 8)
 	if cnt != 2 {
 		t.Fatalf("candidate cnt=%d want 2", cnt)
 	}
@@ -400,11 +408,19 @@ func TestApplyTemporalInterMV(t *testing.T) {
 	fb.Refs[3] = &PlaneBuf{Y: make([]byte, 16), Width: 4, Height: 4}
 	fs := NewFrameState(32, 32)
 	fs.MVFrame = refmvs.NewFrame(32, 32)
-	fs.MVFrame.RP[1*fs.MVFrame.RPStride+1] = refmvs.TemporalBlock{
+	fs.MVFrame.OrderHint, fs.MVFrame.OrderBits = 10, 5
+	fs.MVFrame.RefOrderHints[3] = 8
+	source := refmvs.NewFrame(32, 32)
+	source.OrderHint, source.OrderBits = 8, 5
+	source.RefFrameOrderHints[2] = 6
+	source.RP[1*source.RPStride+1] = refmvs.TemporalBlock{
 		MV:  refmvs.MV{Y: 18, X: -10},
-		Ref: 4,
+		Ref: 3,
 	}
-	st := interState{}
+	fb.RefMVs[3] = source
+	fs.MVFrame.RefSlots[1] = 3
+	refmvs.BuildTemporalProjection(fs.MVFrame, fb.RefMVs)
+	st := interState{refSlot: 3}
 
 	if !applyTemporalInterMV(&st, fs, fb, fhdr, 8, 8) {
 		t.Fatal("applyTemporalInterMV returned false")
@@ -469,7 +485,7 @@ func TestSingleRefInterStateMultipleCandidatesUsesNearest(t *testing.T) {
 	})
 	fs.MVFrame.PutGridBlock(1, 2, 2, 2, refmvs.Block{
 		MV:  refmvs.MVPair{refmvs.MV{Y: 4, X: 2}, {}},
-		Ref: refmvs.RefPair{5, -1},
+		Ref: refmvs.RefPair{3, -1},
 	})
 
 	st := singleRefInterState(fs, fb, fhdr, 0, false, 8, 8)
@@ -497,7 +513,7 @@ func TestSingleRefInterStateHints(t *testing.T) {
 	})
 	fs.MVFrame.PutGridBlock(1, 2, 2, 2, refmvs.Block{
 		MV:  refmvs.MVPair{refmvs.MV{Y: 4, X: 2}, {}},
-		Ref: refmvs.RefPair{5, -1},
+		Ref: refmvs.RefPair{3, -1},
 	})
 
 	near := singleRefInterStateWithHint(fs, fb, fhdr, 0, false, 8, 8, singleRefInterSyntax{modeHint: interModeHintNear, refSlot: -1})
@@ -623,7 +639,7 @@ func TestDecodeSingleRefInterBlockHintRecordsState(t *testing.T) {
 	})
 	fs.MVFrame.PutGridBlock(1, 2, 1, 1, refmvs.Block{
 		MV:  refmvs.MVPair{refmvs.MV{Y: 4, X: 2}, {}},
-		Ref: refmvs.RefPair{5, -1},
+		Ref: refmvs.RefPair{3, -1},
 	})
 
 	st := decodeSingleRefInterBlock(fs, fhdr, seq, fb, 0, false, 8, 8, 8, 8, interModeHintNear)
@@ -634,7 +650,7 @@ func TestDecodeSingleRefInterBlockHintRecordsState(t *testing.T) {
 	if !ok {
 		t.Fatal("BlockState missing")
 	}
-	if blk.Intra || blk.InterMode != InterModeNearMV || blk.RefSlot != 2 || blk.BaseMV != [2]int16{4, 2} || blk.MV != [2]int16{4, 2} {
+	if blk.Intra || blk.InterMode != InterModeNearMV || blk.RefSlot != 4 || blk.BaseMV != [2]int16{4, 2} || blk.MV != [2]int16{4, 2} {
 		t.Fatalf("block state=%+v", blk)
 	}
 }
@@ -662,6 +678,78 @@ func TestSingleRefInterStateFromSyntaxNewMV(t *testing.T) {
 	}
 	if st.baseMV != (refmvs.MV{Y: 10, X: 4}) || st.deltaMV != (refmvs.MV{Y: 2, X: -6}) || st.mv != (refmvs.MV{Y: 12, X: -2}) {
 		t.Fatalf("state mismatch: base=%+v delta=%+v mv=%+v", st.baseMV, st.deltaMV, st.mv)
+	}
+}
+
+func TestSingleRefInterStateFromSyntaxNewMVWithoutCandidate(t *testing.T) {
+	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}}
+	fb := &FrameBuf{}
+	fb.Refs[0] = &PlaneBuf{Y: make([]byte, 16), Width: 4, Height: 4}
+	fs := NewFrameState(32, 32)
+	syntax := singleRefInterSyntax{
+		modeHint:     interModeHintNew,
+		motionSource: interMotionSourceCandidate,
+		refSlot:      0,
+		hasRef:       true,
+		drlIdx:       0,
+		deltaMV:      refmvs.MV{Y: -8, X: 32},
+	}
+
+	st := singleRefInterStateFromSyntax(fs, fb, fhdr, 0, false, 0, 0, syntax)
+	if st.interMode != InterModeNewMV || st.mv != syntax.deltaMV {
+		t.Fatalf("NEWMV fallback mode=%d mv=%+v, want mode=%d mv=%+v", st.interMode, st.mv, InterModeNewMV, syntax.deltaMV)
+	}
+}
+
+func TestNearMVUsesGlobalFallbackWhenSecondCandidateMissing(t *testing.T) {
+	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}}
+	fb := &FrameBuf{}
+	fb.Refs[0] = &PlaneBuf{Y: make([]byte, 16), Width: 4, Height: 4}
+	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
+	fs.SetBlockState(0, 0, 16, 16, Av1Block{
+		Intra: false, RefSlot: 0, InterMode: InterModeNearestMV, MV: [2]int16{0, 32},
+	})
+	fs.MVFrame.PutGridBlock(0, 0, 4, 4, refmvs.Block{
+		Ref: refmvs.RefPair{1, -1}, MV: refmvs.MVPair{{X: 32}}, BS: BS16x16,
+	})
+
+	st := singleRefInterStateFromSyntax(fs, fb, fhdr, 0, false, 16, 0, singleRefInterSyntax{
+		modeHint: interModeHintNear, motionSource: interMotionSourceCandidate,
+		refSlot: 0, hasRef: true, drlIdx: 1,
+	})
+	if st.interMode != InterModeNearMV || st.mv != (refmvs.MV{}) {
+		t.Fatalf("NEAR fallback mode=%d mv=%+v, want near/zero", st.interMode, st.mv)
+	}
+}
+
+func TestGlobalSyntaxIdentityUsesZeroMV(t *testing.T) {
+	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}}
+	fhdr.GMV[0].Type = header.WMTypeIdentity
+	fb := &FrameBuf{}
+	fb.Refs[0] = &PlaneBuf{Y: make([]byte, 16), Width: 4, Height: 4}
+	st := singleRefInterStateFromSyntax(NewFrameState(32, 32), fb, fhdr, 0, false, 0, 0, singleRefInterSyntax{
+		motionSource: interMotionSourceGlobal, refSlot: 0, hasRef: true,
+	})
+	if st.interMode != InterModeGlobalMV || st.mv != (refmvs.MV{}) {
+		t.Fatalf("identity global state mode=%d mv=%+v", st.interMode, st.mv)
+	}
+}
+
+func TestNewMVDRL0PrefersTopDirectCandidate(t *testing.T) {
+	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}}
+	fb := &FrameBuf{}
+	fb.Refs[0] = &PlaneBuf{Y: make([]byte, 16), Width: 4, Height: 4}
+	fs := NewFrameState(64, 64)
+	fs.SetBlockState(16, 0, 16, 16, Av1Block{Intra: false, RefSlot: 0, MV: [2]int16{0, 0}})
+	fs.SetBlockState(0, 16, 16, 16, Av1Block{Intra: false, RefSlot: 0, MV: [2]int16{0, 32}})
+
+	st := singleRefInterStateFromSyntax(fs, fb, fhdr, 0, false, 16, 16, singleRefInterSyntax{
+		modeHint: interModeHintNew, motionSource: interMotionSourceCandidate,
+		refSlot: 0, hasRef: true, drlIdx: 0, deltaMV: refmvs.MV{X: -2},
+	})
+	if st.baseMV != (refmvs.MV{}) || st.mv != (refmvs.MV{X: -2}) {
+		t.Fatalf("NEWMV top candidate base=%+v mv=%+v", st.baseMV, st.mv)
 	}
 }
 
@@ -715,7 +803,7 @@ func TestApplyInterCandidate(t *testing.T) {
 	}
 	fb := &FrameBuf{}
 	fb.Refs[4] = &PlaneBuf{Y: make([]byte, 16), Width: 4, Height: 4}
-	st := interState{}
+	st := interState{refSlot: 4}
 	cand := interCandidate{
 		mv:       refmvs.MV{Y: 10, X: 4},
 		refSlot:  4,
@@ -746,13 +834,16 @@ func TestResolveSingleRefMotionPrefersCandidateSyntax(t *testing.T) {
 		MV:  refmvs.MVPair{refmvs.MV{Y: 10, X: 4}, {}},
 		Ref: refmvs.RefPair{3, -1},
 	})
-	st := interState{}
+	st := interState{refSlot: 4}
 	updateInterRefState(&st, fhdr, fb)
 
 	resolveSingleRefMotion(&st, fs, fb, fhdr, 0, 8, 8, singleRefInterSyntax{
 		modeHint:     interModeHintNearest,
 		motionSource: interMotionSourceCandidate,
-		refSlot:      -1,
+		refSlot:      4,
+		hasRef:       true,
+		bw:           8,
+		bh:           8,
 	})
 	if st.interMode != InterModeNearestMV || st.mv != (refmvs.MV{Y: 10, X: 4}) {
 		t.Fatalf("state=%+v", st)
