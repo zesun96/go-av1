@@ -73,7 +73,7 @@ func (fs *FrameState) LumaFilterLevel(fhdr *header.FrameHeader, x4, y4 int, vert
 	}
 	ref, mode := 0, 0
 	if !blk.Intra {
-		ref = clampInt(int(blk.RefFrame)+1, 1, len(fhdr.LoopFilter.ModeRefDeltas.RefDelta)-1)
+		ref = clampInt(int(blk.RefFrame), 1, len(fhdr.LoopFilter.ModeRefDeltas.RefDelta)-1)
 		if blk.InterMode != InterModeZeroMV && blk.InterMode != InterModeGlobalMV {
 			mode = 1
 		}
@@ -170,7 +170,7 @@ func (fs *FrameState) ChromaFilterLevel(fhdr *header.FrameHeader, x4, y4, plane 
 	}
 	ref, mode := 0, 0
 	if !blk.Intra {
-		ref = clampInt(int(blk.RefFrame)+1, 1, len(fhdr.LoopFilter.ModeRefDeltas.RefDelta)-1)
+		ref = clampInt(int(blk.RefFrame), 1, len(fhdr.LoopFilter.ModeRefDeltas.RefDelta)-1)
 		if blk.InterMode != InterModeZeroMV && blk.InterMode != InterModeGlobalMV {
 			mode = 1
 		}

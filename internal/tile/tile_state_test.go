@@ -24,6 +24,18 @@ func TestCloneForFrameResetsCDFCountersOnly(t *testing.T) {
 	ctx.ColorMapCDF[0][2][0][3] = 7
 	ctx.Partition128CDF[0][7] = 13
 	ctx.Partition32CDF[0][9] = 21
+	ctx.TxTypeIntra1CDF[1][3][TxTypeIntra1Symbols-1] = 32
+	ctx.TxTypeIntra2CDF[2][4][TxTypeIntra2Symbols-1] = 31
+	ctx.TxTypeInter1CDF[1][TxTypeInter1Symbols-1] = 30
+	ctx.TxTypeInter2CDF[TxTypeInter2Symbols-1] = 29
+	ctx.KFYModeCDF[2][3][NIntraPredModes-1] = 28
+	ctx.YModeCDF[1][NIntraPredModes-1] = 27
+	ctx.AngleDeltaCDF[4][6] = 26
+	ctx.FilterIntraModeCDF[4] = 25
+	ctx.MVJointCDF[3] = 24
+	ctx.MVClassesCDF[1][10] = 23
+	ctx.MVClass0FPCDF[0][1][3] = 22
+	ctx.MVClassNFPCDF[1][3] = 21
 	ctx.LastQIdx = 208
 	ctx.LastQIdxValid = true
 	ctx.LastDeltaLF = [4]int8{1, -2, 3, -4}
@@ -43,6 +55,20 @@ func TestCloneForFrameResetsCDFCountersOnly(t *testing.T) {
 	}
 	if got.Partition128CDF[0][7] != 0 || got.Partition32CDF[0][9] != 0 {
 		t.Fatalf("partition counters = %d/%d, want 0/0", got.Partition128CDF[0][7], got.Partition32CDF[0][9])
+	}
+	if got.TxTypeIntra1CDF[1][3][TxTypeIntra1Symbols-1] != 0 ||
+		got.TxTypeIntra2CDF[2][4][TxTypeIntra2Symbols-1] != 0 ||
+		got.TxTypeInter1CDF[1][TxTypeInter1Symbols-1] != 0 ||
+		got.TxTypeInter2CDF[TxTypeInter2Symbols-1] != 0 {
+		t.Fatalf("transform-type counters were not reset")
+	}
+	if got.KFYModeCDF[2][3][NIntraPredModes-1] != 0 || got.YModeCDF[1][NIntraPredModes-1] != 0 ||
+		got.AngleDeltaCDF[4][6] != 0 || got.FilterIntraModeCDF[4] != 0 {
+		t.Fatalf("padded syntax counters were not reset")
+	}
+	if got.MVJointCDF[3] != 0 || got.MVClassesCDF[1][10] != 0 ||
+		got.MVClass0FPCDF[0][1][3] != 0 || got.MVClassNFPCDF[1][3] != 0 {
+		t.Fatalf("motion-vector counters were not reset")
 	}
 	if ctx.SkipCDF[0][1] != 32 {
 		t.Fatalf("CloneForFrame mutated source counter: %d", ctx.SkipCDF[0][1])

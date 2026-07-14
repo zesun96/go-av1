@@ -326,6 +326,9 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		return
 	}
 
+	if fs.Tracef != nil {
+		fs.tracef("sym partition_cdf x=%d y=%d bl=%d ctx=%d cdf=%v", bx, by, bl, partCtx, partCDF[:nPart])
+	}
 	part := int(m.SymbolAdaptDav1d(partCDF, nPart-1))
 	ms := m.State()
 	fs.tracef("sym partition x=%d y=%d bl=%d ctx=%d val=%d rng=%d cnt=%d off=%d",
@@ -2662,7 +2665,9 @@ func decodeCoeffTransformType(m *bitstream.MSAC, ctx *TileCtx, td transform.Txfm
 	}
 }
 
-func decodeCoeffEOB(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, chroma int, is1d uint8, n int) (int, int, int, int) {
+func decodeCoeffEOB(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, chroma int, is1d uint8, n int,
+	fs *FrameState, bx, by, plane int,
+) (int, int, int, int) {
 	slw := int(td.Lw)
 	if slw > 3 {
 		slw = 3
@@ -2690,6 +2695,7 @@ func decodeCoeffEOB(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, chrom
 	default:
 		eob = int(m.SymbolAdaptDav1d(ctx.EobBin1024Full[chroma][:], 10))
 	}
+	fs.tracef("sym coeff_eob x=%d y=%d plane=%d kind=bin val=%d rng=%d", bx, by, plane, eob, m.State().Range)
 	if eob > 1 {
 		eb := eob - 2
 		if eb < 0 {
@@ -2698,9 +2704,11 @@ func decodeCoeffEOB(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, chrom
 			eb = 8
 		}
 		eobHiBit := int(m.BoolAdapt(ctx.EobHiBitFull[td.Ctx][chroma][eb][:]))
+		fs.tracef("sym coeff_eob x=%d y=%d plane=%d kind=hi eb=%d val=%d rng=%d", bx, by, plane, eb, eobHiBit, m.State().Range)
 		extra := uint32(0)
 		for k := 0; k < eb; k++ {
 			extra = (extra << 1) | m.BoolEqui()
+			fs.tracef("sym coeff_eob x=%d y=%d plane=%d kind=extra bit=%d val=%d rng=%d", bx, by, plane, k, extra&1, m.State().Range)
 		}
 		eob = ((eobHiBit | 2) << uint(eb)) | int(extra)
 	}
@@ -2786,7 +2794,7 @@ func residualMagFromTok(m *bitstream.MSAC, tok int) int {
 }
 
 func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, chroma int,
-	geom coeffTokenGeom, eob int, levels []uint8,
+	geom coeffTokenGeom, eob int, levels []uint8, fs *FrameState, bx, by, plane int,
 ) (coeffTokenState, int) {
 	cls := geom.cls
 	txCtx := int(td.Ctx)
@@ -2844,6 +2852,8 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 		}
 		eobTok := int(m.SymbolAdaptDav1d(eobCdf[bctx][:], 2))
 		tok := eobTok + 1
+		fs.tracef("sym coeff_token x=%d y=%d plane=%d kind=eob pos=%d rc=%d ctx=%d tok=%d rng=%d",
+			bx, by, plane, eob, rc, bctx, tok, m.State().Range)
 		levelTok := tok * 0x41
 		if eobTok == 2 {
 			var hctx int
@@ -2861,6 +2871,8 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 				}
 			}
 			tok = int(m.HiTok(hiCdf[hctx][:]))
+			fs.tracef("sym coeff_token x=%d y=%d plane=%d kind=eob_hi pos=%d rc=%d ctx=%d tok=%d rng=%d",
+				bx, by, plane, eob, rc, hctx, tok, m.State().Range)
 			levelTok = tok + (3 << 6)
 		}
 		setCoeffToken(rc, tok, 0)
@@ -2885,6 +2897,8 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 				ytmp = yi | xi
 			}
 			toki := int(m.SymbolAdaptDav1d(loCdf[loCtx][:], 3))
+			fs.tracef("sym coeff_token x=%d y=%d plane=%d kind=lo pos=%d rc=%d ctx=%d tok=%d rng=%d",
+				bx, by, plane, i, rci, loCtx, toki, m.State().Range)
 			if toki == 3 {
 				mag := uint(hiMag) & 63
 				var hctx int
@@ -2903,6 +2917,8 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 					hctx += int((mag + 1) >> 1)
 				}
 				toki = int(m.HiTok(hiCdf[hctx][:]))
+				fs.tracef("sym coeff_token x=%d y=%d plane=%d kind=hi pos=%d rc=%d ctx=%d tok=%d rng=%d",
+					bx, by, plane, i, rci, hctx, toki, m.State().Range)
 				if lvlIdx >= 0 && lvlIdx < len(levels) {
 					levels[lvlIdx] = uint8(toki + (3 << 6))
 				}
@@ -2920,6 +2936,8 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 	if eob == 0 {
 		tokBr := int(m.SymbolAdaptDav1d(eobCdf[0][:], 2))
 		dcTok = tokBr + 1
+		fs.tracef("sym coeff_token x=%d y=%d plane=%d kind=dc_eob ctx=0 tok=%d rng=%d",
+			bx, by, plane, dcTok, m.State().Range)
 		if tokBr == 2 {
 			dcTok = int(m.HiTok(hiCdf[0][:]))
 		}
@@ -2932,6 +2950,8 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 			dcMag = hiMag
 			dcTok = int(m.SymbolAdaptDav1d(loCdf[dcCtx][:], 3))
 		}
+		fs.tracef("sym coeff_token x=%d y=%d plane=%d kind=dc_lo ctx=%d tok=%d rng=%d",
+			bx, by, plane, dcMag, dcTok, m.State().Range)
 		if dcTok == 3 {
 			if cls == TxClass2D {
 				dcMag = int(levels[0*geom.stride+1]) + int(levels[1*geom.stride+0]) + int(levels[1*geom.stride+1])
@@ -2988,6 +3008,8 @@ func decodeCoeffSignsAndResiduals(m *bitstream.MSAC, ctx *TileCtx, fs *FrameStat
 		tok := rcTok >> coeffTokShift
 		next := rcTok & coeffNextMask
 		sign := m.BoolEqui()
+		fs.tracef("sym coeff_sign x=%d y=%d plane=%d rc=%d sign=%d rng=%d",
+			bx, by, plane, idx, sign, m.State().Range)
 		mag := residualMagFromTok(m, tok)
 		culLevel += mag
 		acDq := ((int(dq[1]) * mag) & 0xffffff) >> dqShift
@@ -3035,6 +3057,7 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, tx uint
 	}
 	if int(td.Ctx) < len(ctx.CoefSkipFull) {
 		allSkip := m.BoolAdapt(ctx.CoefSkipFull[td.Ctx][skipCtx][:])
+		fs.tracef("sym coeff_stage x=%d y=%d plane=%d kind=nonzero skip_ctx=%d all_skip=%d rng=%d", bx, by, plane, skipCtx, allSkip, m.State().Range)
 		if allSkip != 0 {
 			txtp := uint8(transform.DCT_DCT)
 			if lossless {
@@ -3045,7 +3068,12 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, tx uint
 	}
 
 	// --- Transform type ---------------------------------------------------
+	if !intra && chroma == 0 && !reducedTxtpSet && td.Max != 3 && td.Min != 2 && !qidxIsZero && !lossless {
+		fs.tracef("sym txtp_inter1_cdf x=%d y=%d plane=%d min=%d cdf=%v", bx, by, plane,
+			clampInt(int(td.Min), 0, 1), ctx.TxTypeInter1CDF[clampInt(int(td.Min), 0, 1)])
+	}
 	txtp := decodeCoeffTransformType(m, ctx, td, chroma, yMode, intra, interYTxtp, reducedTxtpSet, qidxIsZero, lossless)
+	fs.tracef("sym coeff_stage x=%d y=%d plane=%d kind=txtp val=%d rng=%d", bx, by, plane, txtp, m.State().Range)
 
 	cls := DAV1DTxTypeClass[txtp]
 	is1d := uint8(0)
@@ -3054,7 +3082,7 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, tx uint
 	}
 
 	// --- EOB --------------------------------------------------------------
-	eob, slw, slh, tx2dszctx := decodeCoeffEOB(m, ctx, td, chroma, is1d, n)
+	eob, slw, slh, tx2dszctx := decodeCoeffEOB(m, ctx, td, chroma, is1d, n, fs, bx, by, plane)
 	ms := m.State()
 	fs.tracef("sym coeff x=%d y=%d plane=%d tx=%d txtp=%d skip_ctx=%d eob=%d rng=%d cnt=%d off=%d",
 		bx, by, plane, tx, txtp, skipCtx, eob, ms.Range, ms.Count, ms.BufferPosition)
@@ -3094,7 +3122,7 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, tx uint
 		slw:       slw,
 		tx2dszctx: tx2dszctx,
 	}
-	tokState, dcTok := decodeCoeffTokens(m, ctx, td, chroma, geom, eob, levels)
+	tokState, dcTok := decodeCoeffTokens(m, ctx, td, chroma, geom, eob, levels, fs, bx, by, plane)
 	ms = m.State()
 	fs.tracef("sym coeff_tokens x=%d y=%d plane=%d dc_tok=%d ac_head=%d rng=%d cnt=%d off=%d",
 		bx, by, plane, dcTok, tokState.acHead, ms.Range, ms.Count, ms.BufferPosition)
@@ -3733,6 +3761,18 @@ func decodeSingleRefInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		syntax.modeHint = interModeHintAuto
 		return syntax
 	}
+	if compoundFlagPresent(fhdr, segID, bw, bh) {
+		compCtx := compoundFlagContext(fs, bx, by)
+		isCompound := m.BoolAdapt(ctx.CompCDF[compCtx][:]) != 0
+		ms := m.State()
+		fs.tracef("sym compflag x=%d y=%d ctx=%d val=%t rng=%d cnt=%d off=%d",
+			bx, by, compCtx, isCompound, ms.Range, ms.Count, ms.BufferPosition)
+		// Compound reference parsing/reconstruction is not wired yet. Consuming
+		// the flag is still required for the normative single-reference branch.
+		if isCompound {
+			return syntax
+		}
+	}
 	if fhdr.Segmentation.Enabled == 0 || fhdr.Segmentation.SegData.D[segID].Ref < 0 {
 		if refSlot, refFrame, refOrder, ok := decodeSingleRefReferenceSlot(m, ctx, fs, fhdr, bx, by); ok {
 			syntax.refSlot, syntax.refFrame, syntax.refOrder = refSlot, refFrame, refOrder
@@ -3804,6 +3844,36 @@ func decodeSingleRefInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	modeDone(InterModeNewMV)
 	syntax.deltaMV = readMVResidual(m, ctx, fhdr)
 	return syntax
+}
+
+func compoundFlagPresent(fhdr *header.FrameHeader, segID uint8, bw, bh int) bool {
+	if fhdr == nil || fhdr.SwitchableCompRefs == 0 || minInt(bw, bh) <= 8 {
+		return false
+	}
+	if fhdr.Segmentation.Enabled == 0 {
+		return true
+	}
+	seg := fhdr.Segmentation.SegData.D[segID]
+	return seg.Ref < 0 && seg.GlobalMV == 0 && seg.Skip == 0
+}
+
+func compoundFlagContext(fs *FrameState, bx, by int) int {
+	if fs == nil {
+		return 1
+	}
+	col4, row4 := bx>>2, by>>2
+	haveTop := by > fs.TileY0 && col4 >= 0 && col4 < fs.W4 && fs.AbovePresent[col4] != 0
+	haveLeft := bx > fs.TileX0 && row4 >= 0 && row4 < fs.H4 && fs.LeftPresent[row4] != 0
+	if haveTop && haveLeft {
+		return btoi(fs.AboveRef[col4] >= 4) ^ btoi(fs.LeftRef[row4] >= 4)
+	}
+	if haveTop {
+		return btoi(fs.AboveRef[col4] >= 4)
+	}
+	if haveLeft {
+		return btoi(fs.LeftRef[row4] >= 4)
+	}
+	return 1
 }
 
 func deriveSingleRefInterSyntax(fs *FrameState, bx, by int) singleRefInterSyntax {
@@ -4303,6 +4373,7 @@ func decodeSingleRefInterBlockWithSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *Fr
 		fs.tracef("sym inter_filter x=%d y=%d h=%d v=%d rng=%d cnt=%d off=%d",
 			bx, by, st.filterMode, st.filterModeV, ms.Range, ms.Count, ms.BufferPosition)
 	}
+	traceInterPrediction(fs, fb, st, bx, by, bw, bh)
 	txSt := decodeInterTransformState(m, ctx, fs, fhdr, seq, bx, by, bw, bh, blkSt)
 	if m != nil {
 		ms := m.State()
@@ -4322,6 +4393,10 @@ func decodeSingleRefInterBlockWithSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *Fr
 			fillDC128(fb, seq, bx, by, bw, bh)
 		}
 	}
+	if fs != nil && fs.Tracef != nil {
+		fs.tracef("sym inter_prediction x=%d y=%d w=%d h=%d hash=%08x",
+			bx, by, bw, bh, planeBlockHash(fb.Y, fb.StrideY, fb.Width, fb.Height, bx, by, bw, bh))
+	}
 	decodeInterResidual(m, ctx, fs, fhdr, seq, fb, blkSt, txSt, bx, by, bw, bh)
 	commitInterTxState(fs, bx, by, ctxBW, ctxBH, txSt)
 	if blkSt.hasChroma {
@@ -4329,6 +4404,53 @@ func decodeSingleRefInterBlockWithSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *Fr
 	}
 	fs.CommitInterBlock(bx, by, ctxBW, ctxBH, blk, st.refFrame)
 	return st
+}
+
+func traceInterPrediction(fs *FrameState, fb *FrameBuf, st interState, bx, by, bw, bh int) {
+	if fs == nil || fs.Tracef == nil || fb == nil || st.ref == nil {
+		return
+	}
+	refHint := -1
+	if st.refSlot >= 0 && st.refSlot < len(fb.RefMVs) && fb.RefMVs[st.refSlot] != nil {
+		refHint = fb.RefMVs[st.refSlot].OrderHint
+	}
+	fs.tracef("sym inter_predict x=%d y=%d w=%d h=%d slot=%d ref_frame=%d ref_hint=%d mv_y=%d mv_x=%d hfilter=%d vfilter=%d ref_hash=%08x",
+		bx, by, bw, bh, st.refSlot, st.refFrame, refHint, st.mv.Y, st.mv.X,
+		st.filterMode, st.filterModeV, planeRectHash(st.ref.Y, st.ref.StrideY, st.ref.Width, st.ref.Height, bx, by, bw, bh))
+}
+
+func planeRectHash(plane []byte, stride, width, height, x, y, w, h int) uint32 {
+	const offset32 = uint32(2166136261)
+	const prime32 = uint32(16777619)
+	hash := offset32
+	if len(plane) == 0 || stride <= 0 || width <= 0 || height <= 0 {
+		return hash
+	}
+	for row := -3; row < h+4; row++ {
+		sy := clampInt(y+row, 0, height-1)
+		for col := -3; col < w+4; col++ {
+			sx := clampInt(x+col, 0, width-1)
+			hash ^= uint32(plane[sy*stride+sx])
+			hash *= prime32
+		}
+	}
+	return hash
+}
+
+func planeBlockHash(plane []byte, stride, width, height, x, y, w, h int) uint32 {
+	const offset32 = uint32(2166136261)
+	const prime32 = uint32(16777619)
+	hash := offset32
+	if len(plane) == 0 || stride <= 0 || width <= 0 || height <= 0 {
+		return hash
+	}
+	for row := 0; row < h && y+row < height; row++ {
+		for col := 0; col < w && x+col < width; col++ {
+			hash ^= uint32(plane[(y+row)*stride+x+col])
+			hash *= prime32
+		}
+	}
+	return hash
 }
 
 func decodeSingleRefInterBlock(fs *FrameState, fhdr *header.FrameHeader, seq *header.SequenceHeader, fb *FrameBuf,

@@ -37,7 +37,7 @@ func TestFindSpatialSortsSecondarySeparately(t *testing.T) {
 	f.PutGridBlock(4, 2, 2, 2, nearest)
 	f.PutGridBlock(1, 5, 2, 2, secondary)
 	r := FindSpatial(SearchConfig{Frame: f, Ref: 1, Bx4: 4, By4: 4, Bw4: 2, Bh4: 2, BlockDims: dims})
-	if r.NearestCount != 2 || r.Candidates[0].MV[0].X != 8 {
+	if r.NearestCount != 1 || r.Candidates[0].MV[0].X != 8 || r.Candidates[1].Weight >= 640 {
 		t.Fatalf("spatial range order mismatch: %+v", r)
 	}
 }
@@ -46,7 +46,7 @@ func TestFindSpatialSecondaryNewMVDoesNotSetNearestContext(t *testing.T) {
 	f := NewFrame(64, 64)
 	f.PutGridBlock(1, 5, 1, 1, Block{Ref: RefPair{1, -1}, MV: MVPair{{X: 8}}, BS: 0, MF: 2})
 	r := FindSpatial(SearchConfig{Frame: f, Ref: 1, Bx4: 4, By4: 4, Bw4: 2, Bh4: 2, BlockDims: testBlockDims()})
-	if r.Count == 0 || r.HaveNewMV || r.Candidates[0].Weight < 640 {
+	if r.Count == 0 || r.NearestCount != 0 || r.HaveNewMV || r.Candidates[0].Weight >= 640 {
 		t.Fatalf("secondary result count=%d haveNewMV=%v, want candidate without nearest NEWMV match", r.Count, r.HaveNewMV)
 	}
 }
@@ -168,6 +168,19 @@ func TestFindTemporalGlobalMVContext(t *testing.T) {
 	projectTestSource(current, source, 3)
 	if got := Find(cfg).GlobalMVContext; got != 1 {
 		t.Fatalf("16-away temporal global context=%d want 1", got)
+	}
+}
+
+func TestFindWithoutOrderHintsKeepsGlobalMVContextZero(t *testing.T) {
+	current := NewFrame(32, 32)
+	source := NewFrame(32, 32)
+	got := Find(SearchConfig{
+		Frame: current, TemporalSource: source, Ref: 1, TargetSlot: 0,
+		Bx4: 0, By4: 0, Bw4: 8, Bh4: 8, TileX1: 8, TileY1: 8,
+		BlockDims: testBlockDims(),
+	})
+	if got.GlobalMVContext != 0 {
+		t.Fatalf("global MV context=%d want 0 without order hints", got.GlobalMVContext)
 	}
 }
 

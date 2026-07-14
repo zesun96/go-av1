@@ -91,7 +91,7 @@ func Put8Tap(dst []uint8, dstStride int,
 	src []uint8, srcBase, srcStride int,
 	w, h, mx, my int, f Filter2D) {
 
-	fh, fv := GetFilters(f, w, mx, my)
+	fh, fv := GetFilters(f, w, h, mx, my)
 
 	switch {
 	case fh != nil && fv != nil:
@@ -180,7 +180,7 @@ func Prep8Tap(tmp []int16,
 	src []uint8, srcBase, srcStride int,
 	w, h, mx, my int, f Filter2D) {
 
-	fh, fv := GetFilters(f, w, mx, my)
+	fh, fv := GetFilters(f, w, h, mx, my)
 
 	switch {
 	case fh != nil && fv != nil:

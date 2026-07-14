@@ -61,9 +61,25 @@ func TestLumaFilterLevelModeRefScaling(t *testing.T) {
 	fh := &header.FrameHeader{}
 	fh.LoopFilter.LevelY[0] = 32
 	fh.LoopFilter.ModeRefDeltaEnabled = 1
-	fh.LoopFilter.ModeRefDeltas.RefDelta[4] = -1
+	fh.LoopFilter.ModeRefDeltas.RefDelta[3] = -1
+	fh.LoopFilter.ModeRefDeltas.RefDelta[4] = 4
 	fh.LoopFilter.ModeRefDeltas.ModeDelta[0] = 2
 	if got := fs.LumaFilterLevel(fh, 0, 0, true); got != 34 {
+		t.Fatalf("mode/ref level=%d want 34", got)
+	}
+}
+
+func TestChromaFilterLevelUsesReferenceFrameEnumAsDeltaIndex(t *testing.T) {
+	fs := NewFrameState(8, 8)
+	fs.SetSubsampling(1, 1)
+	fs.SetChromaBlockState(0, 0, 8, 8, Av1Block{RefFrame: 3, InterMode: InterModeZeroMV})
+	fh := &header.FrameHeader{}
+	fh.LoopFilter.LevelU = 32
+	fh.LoopFilter.ModeRefDeltaEnabled = 1
+	fh.LoopFilter.ModeRefDeltas.RefDelta[3] = -1
+	fh.LoopFilter.ModeRefDeltas.RefDelta[4] = 4
+	fh.LoopFilter.ModeRefDeltas.ModeDelta[0] = 2
+	if got := fs.ChromaFilterLevel(fh, 0, 0, 1); got != 34 {
 		t.Fatalf("mode/ref level=%d want 34", got)
 	}
 }

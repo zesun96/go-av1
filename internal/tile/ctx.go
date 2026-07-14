@@ -48,6 +48,7 @@ type TileCtx struct {
 	// Intra decision in inter/switch frames and intrabc flag.
 	IntraCDF   [4][2]uint16
 	IntrabcCDF [2]uint16
+	CompCDF    [5][2]uint16
 
 	// -----------------------------------------------------------------------
 	// Transform type CDFs.
@@ -269,6 +270,42 @@ func (ctx *TileCtx) resetCDFCounts() {
 	for i := range ctx.SkipCDF {
 		ctx.SkipCDF[i][1] = 0
 	}
+	for top := range ctx.KFYModeCDF {
+		for left := range ctx.KFYModeCDF[top] {
+			ctx.KFYModeCDF[top][left][NIntraPredModes-1] = 0
+		}
+	}
+	for size := range ctx.YModeCDF {
+		ctx.YModeCDF[size][NIntraPredModes-1] = 0
+	}
+	// Transform-type arrays include one trailing Go padding slot. The native
+	// dav1d counter consumed by SymbolAdaptDav1d is immediately before it.
+	for tx := range ctx.TxTypeIntra1CDF {
+		for mode := range ctx.TxTypeIntra1CDF[tx] {
+			ctx.TxTypeIntra1CDF[tx][mode][TxTypeIntra1Symbols-1] = 0
+		}
+	}
+	for tx := range ctx.TxTypeIntra2CDF {
+		for mode := range ctx.TxTypeIntra2CDF[tx] {
+			ctx.TxTypeIntra2CDF[tx][mode][TxTypeIntra2Symbols-1] = 0
+		}
+	}
+	for tx := range ctx.TxTypeInter1CDF {
+		ctx.TxTypeInter1CDF[tx][TxTypeInter1Symbols-1] = 0
+	}
+	ctx.TxTypeInter2CDF[TxTypeInter2Symbols-1] = 0
+	for mode := range ctx.AngleDeltaCDF {
+		ctx.AngleDeltaCDF[mode][6] = 0
+	}
+	ctx.FilterIntraModeCDF[4] = 0
+	ctx.MVJointCDF[3] = 0
+	for comp := range ctx.MVClassesCDF {
+		ctx.MVClassesCDF[comp][10] = 0
+		ctx.MVClassNFPCDF[comp][3] = 0
+		for up := range ctx.MVClass0FPCDF[comp] {
+			ctx.MVClass0FPCDF[comp][up][3] = 0
+		}
+	}
 	for cfl := range ctx.UVModeCDF {
 		counter := NUVIntraModes - 1
 		if cfl == 0 {
@@ -355,6 +392,7 @@ func NewTileCtxForQIdx(qidx int) *TileCtx {
 	ctx.SkipCDF = SkipCDFDefault
 	ctx.IntraCDF = DefaultIntraCDF
 	ctx.IntrabcCDF = DefaultIntrabcCDF
+	ctx.CompCDF = DefaultCompCDF
 
 	// TX type
 	ctx.TxTypeIntra1CDF = TxTypeIntra1CDFDefault

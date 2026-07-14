@@ -183,9 +183,8 @@ var filter2DToV = [NFilter2D]FilterType{
 // GetFilters returns the horizontal and vertical 8-tap filter arrays for
 // the given Filter2D, block width w, and sub-pixel offsets mx, my.
 // Returns nil for an axis if the offset is zero (integer-pixel position).
-// For width ≤ 4, the "small" variant of the filter is returned for the
-// horizontal axis.
-func GetFilters(f Filter2D, w, mx, my int) (fh, fv []int8) {
+// Width/height ≤ 4 select the small horizontal/vertical filter variant.
+func GetFilters(f Filter2D, w, h, mx, my int) (fh, fv []int8) {
 	if f == Filter2DBilinear {
 		// Bilinear: handled separately by the caller.
 		return nil, nil
@@ -201,6 +200,14 @@ func GetFilters(f Filter2D, w, mx, my int) (fh, fv []int8) {
 			hType = FilterRegularSmall
 		case FilterSmooth:
 			hType = FilterSmoothSmall
+		}
+	}
+	if h <= 4 {
+		switch vType {
+		case FilterRegular:
+			vType = FilterRegularSmall
+		case FilterSmooth:
+			vType = FilterSmoothSmall
 		}
 	}
 

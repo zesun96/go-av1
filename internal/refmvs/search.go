@@ -31,7 +31,10 @@ type SearchResult struct {
 // is appended to the secondary range and merged when its MV already exists.
 func Find(cfg SearchConfig) SearchResult {
 	out := FindSpatial(cfg)
-	if cfg.TemporalSource == nil || cfg.TargetSlot < 0 {
+	// dav1d initializes globalmv_ctx from use_ref_frame_mvs. Without order
+	// hints temporal projection is disabled, so the context remains zero even
+	// when a decoded reference picture is available.
+	if cfg.TemporalSource == nil || cfg.TargetSlot < 0 || cfg.Frame == nil || cfg.Frame.OrderBits == 0 {
 		return out
 	}
 	out.GlobalMVContext = 1
@@ -227,7 +230,7 @@ func FindSpatial(cfg SearchConfig) SearchResult {
 	appendTopRight(&out, cfg)
 	nearestCount := out.Count
 	appendSecondarySpatial(&out, cfg)
-	out.NearestCount = minSearch(out.Count, maxSearch(nearestCount, 2))
+	out.NearestCount = nearestCount
 	for i := 0; i < out.NearestCount; i++ {
 		out.Candidates[i].Weight += 640
 	}

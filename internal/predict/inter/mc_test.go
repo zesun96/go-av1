@@ -1,6 +1,7 @@
 package inter
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -67,15 +68,15 @@ func TestMcSubpelFilters_Shape(t *testing.T) {
 }
 
 func TestGetFilters_IntegerPosition(t *testing.T) {
-	fh, fv := GetFilters(Filter2D8TapRegular, 8, 0, 0)
+	fh, fv := GetFilters(Filter2D8TapRegular, 8, 8, 0, 0)
 	if fh != nil || fv != nil {
 		t.Fatal("integer position should give nil,nil filters")
 	}
 }
 
 func TestGetFilters_SmallWidth(t *testing.T) {
-	fh4, _ := GetFilters(Filter2D8TapRegular, 4, 8, 0)
-	fh8, _ := GetFilters(Filter2D8TapRegular, 8, 8, 0)
+	fh4, _ := GetFilters(Filter2D8TapRegular, 4, 8, 8, 0)
+	fh8, _ := GetFilters(Filter2D8TapRegular, 8, 8, 8, 0)
 	if len(fh4) == 0 || len(fh8) == 0 {
 		t.Fatal("expected non-nil filter slices")
 	}
@@ -87,8 +88,16 @@ func TestGetFilters_SmallWidth(t *testing.T) {
 	}
 }
 
+func TestGetFilters_SmallHeightUsesVerticalSmallFilter(t *testing.T) {
+	_, fv := GetFilters(Filter2D8TapRegular, 8, 4, 0, 8)
+	want := McSubpelFilters[FilterRegularSmall][7]
+	if fv == nil || !slices.Equal(fv, want[:]) {
+		t.Fatalf("vertical small filter=%v want %v", fv, want)
+	}
+}
+
 func TestGetFilters_Bilinear(t *testing.T) {
-	fh, fv := GetFilters(Filter2DBilinear, 8, 8, 8)
+	fh, fv := GetFilters(Filter2DBilinear, 8, 8, 8, 8)
 	if fh != nil || fv != nil {
 		t.Fatal("bilinear should return nil,nil from GetFilters")
 	}

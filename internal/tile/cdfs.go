@@ -40,6 +40,12 @@ var DefaultPartition64CDF = [11]uint16{
 	12631, 11221, 9690, 3202, 2931, 2507, 2244, 1876, 1044, 0, 0,
 }
 
+// DefaultCompCDF mirrors dav1d default_cdf.m.comp. Each row is a binary
+// inverse CDF followed by its adaptation counter.
+var DefaultCompCDF = [5][2]uint16{
+	{5940, 0}, {8733, 0}, {20737, 0}, {22128, 0}, {29867, 0},
+}
+
 // DefaultPartition32CDF: 10 symbols, ctx=0.
 // Source: dav1d partition[2][0] CDF9(18462,20920,23124,27647,28227,29049,29519,30178,31544)
 // After 32768-x: {14306,11848,9644,5121,4541,3719,3249,2590,1224,0}

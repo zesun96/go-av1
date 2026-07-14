@@ -9,6 +9,27 @@ import (
 	"github.com/zesun96/go-av1/internal/refmvs"
 )
 
+func TestCompoundFlagPresent(t *testing.T) {
+	fh := &header.FrameHeader{SwitchableCompRefs: 1}
+	if !compoundFlagPresent(fh, 0, 64, 64) {
+		t.Fatal("64x64 switchable inter block should code compflag")
+	}
+	if compoundFlagPresent(fh, 0, 8, 64) {
+		t.Fatal("8xN block must not code compflag")
+	}
+	fh.Segmentation.Enabled = 1
+	fh.Segmentation.SegData.D[2].Ref = 1
+	if compoundFlagPresent(fh, 2, 64, 64) {
+		t.Fatal("segment-forced reference must not code compflag")
+	}
+}
+
+func TestCompoundFlagContextWithoutNeighbours(t *testing.T) {
+	if got := compoundFlagContext(NewFrameState(64, 64), 0, 0); got != 1 {
+		t.Fatalf("compound context=%d want 1", got)
+	}
+}
+
 func TestSplitMV8(t *testing.T) {
 	tests := []struct {
 		mv       int
