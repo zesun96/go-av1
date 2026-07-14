@@ -3649,6 +3649,11 @@ type singleRefInterSyntax struct {
 	drlIdx       int
 	bw           int
 	bh           int
+	isCompound   bool
+	compMode     int
+	refSlot2     int
+	refFrame2    int
+	refOrder2    int
 }
 
 const (
@@ -3770,6 +3775,7 @@ func decodeSingleRefInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		// Compound reference parsing/reconstruction is not wired yet. Consuming
 		// the flag is still required for the normative single-reference branch.
 		if isCompound {
+			decodeCompoundInterSyntax(m, ctx, fs, fhdr, bx, by, &syntax)
 			return syntax
 		}
 	}
@@ -3844,6 +3850,84 @@ func decodeSingleRefInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	modeDone(InterModeNewMV)
 	syntax.deltaMV = readMVResidual(m, ctx, fhdr)
 	return syntax
+}
+
+func decodeCompoundInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, fhdr *header.FrameHeader,
+	bx, by int, syntax *singleRefInterSyntax) {
+	if m == nil || ctx == nil || syntax == nil {
+		return
+	}
+	ref0, ref1 := 0, 0
+	dirCtx := compoundDirContext(fs, fhdr, bx, by)
+	bidir := m.BoolAdapt(ctx.CompDirCDF[dirCtx][:]) != 0
+	if bidir {
+		if m.BoolAdapt(ctx.CompFwdRefCDF[0][ref3Ctx(fs, fhdr, bx, by)][:]) != 0 {
+			ref0 = 2 + int(m.BoolAdapt(ctx.CompFwdRefCDF[2][ref5Ctx(fs, fhdr, bx, by)][:]))
+		} else {
+			ref0 = int(m.BoolAdapt(ctx.CompFwdRefCDF[1][ref4Ctx(fs, fhdr, bx, by)][:]))
+		}
+		if m.BoolAdapt(ctx.CompBwdRefCDF[0][ref2Ctx(fs, fhdr, bx, by)][:]) != 0 {
+			ref1 = 6
+		} else {
+			ref1 = 4 + int(m.BoolAdapt(ctx.CompBwdRefCDF[1][ref6Ctx(fs, fhdr, bx, by)][:]))
+		}
+	} else {
+		if m.BoolAdapt(ctx.CompUniRefCDF[0][refCtx(fs, fhdr, bx, by)][:]) != 0 {
+			ref0, ref1 = 4, 6
+		} else {
+			ref0 = 0
+			ref1 = 1 + int(m.BoolAdapt(ctx.CompUniRefCDF[1][uniP1Context(fs, fhdr, bx, by)][:]))
+			if ref1 == 2 {
+				ref1 += int(m.BoolAdapt(ctx.CompUniRefCDF[2][ref5Ctx(fs, fhdr, bx, by)][:]))
+			}
+		}
+	}
+	syntax.isCompound = true
+	syntax.refOrder, syntax.refOrder2 = ref0, ref1
+	syntax.refFrame, syntax.refFrame2 = ref0+1, ref1+1
+	syntax.refSlot, _ = frameRefSlot(fhdr, syntax.refFrame)
+	syntax.refSlot2, _ = frameRefSlot(fhdr, syntax.refFrame2)
+	syntax.hasRef = syntax.refSlot >= 0 && syntax.refSlot2 >= 0
+
+	// Compound MV-stack context support is added with the paired stack. Context
+	// zero is the normative no-pair-match context and is used by the WebRTC
+	// target block (dav1d reports ctx=0, n_mvs=2).
+	modeCtx := 0
+	syntax.compMode = int(m.SymbolAdaptDav1d(ctx.CompInterModeCDF[modeCtx][:], 7))
+	if syntax.compMode == 6 { // GLOBALMV_GLOBALMV
+		syntax.motionSource = interMotionSourceGlobal
+		syntax.modeHint = interModeHintAuto
+	}
+	ms := m.State()
+	fs.tracef("sym compound x=%d y=%d dir_ctx=%d bidir=%t refs=%d/%d slots=%d/%d mode_ctx=%d mode=%d rng=%d cnt=%d off=%d",
+		bx, by, dirCtx, bidir, ref0, ref1, syntax.refSlot, syntax.refSlot2,
+		modeCtx, syntax.compMode, ms.Range, ms.Count, ms.BufferPosition)
+}
+
+func compoundDirContext(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
+	top, topOK := neighbourSingleRefFrame(fs, fhdr, bx, by, true)
+	left, leftOK := neighbourSingleRefFrame(fs, fhdr, bx, by, false)
+	if topOK && leftOK {
+		return 1 + 2*btoi((top >= 4) == (left >= 4))
+	}
+	return 2
+}
+
+func uniP1Context(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
+	cnt := [3]int{}
+	for _, top := range []bool{true, false} {
+		if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, top); ok && ref >= 1 && ref <= 3 {
+			cnt[ref-1]++
+		}
+	}
+	cnt[1] += cnt[2]
+	if cnt[0] == cnt[1] {
+		return 1
+	}
+	if cnt[0] < cnt[1] {
+		return 0
+	}
+	return 2
 }
 
 func compoundFlagPresent(fhdr *header.FrameHeader, segID uint8, bw, bh int) bool {
@@ -4388,10 +4472,24 @@ func decodeSingleRefInterBlockWithSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *Fr
 	blk.TxSplit0 = txSt.block.TxSplit0
 	blk.TxSplit1 = txSt.block.TxSplit1
 	blk.LFDelta = blkSt.lfDelta
-	if !applyInterState(fb, seq, bx, by, bw, bh, st) {
+	predicted := false
+	if syntax.isCompound && syntax.compMode == 6 {
+		predicted = applyGlobalCompoundState(fb, fhdr, seq, bx, by, bw, bh, st, syntax)
+	}
+	if !predicted {
+		predicted = applyInterState(fb, seq, bx, by, bw, bh, st)
+	}
+	if !predicted {
 		if !copySelectedInterRefBlock(fb, seq, bx, by, bw, bh, st) && !copyInterRefBlock(fb, seq, bx, by, bw, bh) {
 			fillDC128(fb, seq, bx, by, bw, bh)
 		}
+	}
+	if syntax.isCompound {
+		blk.RefSlot2 = int8(syntax.refSlot2)
+		blk.RefFrame2 = int8(syntax.refFrame2)
+		blk.RefOrder2 = int8(syntax.refOrder2)
+		mv2 := fallbackGlobalMV(fhdr, syntax.refSlot2)
+		blk.MV2 = [2]int16{mv2.Y, mv2.X}
 	}
 	if fs != nil && fs.Tracef != nil {
 		fs.tracef("sym inter_prediction x=%d y=%d w=%d h=%d hash=%08x",
@@ -4404,6 +4502,76 @@ func decodeSingleRefInterBlockWithSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *Fr
 	}
 	fs.CommitInterBlock(bx, by, ctxBW, ctxBH, blk, st.refFrame)
 	return st
+}
+
+func applyGlobalCompoundState(fb *FrameBuf, fhdr *header.FrameHeader, seq *header.SequenceHeader,
+	bx, by, bw, bh int, first interState, syntax singleRefInterSyntax) bool {
+	if fb == nil || fhdr == nil || first.ref == nil || syntax.refSlot2 < 0 || syntax.refSlot2 >= len(fb.Refs) {
+		return false
+	}
+	second := fb.Refs[syntax.refSlot2]
+	if second == nil {
+		return false
+	}
+	mv2 := fallbackGlobalMV(fhdr, syntax.refSlot2)
+	compoundPredictPlane(fb.Y, fb.StrideY, fb.Width, fb.Height,
+		first.ref.Y, first.ref.StrideY, first.ref.Width, first.ref.Height,
+		second.Y, second.StrideY, second.Width, second.Height,
+		bx, by, bw, bh, first.mv, mv2, first.filterMode, first.filterModeV)
+	if fb.Monochrome || first.ref.Monochrome || second.Monochrome || seq == nil {
+		return true
+	}
+	ssHor, ssVer := int(seq.SsHor), int(seq.SsVer)
+	cmv1 := refmvs.MV{X: int16(floorDivPow2(int(first.mv.X), ssHor)), Y: int16(floorDivPow2(int(first.mv.Y), ssVer))}
+	cmv2 := refmvs.MV{X: int16(floorDivPow2(int(mv2.X), ssHor)), Y: int16(floorDivPow2(int(mv2.Y), ssVer))}
+	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
+	compoundPredictPlane(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH,
+		first.ref.U, first.ref.StrideUV, first.ref.ChromaW, first.ref.ChromaH,
+		second.U, second.StrideUV, second.ChromaW, second.ChromaH,
+		cbx, cby, cbw, cbh, cmv1, cmv2, first.filterMode, first.filterModeV)
+	compoundPredictPlane(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH,
+		first.ref.V, first.ref.StrideUV, first.ref.ChromaW, first.ref.ChromaH,
+		second.V, second.StrideUV, second.ChromaW, second.ChromaH,
+		cbx, cby, cbw, cbh, cmv1, cmv2, first.filterMode, first.filterModeV)
+	return true
+}
+
+func compoundPredictPlane(dst []byte, dstStride, dstW, dstH int,
+	src1 []byte, stride1, width1, height1 int, src2 []byte, stride2, width2, height2 int,
+	bx, by, bw, bh int, mv1, mv2 refmvs.MV, modeH, modeV header.FilterMode) {
+	if len(dst) == 0 || len(src1) == 0 || len(src2) == 0 || bw <= 0 || bh <= 0 {
+		return
+	}
+	bw = minInt(bw, dstW-bx)
+	bh = minInt(bh, dstH-by)
+	if bw <= 0 || bh <= 0 {
+		return
+	}
+	prep := func(src []byte, stride, width, height int, mv refmvs.MV) []int16 {
+		mv = refmvs.ClampMV(mv, bx>>2, by>>2, (bw+3)>>2, (bh+3)>>2, (width+3)>>2, (height+3)>>2)
+		px, mx := splitMV8(int(mv.X))
+		py, my := splitMV8(int(mv.Y))
+		padStride, padH := bw+7, bh+7
+		pad := make([]byte, padStride*padH)
+		for y := 0; y < padH; y++ {
+			sy := clampInt(by+py-3+y, 0, height-1)
+			for x := 0; x < padStride; x++ {
+				sx := clampInt(bx+px-3+x, 0, width-1)
+				pad[y*padStride+x] = src[sy*stride+sx]
+			}
+		}
+		tmp := make([]int16, bw*bh)
+		base := 3*padStride + 3
+		if interFilter2D(modeH, modeV) == predinter.Filter2DBilinear {
+			predinter.PrepBilin(tmp, pad, base, padStride, bw, bh, mx, my)
+		} else {
+			predinter.Prep8Tap(tmp, pad, base, padStride, bw, bh, mx, my, interFilter2D(modeH, modeV))
+		}
+		return tmp
+	}
+	tmp1 := prep(src1, stride1, width1, height1, mv1)
+	tmp2 := prep(src2, stride2, width2, height2, mv2)
+	predinter.Avg(dst[by*dstStride+bx:], dstStride, tmp1, tmp2, bw, bh)
 }
 
 func traceInterPrediction(fs *FrameState, fb *FrameBuf, st interState, bx, by, bw, bh int) {

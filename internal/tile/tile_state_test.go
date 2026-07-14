@@ -36,6 +36,7 @@ func TestCloneForFrameResetsCDFCountersOnly(t *testing.T) {
 	ctx.MVClassesCDF[1][10] = 23
 	ctx.MVClass0FPCDF[0][1][3] = 22
 	ctx.MVClassNFPCDF[1][3] = 21
+	ctx.CompInterModeCDF[3][7] = 20
 	ctx.LastQIdx = 208
 	ctx.LastQIdxValid = true
 	ctx.LastDeltaLF = [4]int8{1, -2, 3, -4}
@@ -69,6 +70,9 @@ func TestCloneForFrameResetsCDFCountersOnly(t *testing.T) {
 	if got.MVJointCDF[3] != 0 || got.MVClassesCDF[1][10] != 0 ||
 		got.MVClass0FPCDF[0][1][3] != 0 || got.MVClassNFPCDF[1][3] != 0 {
 		t.Fatalf("motion-vector counters were not reset")
+	}
+	if got.CompInterModeCDF[3][7] != 0 {
+		t.Fatalf("compound inter mode counter=%d want 0", got.CompInterModeCDF[3][7])
 	}
 	if ctx.SkipCDF[0][1] != 32 {
 		t.Fatalf("CloneForFrame mutated source counter: %d", ctx.SkipCDF[0][1])

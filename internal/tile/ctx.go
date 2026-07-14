@@ -46,9 +46,14 @@ type TileCtx struct {
 	SkipCDF [3][3]uint16
 
 	// Intra decision in inter/switch frames and intrabc flag.
-	IntraCDF   [4][2]uint16
-	IntrabcCDF [2]uint16
-	CompCDF    [5][2]uint16
+	IntraCDF         [4][2]uint16
+	IntrabcCDF       [2]uint16
+	CompCDF          [5][2]uint16
+	CompDirCDF       [5][2]uint16
+	CompFwdRefCDF    [3][3][2]uint16
+	CompBwdRefCDF    [2][3][2]uint16
+	CompUniRefCDF    [3][3][2]uint16
+	CompInterModeCDF [8][9]uint16
 
 	// -----------------------------------------------------------------------
 	// Transform type CDFs.
@@ -294,6 +299,9 @@ func (ctx *TileCtx) resetCDFCounts() {
 		ctx.TxTypeInter1CDF[tx][TxTypeInter1Symbols-1] = 0
 	}
 	ctx.TxTypeInter2CDF[TxTypeInter2Symbols-1] = 0
+	for i := range ctx.CompInterModeCDF {
+		ctx.CompInterModeCDF[i][7] = 0
+	}
 	for mode := range ctx.AngleDeltaCDF {
 		ctx.AngleDeltaCDF[mode][6] = 0
 	}
@@ -393,6 +401,11 @@ func NewTileCtxForQIdx(qidx int) *TileCtx {
 	ctx.IntraCDF = DefaultIntraCDF
 	ctx.IntrabcCDF = DefaultIntrabcCDF
 	ctx.CompCDF = DefaultCompCDF
+	ctx.CompDirCDF = CompDirCDFDefault
+	ctx.CompFwdRefCDF = CompFwdRefCDFDefault
+	ctx.CompBwdRefCDF = CompBwdRefCDFDefault
+	ctx.CompUniRefCDF = CompUniRefCDFDefault
+	ctx.CompInterModeCDF = CompInterModeCDFDefault
 
 	// TX type
 	ctx.TxTypeIntra1CDF = TxTypeIntra1CDFDefault

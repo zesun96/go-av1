@@ -30,6 +30,21 @@ func TestCompoundFlagContextWithoutNeighbours(t *testing.T) {
 	}
 }
 
+func TestCompoundDirContextSingleRefNeighbours(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fh := &header.FrameHeader{}
+	fh.Refidx[0], fh.Refidx[4] = 1, 5
+	fs.CommitInterBlock(16, 0, 16, 16, Av1Block{RefSlot: 1, RefFrame: 1, InterMode: InterModeNearestMV}, 1)
+	fs.CommitInterBlock(0, 16, 16, 16, Av1Block{RefSlot: 5, RefFrame: 5, InterMode: InterModeNearestMV}, 5)
+	if got := compoundDirContext(fs, fh, 16, 16); got != 1 {
+		t.Fatalf("opposite-direction single refs context=%d want 1", got)
+	}
+	fs.CommitInterBlock(0, 16, 16, 16, Av1Block{RefSlot: 1, RefFrame: 1, InterMode: InterModeNearestMV}, 1)
+	if got := compoundDirContext(fs, fh, 16, 16); got != 3 {
+		t.Fatalf("same-direction single refs context=%d want 3", got)
+	}
+}
+
 func TestSplitMV8(t *testing.T) {
 	tests := []struct {
 		mv       int
