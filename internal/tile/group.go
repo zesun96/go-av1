@@ -40,13 +40,16 @@ func DecodeTileGroupWithContext(
 		logf = func(string, ...any) {}
 	}
 	if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
-		logf("sym frame offset=%d type=%d show=%d refresh=%02x primary=%d refidx=%v cdf_update=%d refresh_cdf=%d qidx=%d qm=%d qmy=%d qmu=%d qmv=%d",
+		logf("sym frame offset=%d type=%d show=%d refresh=%02x primary=%d refidx=%v comp_refs=%d cdf_update=%d refresh_cdf=%d tile_update=%d qidx=%d qm=%d qmy=%d qmu=%d qmv=%d",
 			fhdr.FrameOffset, fhdr.FrameType, fhdr.ShowFrame, fhdr.RefreshFrameFlags,
-			fhdr.PrimaryRefFrame, fhdr.Refidx, fhdr.DisableCDFUpdate, fhdr.RefreshContext,
+			fhdr.PrimaryRefFrame, fhdr.Refidx, fhdr.SwitchableCompRefs, fhdr.DisableCDFUpdate, fhdr.RefreshContext, fhdr.Tiling.Update,
 			fhdr.Quant.YAC, fhdr.Quant.QM,
 			fhdr.Quant.QMY, fhdr.Quant.QMU, fhdr.Quant.QMV)
+		if fhdr.Segmentation.Enabled != 0 {
+			logf("sym frame_segments=%v", fhdr.Segmentation.SegData.D)
+		}
 		if initial != nil {
-			logf("sym cdf_in partition64_0=%v skip_0=%v", initial.Partition64CDF[0], initial.SkipCDF[0])
+			logf("sym cdf_in partition64_0=%v skip_0=%v comp_0=%v", initial.Partition64CDF[0], initial.SkipCDF[0], initial.CompCDF[0])
 		}
 	}
 	logf("tile: DecodeTileGroup payloadLen=%d numTiles=%d×%d NBytes=%d",
@@ -128,10 +131,13 @@ func DecodeTileGroupWithContext(
 		absoluteTile := int(td.Row)*int(fhdr.Tiling.Cols) + int(td.Col)
 		if absoluteTile == int(fhdr.Tiling.Update) || (updateCtx == nil && tileIndex == len(tiles)-1) {
 			updateCtx = tileCtx
+			if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
+				logf("sym cdf_update_tile=%d comp_0=%v", absoluteTile, tileCtx.CompCDF[0])
+			}
 		}
 	}
 	if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" && updateCtx != nil {
-		logf("sym cdf_out partition64_0=%v skip_0=%v", updateCtx.Partition64CDF[0], updateCtx.SkipCDF[0])
+		logf("sym cdf_out partition64_0=%v skip_0=%v comp_0=%v", updateCtx.Partition64CDF[0], updateCtx.SkipCDF[0], updateCtx.CompCDF[0])
 	}
 	chromaDbg.dump(logf)
 	return updateCtx, nil

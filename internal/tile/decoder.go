@@ -3768,10 +3768,11 @@ func decodeSingleRefInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	}
 	if compoundFlagPresent(fhdr, segID, bw, bh) {
 		compCtx := compoundFlagContext(fs, bx, by)
+		before := ctx.CompCDF[compCtx]
 		isCompound := m.BoolAdapt(ctx.CompCDF[compCtx][:]) != 0
 		ms := m.State()
-		fs.tracef("sym compflag x=%d y=%d ctx=%d val=%t rng=%d cnt=%d off=%d",
-			bx, by, compCtx, isCompound, ms.Range, ms.Count, ms.BufferPosition)
+		fs.tracef("sym compflag x=%d y=%d ctx=%d val=%t cdf=%v->%v rng=%d cnt=%d off=%d",
+			bx, by, compCtx, isCompound, before, ctx.CompCDF[compCtx], ms.Range, ms.Count, ms.BufferPosition)
 		// Compound reference parsing/reconstruction is not wired yet. Consuming
 		// the flag is still required for the normative single-reference branch.
 		if isCompound {
@@ -3940,7 +3941,7 @@ func uniP1Context(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 }
 
 func compoundFlagPresent(fhdr *header.FrameHeader, segID uint8, bw, bh int) bool {
-	if fhdr == nil || fhdr.SwitchableCompRefs == 0 || minInt(bw, bh) <= 8 {
+	if fhdr == nil || fhdr.SwitchableCompRefs == 0 || minInt(bw, bh) < 8 {
 		return false
 	}
 	if fhdr.Segmentation.Enabled == 0 {
@@ -3954,17 +3955,37 @@ func compoundFlagContext(fs *FrameState, bx, by int) int {
 	if fs == nil {
 		return 1
 	}
+	top, haveTop := fs.BlockState(bx, by-4)
+	left, haveLeft := fs.BlockState(bx-4, by)
+	haveTop = haveTop && by > fs.TileY0
+	haveLeft = haveLeft && bx > fs.TileX0
+	isCompound := func(blk Av1Block) bool { return !blk.Intra && blk.Compound }
 	col4, row4 := bx>>2, by>>2
-	haveTop := by > fs.TileY0 && col4 >= 0 && col4 < fs.W4 && fs.AbovePresent[col4] != 0
-	haveLeft := bx > fs.TileX0 && row4 >= 0 && row4 < fs.H4 && fs.LeftPresent[row4] != 0
+	topBackward := haveTop && col4 >= 0 && col4 < len(fs.AboveRef) && fs.AboveRef[col4] >= 4
+	leftBackward := haveLeft && row4 >= 0 && row4 < len(fs.LeftRef) && fs.LeftRef[row4] >= 4
 	if haveTop && haveLeft {
-		return btoi(fs.AboveRef[col4] >= 4) ^ btoi(fs.LeftRef[row4] >= 4)
+		if isCompound(top) {
+			if isCompound(left) {
+				return 4
+			}
+			return 2 + btoi(leftBackward)
+		}
+		if isCompound(left) {
+			return 2 + btoi(topBackward)
+		}
+		return btoi(leftBackward) ^ btoi(topBackward)
 	}
 	if haveTop {
-		return btoi(fs.AboveRef[col4] >= 4)
+		if isCompound(top) {
+			return 3
+		}
+		return btoi(topBackward)
 	}
 	if haveLeft {
-		return btoi(fs.LeftRef[row4] >= 4)
+		if isCompound(left) {
+			return 3
+		}
+		return btoi(leftBackward)
 	}
 	return 1
 }
@@ -4494,6 +4515,7 @@ func decodeSingleRefInterBlockWithSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *Fr
 		}
 	}
 	if syntax.isCompound {
+		blk.Compound = true
 		blk.RefSlot2 = int8(syntax.refSlot2)
 		blk.RefFrame2 = int8(syntax.refFrame2)
 		blk.RefOrder2 = int8(syntax.refOrder2)

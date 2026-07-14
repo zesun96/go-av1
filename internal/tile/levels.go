@@ -141,6 +141,7 @@ type Av1Block struct {
 	RefSlot2  int8
 	RefFrame2 int8
 	RefOrder2 int8
+	Compound  bool
 	Filter    uint8
 	FilterV   uint8
 	BaseMV    [2]int16 // [Y, X] in 1/8-pel

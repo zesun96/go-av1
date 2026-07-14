@@ -14,8 +14,11 @@ func TestCompoundFlagPresent(t *testing.T) {
 	if !compoundFlagPresent(fh, 0, 64, 64) {
 		t.Fatal("64x64 switchable inter block should code compflag")
 	}
-	if compoundFlagPresent(fh, 0, 8, 64) {
-		t.Fatal("8xN block must not code compflag")
+	if !compoundFlagPresent(fh, 0, 8, 64) {
+		t.Fatal("8xN block should code compflag")
+	}
+	if compoundFlagPresent(fh, 0, 4, 64) {
+		t.Fatal("4xN block must not code compflag")
 	}
 	fh.Segmentation.Enabled = 1
 	fh.Segmentation.SegData.D[2].Ref = 1
@@ -27,6 +30,20 @@ func TestCompoundFlagPresent(t *testing.T) {
 func TestCompoundFlagContextWithoutNeighbours(t *testing.T) {
 	if got := compoundFlagContext(NewFrameState(64, 64), 0, 0); got != 1 {
 		t.Fatalf("compound context=%d want 1", got)
+	}
+}
+
+func TestCompoundFlagContextCompoundTopForwardLeft(t *testing.T) {
+	fs := NewFrameState(128, 256)
+	fs.TileX1, fs.TileY1 = 128, 256
+	fs.SetBlockState(64, 160, 32, 32, Av1Block{
+		RefSlot: 1, RefFrame: 1, RefSlot2: 0, RefFrame2: 7, Compound: true,
+	})
+	fs.SetBlockState(32, 192, 32, 64, Av1Block{
+		RefSlot: 1, RefFrame: 1, RefSlot2: -1,
+	})
+	if got := compoundFlagContext(fs, 64, 192); got != 2 {
+		t.Fatalf("compound context=%d want 2", got)
 	}
 }
 
