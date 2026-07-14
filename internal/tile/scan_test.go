@@ -63,11 +63,11 @@ func TestLastNonzeroColFromEOB(t *testing.T) {
 		want int
 	}{
 		{transform.TX4x4, 0, 0},
-		{transform.TX4x4, 1, 1},
+		{transform.TX4x4, 1, 0},
 		{transform.TX4x4, 2, 1},
-		{transform.TX4x4, 3, 1},
+		{transform.TX4x4, 3, 2},
 		{transform.TX4x4, 15, 3},
-		{transform.TX64x64, 1023, 15},
+		{transform.TX64x64, 1023, 31},
 	}
 
 	for _, tc := range tests {
@@ -77,6 +77,28 @@ func TestLastNonzeroColFromEOB(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Fatalf("LastNonzeroColFromEOB(%d, %d) = %d, want %d", tc.tx, tc.eob, got, tc.want)
+		}
+	}
+}
+
+func TestLastNonzeroColFromEOBMatchesScanPacking(t *testing.T) {
+	for tx, scan := range Scans {
+		if len(scan) == 0 {
+			continue
+		}
+		height := int(transform.TxfmDimensions[tx].H) * 4
+		if height > 32 {
+			height = 32
+		}
+		maxCol := 0
+		for eob, rc := range scan {
+			if col := int(rc) & (height - 1); col > maxCol {
+				maxCol = col
+			}
+			got, ok := LastNonzeroColFromEOB(uint8(tx), eob)
+			if !ok || got != maxCol {
+				t.Fatalf("tx=%d eob=%d: got (%d, %v), want (%d, true)", tx, eob, got, ok, maxCol)
+			}
 		}
 	}
 }

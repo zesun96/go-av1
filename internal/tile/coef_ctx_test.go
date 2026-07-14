@@ -263,6 +263,23 @@ func TestIntraCtx(t *testing.T) {
 	}
 }
 
+func TestIntraCtxRespectsTileBoundaries(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fs.TileX0 = 16
+	fs.TileY0 = 16
+	fs.SetBlockState(20, 12, 4, 4, Av1Block{Intra: true})
+	fs.SetBlockState(16, 16, 4, 4, Av1Block{Intra: true})
+
+	// At the tile top edge only the left neighbour is available.
+	if got := intraCtx(fs, 20, 16); got != 2 {
+		t.Fatalf("intraCtx at tile top = %d, want 2", got)
+	}
+	// At the tile origin neither neighbour is available.
+	if got := intraCtx(fs, 16, 16); got != 0 {
+		t.Fatalf("intraCtx at tile origin = %d, want 0", got)
+	}
+}
+
 func TestMaxTxForBlockSize(t *testing.T) {
 	seq420 := &header.SequenceHeader{SsHor: 1, SsVer: 1}
 	if got := maxTxForBlockSize(seq420, 32, 16, 0); got != transform.RTX32x16 {
@@ -333,7 +350,7 @@ func TestGetLoCtx1DReturnsDav1dHiMag(t *testing.T) {
 	}
 }
 
-func TestLastNonzeroColFromEOBUsesPackedX(t *testing.T) {
+func TestLastNonzeroColFromEOBUsesPackedLowCoordinate(t *testing.T) {
 	col0, ok := LastNonzeroColFromEOB(transform.TX4x4, 0)
 	if !ok {
 		t.Fatalf("LastNonzeroColFromEOB TX4x4 missing exact table")
@@ -346,8 +363,8 @@ func TestLastNonzeroColFromEOBUsesPackedX(t *testing.T) {
 	if !ok {
 		t.Fatalf("LastNonzeroColFromEOB TX4x4 missing exact table")
 	}
-	if col1 != 1 {
-		t.Fatalf("TX4x4 eob1 col = %d, want 1", col1)
+	if col1 != 0 {
+		t.Fatalf("TX4x4 eob1 col = %d, want 0", col1)
 	}
 }
 

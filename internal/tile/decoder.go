@@ -535,8 +535,8 @@ func intraCtx(fs *FrameState, bx, by int) int {
 	if fs == nil {
 		return 0
 	}
-	haveTop := by > 0
-	haveLeft := bx > 0
+	haveTop := by > fs.TileY0
+	haveLeft := bx > fs.TileX0
 	topIntra := 0
 	leftIntra := 0
 	if haveTop {

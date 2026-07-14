@@ -198,11 +198,17 @@ func LastNonzeroColFromEOB(tx uint8, eob int) (int, bool) {
 	}
 
 	td := transform.TxfmDimensions[tx]
-	shift := int(td.Lh) + 2
+	height := int(td.H) * 4
+	if height > 32 {
+		height = 32
+	}
+	rowMask := height - 1
 	cols := make([]uint8, len(scan))
 	maxCol := 0
 	for i, rc := range scan {
-		col := int(rc) >> shift
+		// Scan positions are packed as x*height+y. dav1d's first inverse
+		// transform pass calls the low coordinate its "column" limit.
+		col := int(rc) & rowMask
 		if col > maxCol {
 			maxCol = col
 		}

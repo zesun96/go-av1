@@ -4,16 +4,22 @@ import (
 	"github.com/zesun96/go-av1/internal/transform"
 )
 
-// shiftFromTx returns the intermediate shift value for a given transform
-// size, matching dav1d's convention:
-//
-//	shift = max(lw, lh) clamped to [0, 2]
+// txfmShifts mirrors the shift argument in dav1d's inv_txfm_fn table.
+var txfmShifts = [transform.NRectTxSizes]uint8{
+	transform.TX4x4: 0, transform.TX8x8: 1, transform.TX16x16: 2,
+	transform.TX32x32: 2, transform.TX64x64: 2,
+	transform.RTX4x8: 0, transform.RTX8x4: 0,
+	transform.RTX8x16: 1, transform.RTX16x8: 1,
+	transform.RTX16x32: 1, transform.RTX32x16: 1,
+	transform.RTX32x64: 1, transform.RTX64x32: 1,
+	transform.RTX4x16: 1, transform.RTX16x4: 1,
+	transform.RTX8x32: 2, transform.RTX32x8: 2,
+	transform.RTX16x64: 2, transform.RTX64x16: 2,
+}
+
+// shiftFromTx returns the intermediate inverse-transform shift for tx.
 func shiftFromTx(tx uint8) int {
-	max := int(transform.TxfmDimensions[tx].Max)
-	if max > 2 {
-		return 2
-	}
-	return max
+	return int(txfmShifts[tx])
 }
 
 // ReconBlock adds the dequantized + inverse-transformed residual to
