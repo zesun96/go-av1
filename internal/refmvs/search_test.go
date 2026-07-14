@@ -126,6 +126,30 @@ func TestFindSpatialDiagonalDoesNotSetDirectionalMatch(t *testing.T) {
 	}
 }
 
+func TestFindSpatialTallLeftBlockIsNotCountedBySecondaryColumns(t *testing.T) {
+	frame := NewFrame(256, 256)
+	dims := [][2]uint8{{16, 16}, {8, 8}}
+	frame.PutGridBlock(32, 40, 8, 8, Block{Ref: RefPair{1, -1}, BS: 1})
+	frame.PutGridBlock(40, 40, 8, 8, Block{Ref: RefPair{1, -1}, BS: 1})
+	frame.PutGridBlock(16, 48, 16, 16, Block{
+		Ref: RefPair{1, -1}, MV: MVPair{{X: 8}}, BS: 0,
+	})
+
+	r := FindSpatial(SearchConfig{
+		Frame: frame, Ref: 1, Bx4: 32, By4: 48, Bw4: 16, Bh4: 16,
+		TileX1: 64, TileY1: 64, BlockDims: dims,
+	})
+	for i := 0; i < r.Count; i++ {
+		if r.Candidates[i].MV[0].X == 8 {
+			if r.Candidates[i].Weight != 736 {
+				t.Fatalf("tall-left weight=%d want 736", r.Candidates[i].Weight)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing tall-left candidate: %+v", r.Candidates)
+}
+
 func TestFindMergesMatchingSpatialAndTemporal(t *testing.T) {
 	current := NewFrame(32, 32)
 	current.OrderHint, current.OrderBits = 9, 5

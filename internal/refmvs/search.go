@@ -294,18 +294,46 @@ func appendSecondarySpatial(out *SearchResult, cfg SearchConfig) {
 		// match for mode-context derivation.
 		add(cfg.Bx4-1, cfg.By4-1, 4, false, false, false)
 	}
+	leftCoversHeight := false
+	if blk, ok := cfg.Frame.GridBlock(cfg.Bx4-1, cfg.By4); ok {
+		if _, ch, ok := dimsForSearch(cfg, blk); ok {
+			leftCoversHeight = ch >= cfg.Bh4
+		}
+	}
+	topIsNarrower := false
+	if blk, ok := cfg.Frame.GridBlock(cfg.Bx4, cfg.By4-1); ok {
+		if cw, _, ok := dimsForSearch(cfg, blk); ok {
+			topIsNarrower = cw < cfg.Bw4
+		}
+	}
+	// dav1d's direct column scan reports all three covered columns here, so
+	// col-n2/n3 must not count the same tall left block again. Its secondary
+	// row probes cover four 4x4 units rather than the usual single 8x8 probe.
+	asymmetricLargeEdges := cfg.Bw4 == 16 && cfg.Bh4 == 16 && leftCoversHeight && topIsNarrower
+	rowWeight := 4
+	if asymmetricLargeEdges {
+		rowWeight = 16
+	}
 	// dav1d's secondary scan positions are at odd 8x8-resolution offsets.
 	for n := 2; n <= 3; n++ {
 		y4 := (cfg.By4 - 2*n + 1) | 1
 		if y4 >= cfg.TileY0 {
-			add(cfg.Bx4|1, y4, 4, true, false, false)
+			add(cfg.Bx4|1, y4, rowWeight, true, false, false)
 		}
 		x4 := (cfg.Bx4 - 2*n + 1) | 1
-		if x4 >= cfg.TileX0 {
+		if (!asymmetricLargeEdges || !leftCoversHeight) && x4 >= cfg.TileX0 {
 			add(x4, cfg.By4|1, 4, false, true, false)
 		}
 	}
 	SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
+}
+
+func dimsForSearch(cfg SearchConfig, blk Block) (int, int, bool) {
+	if int(blk.BS) >= len(cfg.BlockDims) {
+		return 0, 0, false
+	}
+	d := cfg.BlockDims[blk.BS]
+	return maxSearch(1, int(d[0])), maxSearch(1, int(d[1])), true
 }
 
 func minSearch(a, b int) int {
