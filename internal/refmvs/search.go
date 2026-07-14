@@ -290,7 +290,9 @@ func appendSecondarySpatial(out *SearchResult, cfg SearchConfig) {
 		return true
 	}
 	if cfg.By4 > cfg.TileY0 && cfg.Bx4 > cfg.TileX0 {
-		add(cfg.Bx4-1, cfg.By4-1, 4, true, true, false)
+		// The diagonal contributes a candidate, but it is not a row or column
+		// match for mode-context derivation.
+		add(cfg.Bx4-1, cfg.By4-1, 4, false, false, false)
 	}
 	// dav1d's secondary scan positions are at odd 8x8-resolution offsets.
 	for n := 2; n <= 3; n++ {

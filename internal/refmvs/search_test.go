@@ -108,6 +108,24 @@ func TestFindAppendsTemporalCandidate(t *testing.T) {
 	}
 }
 
+func TestFindSpatialDiagonalDoesNotSetDirectionalMatch(t *testing.T) {
+	frame := NewFrame(32, 32)
+	frame.PutGridBlock(1, 1, 1, 1, Block{
+		Ref: RefPair{1, -1}, MV: MVPair{{Y: 4, X: -2}}, BS: 0,
+	})
+
+	r := FindSpatial(SearchConfig{
+		Frame: frame, Ref: 1, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2,
+		TileX1: 8, TileY1: 8, BlockDims: testBlockDims(),
+	})
+	if r.Count != 1 || r.Candidates[0].MV[0] != (MV{Y: 4, X: -2}) {
+		t.Fatalf("diagonal candidate result = %+v", r)
+	}
+	if r.SecondaryRowMatch || r.SecondaryColMatch {
+		t.Fatalf("diagonal set directional matches: row=%t col=%t", r.SecondaryRowMatch, r.SecondaryColMatch)
+	}
+}
+
 func TestFindMergesMatchingSpatialAndTemporal(t *testing.T) {
 	current := NewFrame(32, 32)
 	current.OrderHint, current.OrderBits = 9, 5

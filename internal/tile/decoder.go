@@ -3827,6 +3827,15 @@ func decodeSingleRefInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 			modeDone(InterModeGlobalMV)
 			return syntax
 		}
+		if os.Getenv("GOAV1_TRACE_REFMV_TRIAL") != "" {
+			for trialCtx := range ctx.RefMVModeCDF {
+				trialMSAC := m.Clone()
+				trialTileCtx := ctx.Clone()
+				trialVal := trialMSAC.BoolAdapt(trialTileCtx.RefMVModeCDF[trialCtx][:])
+				fs.tracef("sym inter_refmv_trial x=%d y=%d ctx=%d val=%d rng=%d",
+					bx, by, trialCtx, trialVal, trialMSAC.State().Range)
+			}
+		}
 		refMV := m.BoolAdapt(ctx.RefMVModeCDF[refMVCtx][:])
 		ms = m.State()
 		fs.tracef("sym inter_refmv x=%d y=%d ctx=%d val=%d rng=%d", bx, by, refMVCtx, refMV, ms.Range)
@@ -4055,8 +4064,8 @@ func singleRefSearch(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, ref
 			y4   int
 		}{{"top", bx >> 2, (by >> 2) - 1}, {"left", (bx >> 2) - 1, by >> 2}, {"top-right", (bx + bw) >> 2, (by >> 2) - 1}} {
 			if blk, ok := fs.MVFrame.GridBlock(probe.x4, probe.y4); ok {
-				fs.tracef("sym refmv_probe x=%d y=%d side=%s target_ref=%d block_ref=%d mv_y=%d mv_x=%d mf=%d",
-					bx, by, probe.name, refFrame, blk.Ref[0], blk.MV[0].Y, blk.MV[0].X, blk.MF)
+				fs.tracef("sym refmv_probe x=%d y=%d side=%s target_ref=%d block_refs=%d,%d mv_y=%d mv_x=%d bs=%d mf=%d",
+					bx, by, probe.name, refFrame, blk.Ref[0], blk.Ref[1], blk.MV[0].Y, blk.MV[0].X, blk.BS, blk.MF)
 			}
 		}
 		for _, probe := range []struct {
@@ -4069,8 +4078,8 @@ func singleRefSearch(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, ref
 			{"row-n3", (bx >> 2) | 1, (((by >> 2) - 5) | 1)},
 			{"col-n3", (((bx >> 2) - 5) | 1), (by >> 2) | 1}} {
 			if blk, ok := fs.MVFrame.GridBlock(probe.x4, probe.y4); ok {
-				fs.tracef("sym refmv_probe x=%d y=%d side=%s target_ref=%d block_ref=%d mv_y=%d mv_x=%d mf=%d",
-					bx, by, probe.name, refFrame, blk.Ref[0], blk.MV[0].Y, blk.MV[0].X, blk.MF)
+				fs.tracef("sym refmv_probe x=%d y=%d side=%s target_ref=%d block_refs=%d,%d mv_y=%d mv_x=%d bs=%d mf=%d",
+					bx, by, probe.name, refFrame, blk.Ref[0], blk.Ref[1], blk.MV[0].Y, blk.MV[0].X, blk.BS, blk.MF)
 			}
 		}
 	}
