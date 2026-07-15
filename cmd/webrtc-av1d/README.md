@@ -1,30 +1,34 @@
 # webrtc-av1d
 
-A WebRTC server that receives AV1 video streamed from a browser, writes the
-raw bitstream to an IVF file, and decodes each frame through the go-av1
-pipeline in real time.
+A WebRTC server that receives AV1 video from a browser camera or shared
+desktop, writes the raw bitstream to IVF, and decodes each frame through the
+go-av1 pipeline in real time.
 
 ## Module isolation
 
-`webrtc-av1d` has its **own `go.mod`** (`github.com/zesun96/go-av1/cmd/webrtc-av1d`)
-so that its [pion/webrtc](https://github.com/pion/webrtc) dependency does not
-propagate to consumers of the core `github.com/zesun96/go-av1` library.
+`webrtc-av1d` has its own `go.mod`
+(`github.com/zesun96/go-av1/cmd/webrtc-av1d`) so its
+[pion/webrtc](https://github.com/pion/webrtc) dependency does not propagate to
+users of the core `github.com/zesun96/go-av1` library.
 
 ## Requirements
 
 - Go 1.22+
-- A browser with AV1 WebRTC encoding support (Chrome 112+, Firefox 113+)
-- [ffplay](https://ffmpeg.org/) (optional, for playback verification)
+- A browser with AV1 WebRTC encoding support (current Chrome or Firefox)
+- `ffplay` (optional, for playback verification)
 
-## Build & run
+Media capture works on `localhost`. Access from another machine normally
+requires serving the page over HTTPS because camera and desktop capture are
+secure-context browser APIs.
+
+## Build and run
 
 ```sh
 cd cmd/webrtc-av1d
 
-# Run directly
 go run . -port 8080 -out output.ivf -yuv output.y4m
 
-# Or build first
+# Or build first.
 go build -o webrtc-av1d .
 ./webrtc-av1d -port 8080 -out output.ivf -yuv output.y4m
 ```
@@ -35,50 +39,47 @@ go build -o webrtc-av1d .
 |---|---|---|
 | `-port` | `8080` | HTTP listen port |
 | `-out` | `output.ivf` | Output IVF file path |
-| `-yuv` | `output.y4m` | Output YUV file path |
+| `-yuv` | `output.y4m` | Decoded Y4M or raw YUV output path |
 
-## Workflow
+## Capture workflow
 
-1. Start the server.
-2. Open `http://localhost:<port>` in Chrome.
-3. Click **Start Stream** — the browser requests camera access, negotiates
-   WebRTC, and begins sending AV1-encoded video.
-4. The server reassembles RTP packets into AV1 temporal units (RFC 9321),
-   writes each unit to the IVF file, and feeds it to the go-av1 decoder.
-5. Click **Stop Stream** (or close the tab) to end the session.
-6. The server prints a summary (`total frames decoded: N`) and exits.
+1. Start the server and open `http://localhost:<port>`.
+2. Select **Camera** and the desired camera, or select **Shared desktop**.
+3. Click **Start stream**. Desktop capture opens the browser's screen, window,
+   or tab picker.
+4. The browser AV1-encodes the selected source and sends it over WebRTC.
+5. The server reassembles RTP packets into AV1 temporal units (RFC 9321), writes
+   IVF, and feeds the units to the go-av1 decoder.
+6. Click **Stop stream**, or use the browser's stop-sharing control, to end the
+   session.
 
-## Play back the recorded file
+The source controls are locked while streaming because Y4M has fixed dimensions
+for the complete file. Stop the current stream before selecting another camera
+or switching between camera and desktop capture.
+
+Camera labels may be hidden until camera permission is granted. The page
+refreshes the device list after permission succeeds and when devices change.
+
+## Playback
 
 ```sh
-# ffplay supports IVF natively
 ffplay output.y4m
 
-# Convert to WebM for VLC / other players (stream copy, lossless)
-ffmpeg -i output.y4m -c:v libaom-av1 -b:v 2M -cpu-used 4 -row-mt 1 -tiles 2x2 output.webm
+# Convert decoded frames to WebM if needed.
+ffmpeg -i output.y4m -c:v libaom-av1 -b:v 2M -cpu-used 4 \
+  -row-mt 1 -tiles 2x2 output.webm
 ```
-
-> **Note:** VLC does not support the IVF container. Use `ffmpeg` to convert
-> to WebM first.
 
 ## HTTP endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | Serves the browser frontend (`static/index.html`) |
-| `POST` | `/offer` | WebRTC SDP signalling — JSON body `{"sdp":"…","type":"offer"}` |
+| `GET` | `/` | Browser capture frontend |
+| `POST` | `/offer` | WebRTC SDP signaling with a JSON offer |
 
-## IVF output format
+## IVF and RTP notes
 
-- **Codec:** AV1 (`AV01` fourcc)
-- **Time base:** 1/30 s per frame (frame-counter PTS)
-- **Container:** minimal IVF (32-byte file header + per-frame 12-byte headers)
-- Each frame payload contains one or more complete AV1 OBUs with
-  `obu_has_size_field=1` as required by the AV1 bitstream specification.
-
-## Protocol notes (RFC 9321)
-
-- **Aggregation header:** Z/Y fragment bits and W element-count field are
-  fully handled; fragmented OBUs are reassembled before writing.
-- **OBU size field:** ensured present (`obu_has_size_field` bit set) on every
-  OBU before writing to the IVF container.
+- IVF codec fourcc: `AV01`
+- Time base: 1/30 second per frame
+- RFC 9321 aggregation and fragmented OBU reassembly are supported
+- OBU size fields are restored before units are written to IVF

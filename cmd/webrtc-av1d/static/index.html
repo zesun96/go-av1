@@ -1,473 +1,374 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WebRTC AV1 Decode Test</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC AV1 Capture</title>
     <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
+        :root {
+            --bg: #0d1110;
+            --panel: #171d1b;
+            --panel-2: #101513;
+            --line: #2c3733;
+            --text: #edf3ef;
+            --muted: #92a09a;
+            --accent: #e3a72f;
+            --accent-dark: #5e4515;
+            --good: #4fc47a;
+            --bad: #ed6a5a;
         }
-
+        * { box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #0f0f0f;
-            color: #e0e0e0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
+            margin: 0;
             min-height: 100vh;
-            padding: 24px 16px;
+            color: var(--text);
+            background: radial-gradient(circle at 12% 8%, rgba(227, 167, 47, .12), transparent 28rem),
+                        linear-gradient(135deg, #0d1110 0%, #101815 55%, #0b0f0e 100%);
+            font-family: "Segoe UI", Tahoma, sans-serif;
         }
-
-        h1 {
-            font-size: 1.5rem;
-            margin-bottom: 8px;
-            color: #fff;
-        }
-
-        .subtitle {
-            font-size: 0.85rem;
-            color: #888;
-            margin-bottom: 24px;
-        }
-
+        main { width: min(900px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0 48px; }
+        header { margin-bottom: 22px; }
+        h1 { margin: 0 0 7px; font-size: clamp(1.55rem, 4vw, 2.35rem); letter-spacing: -.035em; }
+        .subtitle { margin: 0; color: var(--muted); font-size: .9rem; }
         .card {
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-radius: 12px;
-            padding: 20px;
-            width: 100%;
-            max-width: 700px;
             margin-bottom: 16px;
+            padding: 20px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: rgba(23, 29, 27, .94);
+            box-shadow: 0 20px 55px rgba(0, 0, 0, .2);
         }
-
-        .card h2 {
-            font-size: 1rem;
-            color: #aaa;
-            margin-bottom: 12px;
-        }
-
-        video {
-            width: 100%;
+        .card h2 { margin: 0 0 14px; color: #c7d1cc; font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; }
+        .source-grid { display: grid; grid-template-columns: 160px minmax(0, 1fr) auto; gap: 10px; margin-bottom: 14px; }
+        label { display: grid; gap: 6px; color: var(--muted); font-size: .76rem; }
+        select, button {
+            min-height: 40px;
+            border: 1px solid var(--line);
             border-radius: 8px;
-            background: #000;
-            display: block;
+            color: var(--text);
+            background: var(--panel-2);
+            font: inherit;
         }
-
-        .controls {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-top: 14px;
+        select { width: 100%; padding: 0 11px; }
+        select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        button { padding: 0 18px; cursor: pointer; transition: border-color .15s, background .15s, opacity .15s; }
+        button:hover:not(:disabled) { border-color: #65736d; }
+        button:disabled { cursor: not-allowed; opacity: .42; }
+        #btnStart { border-color: #947022; background: var(--accent); color: #171109; font-weight: 700; }
+        #btnStop { border-color: #713b34; background: #39201d; color: #ffc4bb; }
+        #btnRefresh { align-self: end; }
+        .preview-shell {
+            position: relative;
+            overflow: hidden;
+            min-height: 270px;
+            border: 1px solid #27302d;
+            border-radius: 10px;
+            background: #050706;
         }
-
-        button {
-            padding: 9px 22px;
-            border: none;
-            border-radius: 7px;
-            font-size: 0.9rem;
-            cursor: pointer;
-            transition: opacity .15s;
+        video { display: block; width: 100%; min-height: 270px; max-height: 520px; object-fit: contain; }
+        .source-badge {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            padding: 5px 9px;
+            border: 1px solid rgba(255, 255, 255, .16);
+            border-radius: 999px;
+            background: rgba(5, 7, 6, .72);
+            color: #d9e1dd;
+            font-size: .72rem;
+            backdrop-filter: blur(8px);
         }
-
-        button:disabled {
-            opacity: .4;
-            cursor: not-allowed;
-        }
-
-        #btnStart {
-            background: #3b82f6;
-            color: #fff;
-        }
-
-        #btnStop {
-            background: #ef4444;
-            color: #fff;
-        }
-
-        #btnStop:disabled {
-            background: #555;
-        }
-
+        .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
         .status-bar {
             display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 10px 14px;
-            background: #111;
+            gap: 9px;
+            margin-top: 13px;
+            padding: 10px 12px;
             border-radius: 8px;
-            margin-top: 14px;
-            font-size: 0.82rem;
+            background: var(--panel-2);
+            color: var(--muted);
+            font-size: .82rem;
         }
-
-        .dot {
-            width: 9px;
-            height: 9px;
-            border-radius: 50%;
-            background: #555;
-            flex-shrink: 0;
-        }
-
-        .dot.connected {
-            background: #22c55e;
-        }
-
-        .dot.connecting {
-            background: #f59e0b;
-            animation: blink 1s infinite;
-        }
-
-        .dot.failed {
-            background: #ef4444;
-        }
-
-        @keyframes blink {
-
-            0%,
-            100% {
-                opacity: 1
-            }
-
-            50% {
-                opacity: .3
-            }
-        }
-
-        #log {
-            background: #111;
-            border-radius: 8px;
-            padding: 12px;
-            font-size: 0.78rem;
-            font-family: monospace;
-            max-height: 200px;
-            overflow-y: auto;
-            color: #9ca3af;
-            line-height: 1.6;
-        }
-
-        #log .ts {
-            color: #4b5563;
-            margin-right: 6px;
-        }
-
-        #log .info {
-            color: #60a5fa;
-        }
-
-        #log .warn {
-            color: #f59e0b;
-        }
-
-        #log .error {
-            color: #f87171;
-        }
-
-        .codec-list {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            margin-top: 6px;
-        }
-
-        .codec-chip {
-            background: #252525;
-            border: 1px solid #333;
-            border-radius: 5px;
-            padding: 2px 9px;
-            font-size: 0.75rem;
-            color: #aaa;
-        }
-
-        .codec-chip.av1 {
-            border-color: #3b82f6;
-            color: #93c5fd;
-            background: #1e3a5f;
-        }
-
-        .codec-chip.unavail {
-            opacity: .45;
-        }
-
-        .warn-box {
-            background: #2d1b00;
-            border: 1px solid #713f12;
-            border-radius: 8px;
-            padding: 10px 14px;
-            font-size: 0.83rem;
-            color: #fbbf24;
-            margin-top: 12px;
-            display: none;
+        .dot { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #5a6560; }
+        .dot.connected { background: var(--good); box-shadow: 0 0 0 4px rgba(79, 196, 122, .1); }
+        .dot.connecting { background: var(--accent); animation: pulse 1s infinite alternate; }
+        .dot.failed { background: var(--bad); }
+        @keyframes pulse { to { opacity: .35; } }
+        .codec-list { display: flex; flex-wrap: wrap; gap: 7px; }
+        .codec-chip { padding: 4px 9px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: .74rem; }
+        .codec-chip.av1 { border-color: var(--accent-dark); color: #ffd77f; background: #2b2414; }
+        .warn-box { display: none; margin-top: 12px; padding: 10px 12px; border: 1px solid #76551d; border-radius: 8px; color: #ffd77f; background: #29200e; font-size: .82rem; }
+        #log { max-height: 210px; overflow-y: auto; padding: 12px; border-radius: 8px; background: var(--panel-2); color: #aab6b0; font: .78rem/1.6 Consolas, monospace; }
+        #log .ts { margin-right: 7px; color: #63706a; }
+        #log .info { color: #8ebca6; }
+        #log .warn { color: #e7b958; }
+        #log .error { color: #f28d80; }
+        @media (max-width: 680px) {
+            main { width: min(100% - 20px, 900px); padding-top: 20px; }
+            .card { padding: 14px; }
+            .source-grid { grid-template-columns: 1fr; }
+            #btnRefresh { width: 100%; }
+            .preview-shell, video { min-height: 200px; }
         }
     </style>
 </head>
-
 <body>
-
-    <h1>WebRTC AV1 Decode Test</h1>
-    <p class="subtitle">Camera → AV1 encode → WebRTC → server-side decode &amp; save IVF</p>
-
-    <!-- Local Preview -->
-    <div class="card">
-        <h2>Local Preview</h2>
-        <video id="localVideo" autoplay muted playsinline></video>
-
+<main>
+    <header>
+        <h1>WebRTC AV1 Capture</h1>
+        <p class="subtitle">Camera or shared desktop to AV1, decoded and recorded by go-av1</p>
+    </header>
+    <section class="card">
+        <h2>Capture source</h2>
+        <div class="source-grid">
+            <label>Source
+                <select id="sourceType">
+                    <option value="camera">Camera</option>
+                    <option value="display">Shared desktop</option>
+                </select>
+            </label>
+            <label id="cameraField">Camera
+                <select id="cameraSelect"><option value="">Default camera</option></select>
+            </label>
+            <button id="btnRefresh" type="button">Refresh cameras</button>
+        </div>
+        <div class="preview-shell">
+            <video id="localVideo" autoplay muted playsinline></video>
+            <span class="source-badge" id="sourceBadge">Camera</span>
+        </div>
         <div class="controls">
-            <button id="btnStart">Start Stream</button>
-            <button id="btnStop" disabled>Stop Stream</button>
+            <button id="btnStart" type="button">Start stream</button>
+            <button id="btnStop" type="button" disabled>Stop stream</button>
         </div>
-
-        <div class="status-bar">
-            <div class="dot" id="dot"></div>
-            <span id="statusText">Disconnected</span>
-        </div>
-
+        <div class="status-bar"><span class="dot" id="dot"></span><span id="statusText">Disconnected</span></div>
         <div class="warn-box" id="warnBox"></div>
-    </div>
-
-    <!-- Codec Capabilities -->
-    <div class="card">
-        <h2>Browser AV1 Send Capability</h2>
-        <div class="codec-list" id="codecList">Detecting…</div>
-    </div>
-
-    <!-- Log -->
-    <div class="card">
+    </section>
+    <section class="card">
+        <h2>Browser video codecs</h2>
+        <div class="codec-list" id="codecList">Detecting...</div>
+    </section>
+    <section class="card">
         <h2>Log</h2>
         <div id="log"></div>
-    </div>
+    </section>
+</main>
+<script>
+    const sourceType = document.getElementById('sourceType');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const cameraField = document.getElementById('cameraField');
+    const btnRefresh = document.getElementById('btnRefresh');
+    const btnStart = document.getElementById('btnStart');
+    const btnStop = document.getElementById('btnStop');
+    const localVideo = document.getElementById('localVideo');
+    const sourceBadge = document.getElementById('sourceBadge');
+    let pc = null;
+    let localStream = null;
 
-    <script>
-        // ─── Utilities ────────────────────────────────────────────────────────────────
-
-        function ts() {
-            const d = new Date();
-            return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    function timestamp() {
+        const d = new Date();
+        return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    }
+    function escapeHTML(value) {
+        return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function log(message, level = 'info') {
+        const container = document.getElementById('log');
+        const line = document.createElement('div');
+        line.innerHTML = `<span class="ts">${timestamp()}</span><span class="${level}">${escapeHTML(message)}</span>`;
+        container.appendChild(line);
+        container.scrollTop = container.scrollHeight;
+        console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](message);
+    }
+    function setStatus(text, state = '') {
+        document.getElementById('statusText').textContent = text;
+        document.getElementById('dot').className = 'dot' + (state ? ' ' + state : '');
+    }
+    function selectedCameraLabel() {
+        const option = cameraSelect.selectedOptions[0];
+        return option && option.textContent ? option.textContent : 'Camera';
+    }
+    function updateSourceControls() {
+        const camera = sourceType.value === 'camera';
+        cameraField.hidden = !camera;
+        btnRefresh.hidden = !camera;
+        sourceBadge.textContent = camera ? selectedCameraLabel() : 'Shared desktop';
+    }
+    async function refreshCameras() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+            log('Media device enumeration is not supported by this browser', 'warn');
+            return;
         }
-
-        function log(msg, level = 'info') {
-            const el = document.getElementById('log');
-            const line = document.createElement('div');
-            line.innerHTML = `<span class="ts">${ts()}</span><span class="${level}">${escHtml(msg)}</span>`;
-            el.appendChild(line);
-            el.scrollTop = el.scrollHeight;
-            console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](msg);
-        }
-
-        function escHtml(s) {
-            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        }
-
-        function setStatus(text, cls) {
-            document.getElementById('statusText').textContent = text;
-            const dot = document.getElementById('dot');
-            dot.className = 'dot' + (cls ? ' ' + cls : '');
-        }
-
-        // ─── Codec Detection ─────────────────────────────────────────────────────────
-
-        function detectCodecs() {
-            const container = document.getElementById('codecList');
-            container.innerHTML = '';
-
-            if (!RTCRtpSender.getCapabilities) {
-                container.textContent = 'Browser does not support getCapabilities API';
-                return;
-            }
-
-            const caps = RTCRtpSender.getCapabilities('video');
-            if (!caps) {
-                container.textContent = 'Unable to get codec capabilities';
-                return;
-            }
-
-            const codecs = caps.codecs || [];
-            let hasAV1 = false;
-
-            codecs.forEach(c => {
-                const name = c.mimeType.split('/')[1].toUpperCase();
-                const chip = document.createElement('span');
-                chip.className = 'codec-chip';
-                chip.textContent = name + (c.sdpFmtpLine ? ' (' + c.sdpFmtpLine.slice(0, 30) + ')' : '');
-                if (name === 'AV1') {
-                    chip.classList.add('av1');
-                    hasAV1 = true;
-                }
-                container.appendChild(chip);
+        const selected = cameraSelect.value;
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cameras = devices.filter(device => device.kind === 'videoinput');
+            cameraSelect.replaceChildren();
+            const fallback = document.createElement('option');
+            fallback.value = '';
+            fallback.textContent = 'Default camera';
+            cameraSelect.appendChild(fallback);
+            cameras.forEach((camera, index) => {
+                const option = document.createElement('option');
+                option.value = camera.deviceId;
+                option.textContent = camera.label || `Camera ${index + 1}`;
+                cameraSelect.appendChild(option);
             });
-
-            if (!hasAV1) {
-                const warn = document.getElementById('warnBox');
-                warn.textContent = '⚠️ This browser does not support AV1 WebRTC encoding (requires Chrome 112+ or Firefox 113+). The connection will still be established but may negotiate VP8/H264.';
-                warn.style.display = 'block';
-                log('Browser does not support AV1 send; fallback codec will be used', 'warn');
-            } else {
-                log('AV1 send capability detected');
-            }
+            if ([...cameraSelect.options].some(option => option.value === selected)) cameraSelect.value = selected;
+            updateSourceControls();
+            log(`Found ${cameras.length} camera device(s)`);
+        } catch (error) {
+            log('Unable to enumerate cameras: ' + error.message, 'error');
         }
-
-        detectCodecs();
-
-        // ─── WebRTC Streaming ────────────────────────────────────────────────────────
-
-        let pc = null;
-        let localStream = null;
-
-        document.getElementById('btnStart').addEventListener('click', startStream);
-        document.getElementById('btnStop').addEventListener('click', stopStream);
-
-        async function startStream() {
-            document.getElementById('btnStart').disabled = true;
-            setStatus('Accessing camera…', 'connecting');
-
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
-                    audio: false,
-                });
-            } catch (e) {
-                log('Camera access failed: ' + e.message, 'error');
-                setStatus('Camera error', 'failed');
-                document.getElementById('btnStart').disabled = false;
-                return;
-            }
-
-            document.getElementById('localVideo').srcObject = localStream;
-            log('Camera started');
-
-            // Build PeerConnection – only AV1 codec, matching the server.
-            pc = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-            });
-
-            pc.oniceconnectionstatechange = () => {
-                const state = pc.iceConnectionState;
-                log('ICE state: ' + state);
-                if (state === 'connected' || state === 'completed') {
-                    setStatus('Connected', 'connected');
-                } else if (state === 'checking') {
-                    setStatus('Connecting…', 'connecting');
-                } else if (state === 'failed' || state === 'closed') {
-                    setStatus('Disconnected', 'failed');
-                }
+    }
+    function cameraConstraints() {
+        const video = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 60 } };
+        if (cameraSelect.value) video.deviceId = { exact: cameraSelect.value };
+        return { video, audio: false };
+    }
+    async function acquireSelectedSource() {
+        if (!navigator.mediaDevices) throw new Error('Media capture requires HTTPS or localhost');
+        if (sourceType.value === 'display') {
+            if (!navigator.mediaDevices.getDisplayMedia) throw new Error('Desktop sharing is not supported by this browser');
+            return navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30 } }, audio: false });
+        }
+        const stream = await navigator.mediaDevices.getUserMedia(cameraConstraints());
+        await refreshCameras();
+        return stream;
+    }
+    function stopTracks(stream) {
+        if (stream) stream.getTracks().forEach(track => track.stop());
+    }
+    function watchDisplayEnded(stream) {
+        if (sourceType.value !== 'display') return;
+        const track = stream.getVideoTracks()[0];
+        track.addEventListener('ended', () => {
+            if (localStream !== stream) return;
+            log('Desktop sharing was stopped by the browser', 'warn');
+            stopStream();
+        }, { once: true });
+    }
+    function detectCodecs() {
+        const container = document.getElementById('codecList');
+        container.replaceChildren();
+        const caps = RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video');
+        if (!caps) {
+            container.textContent = 'Unable to query browser codec capabilities';
+            return;
+        }
+        let hasAV1 = false;
+        (caps.codecs || []).forEach(codec => {
+            const name = codec.mimeType.split('/')[1].toUpperCase();
+            const chip = document.createElement('span');
+            chip.className = 'codec-chip';
+            chip.textContent = name;
+            if (name === 'AV1') { chip.classList.add('av1'); hasAV1 = true; }
+            container.appendChild(chip);
+        });
+        if (!hasAV1) {
+            const warn = document.getElementById('warnBox');
+            warn.textContent = 'This browser cannot send AV1 over WebRTC. Use a current Chrome or Firefox build.';
+            warn.style.display = 'block';
+            log('AV1 send capability was not detected', 'warn');
+        } else log('AV1 send capability detected');
+    }
+    function preferAV1(sender) {
+        const caps = RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video');
+        if (!caps) return;
+        const av1 = caps.codecs.filter(codec => codec.mimeType.toLowerCase() === 'video/av1');
+        const others = caps.codecs.filter(codec => codec.mimeType.toLowerCase() !== 'video/av1');
+        const transceiver = pc.getTransceivers().find(item => item.sender === sender);
+        if (transceiver && transceiver.setCodecPreferences) {
+            transceiver.setCodecPreferences([...av1, ...others]);
+            log('AV1 codec preference set');
+        }
+    }
+    function waitForGatheringComplete(connection) {
+        return new Promise(resolve => {
+            if (connection.iceGatheringState === 'complete') return resolve();
+            const handler = () => {
+                if (connection.iceGatheringState !== 'complete') return;
+                connection.removeEventListener('icegatheringstatechange', handler);
+                resolve();
             };
-
-            pc.onconnectionstatechange = () => {
-                log('Connection state: ' + pc.connectionState);
-            };
-
-            // Add video track.
+            connection.addEventListener('icegatheringstatechange', handler);
+            setTimeout(resolve, 8000);
+        });
+    }
+    async function startStream() {
+        btnStart.disabled = true;
+        sourceType.disabled = true;
+        cameraSelect.disabled = true;
+        setStatus('Requesting capture permission...', 'connecting');
+        try {
+            localStream = await acquireSelectedSource();
             const videoTrack = localStream.getVideoTracks()[0];
+            if (!videoTrack) throw new Error('Selected source did not provide a video track');
+            localVideo.srcObject = localStream;
+            watchDisplayEnded(localStream);
+            updateSourceControls();
+            log('Capture started: ' + sourceBadge.textContent);
+            pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            pc.oniceconnectionstatechange = () => {
+                const state = pc && pc.iceConnectionState;
+                if (!state) return;
+                log('ICE state: ' + state);
+                if (state === 'connected' || state === 'completed') setStatus('Connected', 'connected');
+                else if (state === 'checking') setStatus('Connecting...', 'connecting');
+                else if (state === 'failed' || state === 'closed') setStatus('Disconnected', 'failed');
+            };
+            pc.onconnectionstatechange = () => pc && log('Connection state: ' + pc.connectionState);
             const sender = pc.addTrack(videoTrack, localStream);
-
-            // Prefer AV1 codec if available.
             preferAV1(sender);
-
-            // ICE gathering – trickle=false: wait for all candidates.
-            setStatus('SDP negotiating…', 'connecting');
-
-            const offerOptions = { offerToReceiveVideo: false, offerToReceiveAudio: false };
-            const offer = await pc.createOffer(offerOptions);
+            const offer = await pc.createOffer({ offerToReceiveVideo: false, offerToReceiveAudio: false });
             await pc.setLocalDescription(offer);
-
-            // Wait for ICE gathering to finish.
             await waitForGatheringComplete(pc);
-
-            log('Sending Offer SDP…');
-            let resp;
-            try {
-                resp = await fetch('/offer', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
-                });
-            } catch (e) {
-                log('Signaling request failed: ' + e.message, 'error');
-                setStatus('Signaling failed', 'failed');
-                document.getElementById('btnStart').disabled = false;
-                return;
-            }
-
-            if (!resp.ok) {
-                const text = await resp.text();
-                log('Server error: ' + text, 'error');
-                setStatus('Server error', 'failed');
-                document.getElementById('btnStart').disabled = false;
-                return;
-            }
-
-            const answer = await resp.json();
-            log('Answer SDP received');
-            await pc.setRemoteDescription(new RTCSessionDescription(answer));
-
-            document.getElementById('btnStop').disabled = false;
-            log('WebRTC connected, streaming started');
-        }
-
-        function stopStream() {
-            log('Stopping stream');
-            if (pc) {
-                pc.close();
-                pc = null;
-            }
-            if (localStream) {
-                localStream.getTracks().forEach(t => t.stop());
-                localStream = null;
-                document.getElementById('localVideo').srcObject = null;
-            }
-            setStatus('Disconnected');
-            document.getElementById('btnStart').disabled = false;
-            document.getElementById('btnStop').disabled = true;
-        }
-
-        // preferAV1 reorders codec preferences so AV1 comes first.
-        function preferAV1(sender) {
-            if (!RTCRtpSender.getCapabilities) return;
-            const caps = RTCRtpSender.getCapabilities('video');
-            if (!caps) return;
-
-            const av1Codecs = caps.codecs.filter(c => c.mimeType.toLowerCase() === 'video/av1');
-            const others = caps.codecs.filter(c => c.mimeType.toLowerCase() !== 'video/av1');
-            const ordered = [...av1Codecs, ...others];
-
-            try {
-                const params = sender.getParameters();
-                // setCodecPreferences is on transceiver, not sender.
-                const transceivers = pc.getTransceivers();
-                for (const tc of transceivers) {
-                    if (tc.sender === sender && tc.setCodecPreferences) {
-                        tc.setCodecPreferences(ordered);
-                        log('AV1 codec preference set');
-                        break;
-                    }
-                }
-            } catch (e) {
-                log('setCodecPreferences failed: ' + e.message, 'warn');
-            }
-        }
-
-        // waitForGatheringComplete returns a promise that resolves when ICE gathering is done.
-        function waitForGatheringComplete(pc) {
-            return new Promise(resolve => {
-                if (pc.iceGatheringState === 'complete') {
-                    resolve();
-                    return;
-                }
-                const handler = () => {
-                    if (pc.iceGatheringState === 'complete') {
-                        pc.removeEventListener('icegatheringstatechange', handler);
-                        resolve();
-                    }
-                };
-                pc.addEventListener('icegatheringstatechange', handler);
-                // Fallback timeout.
-                setTimeout(resolve, 8000);
+            const response = await fetch('/offer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
             });
+            if (!response.ok) throw new Error(await response.text());
+            await pc.setRemoteDescription(new RTCSessionDescription(await response.json()));
+            btnStop.disabled = false;
+            setStatus('Connected', 'connected');
+            log('WebRTC connected; AV1 streaming started');
+        } catch (error) {
+            log('Unable to start stream: ' + error.message, 'error');
+            stopStream();
+            setStatus('Capture failed', 'failed');
+        } finally {
+            const connected = Boolean(pc);
+            sourceType.disabled = connected;
+            cameraSelect.disabled = connected;
+            btnRefresh.disabled = connected;
+            btnStart.disabled = connected;
         }
-    </script>
-</body>
+    }
+    function stopStream() {
+        if (pc || localStream) log('Stopping stream');
+        if (pc) pc.close();
+        pc = null;
+        stopTracks(localStream);
+        localStream = null;
+        localVideo.srcObject = null;
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        sourceType.disabled = false;
+        cameraSelect.disabled = false;
+        btnRefresh.disabled = false;
+        setStatus('Disconnected');
+    }
 
+    sourceType.addEventListener('change', updateSourceControls);
+    cameraSelect.addEventListener('change', updateSourceControls);
+    btnRefresh.addEventListener('click', refreshCameras);
+    btnStart.addEventListener('click', startStream);
+    btnStop.addEventListener('click', stopStream);
+    if (navigator.mediaDevices) navigator.mediaDevices.addEventListener('devicechange', refreshCameras);
+    updateSourceControls();
+    detectCodecs();
+    refreshCameras();
+</script>
+</body>
 </html>
