@@ -53,6 +53,9 @@ go build -o webrtc-av1d .
 6. Click **Stop stream**, or use the browser's stop-sharing control, to end the
    session.
 
+When the track ends, the server finalizes and closes both output files. Wait for
+the `YUV output finalized` log entry before opening the completed Y4M file.
+
 The source controls are locked while streaming because Y4M has fixed dimensions
 for the complete file. Stop the current stream before selecting another camera
 or switching between camera and desktop capture.
@@ -80,6 +83,9 @@ ffmpeg -i output.y4m -c:v libaom-av1 -b:v 2M -cpu-used 4 \
 ## IVF and RTP notes
 
 - IVF codec fourcc: `AV01`
-- Time base: 1/30 second per frame
+- IVF uses WebRTC's 90 kHz video RTP clock and preserves each temporal unit's
+  RTP presentation timestamp
+- Y4M has no per-frame timestamps, so its fixed frame-rate header is finalized
+  from the first and last RTP timestamps to preserve the recording duration
 - RFC 9321 aggregation and fragmented OBU reassembly are supported
 - OBU size fields are restored before units are written to IVF

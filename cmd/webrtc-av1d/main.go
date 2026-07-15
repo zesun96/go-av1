@@ -241,6 +241,8 @@ func (s *server) handleOffer(w http.ResponseWriter, r *http.Request) {
 // OBUs per RFC 9321, ensures every OBU carries a size field, writes the
 // resulting temporal units to the IVF file, and feeds them to the decoder.
 func (s *server) consumeAV1Track(track *webrtc.TrackRemote) {
+	defer s.closeTrackOutputs()
+
 	var (
 		tuBuf      []byte // complete OBUs for the current temporal unit
 		fragBuf    []byte // ongoing fragmented OBU (header from first fragment + payload chunks)
@@ -358,12 +360,14 @@ func (s *server) consumeAV1Track(track *webrtc.TrackRemote) {
 			tuBuf = append(tuBuf, ensureOBUSizeField(elemData)...)
 		}
 
-		rtpTS := uint64(pkt.Timestamp)
+		rtpTS := pkt.Timestamp
 		if !ptsBaseSet {
-			ptsBase = rtpTS
+			ptsBase = uint64(rtpTS)
 			ptsBaseSet = true
 		}
-		pts = rtpTS - ptsBase // normalize to start from 0
+		// RTP timestamps wrap at 32 bits. Subtraction in uint32 space keeps
+		// the normalized timestamp correct across that wrap boundary.
+		pts = uint64(rtpTS - uint32(ptsBase))
 
 		// Marker bit = end of temporal unit.
 		if pkt.Marker {
@@ -389,6 +393,23 @@ func (s *server) consumeAV1Track(track *webrtc.TrackRemote) {
 	}
 
 	log.Printf("track ended, total frames decoded: %d", atomic.LoadInt64(&s.frameCount))
+}
+
+func (s *server) closeTrackOutputs() {
+	if s.yuv != nil {
+		written := s.yuv.Written()
+		if err := s.yuv.Close(); err != nil {
+			log.Printf("yuv close: %v", err)
+		} else if written > 0 {
+			log.Printf("YUV output finalized: %s", s.yuv.path)
+		}
+	}
+	written := s.ivfw.Written()
+	if err := s.ivfw.Close(); err != nil {
+		log.Printf("ivf close: %v", err)
+	} else if written > 0 {
+		log.Printf("IVF output finalized: %s", s.ivfw.path)
+	}
 }
 
 // processTemporalUnit writes one temporal unit to the IVF file and feeds it
@@ -423,7 +444,7 @@ func (s *server) processTemporalUnit(payload []byte, pts uint64) {
 
 		// Save to YUV file if requested.
 		if s.yuv != nil {
-			if err := s.yuv.WriteFrame(pic); err != nil {
+			if err := s.yuv.WriteFrame(pic, pts); err != nil {
 				log.Printf("yuv write: %v", err)
 			}
 		}
@@ -530,19 +551,19 @@ func leb128(b []byte) (uint64, int) {
 // the width/height until we receive data.  We use placeholder 0/0 since the
 // IVF muxer header is informational only.
 //
-// Time base: we write num=1, den=30 (30 fps) and use a monotonically
-// increasing frame counter as PTS so that ffplay computes the correct
-// frame duration (1/30 s) and plays the video at the right speed.
+// WebRTC video RTP timestamps use a 90 kHz clock. Keeping those timestamps in
+// IVF preserves the capture timing, including variable-rate desktop sharing.
 type ivfWriter struct {
-	path     string
-	mu       sync.Mutex
-	f        *os.File
-	frameSeq uint64
+	path    string
+	mu      sync.Mutex
+	f       *os.File
+	written uint64
 }
 
 const (
 	ivfFileHeaderSize  = 32
 	ivfFrameHeaderSize = 12
+	rtpVideoClock      = 90000
 )
 
 // ensureOpen opens the file and writes the IVF file header once.
@@ -561,8 +582,8 @@ func (w *ivfWriter) ensureOpen() error {
 	copy(hdr[8:12], "AV01")                                    // fourcc
 	binary.LittleEndian.PutUint16(hdr[12:14], 0)               // width (placeholder)
 	binary.LittleEndian.PutUint16(hdr[14:16], 0)               // height (placeholder)
-	binary.LittleEndian.PutUint32(hdr[16:20], 1)               // timebase num  (1/30 s per frame)
-	binary.LittleEndian.PutUint32(hdr[20:24], 30)              // timebase den  (30 fps)
+	binary.LittleEndian.PutUint32(hdr[16:20], rtpVideoClock)   // frame-rate numerator
+	binary.LittleEndian.PutUint32(hdr[20:24], 1)               // frame-rate denominator
 	binary.LittleEndian.PutUint32(hdr[24:28], 0)               // frame count (unknown)
 	binary.LittleEndian.PutUint32(hdr[28:32], 0)               // reserved
 	if _, err := f.Write(hdr[:]); err != nil {
@@ -575,9 +596,7 @@ func (w *ivfWriter) ensureOpen() error {
 }
 
 // WriteFrame appends one temporal unit to the IVF file.
-// pts is ignored; we use the internal frame counter so that
-// ffplay sees a clean 0,1,2,… sequence at the declared 30 fps.
-func (w *ivfWriter) WriteFrame(payload []byte, _ uint64) error {
+func (w *ivfWriter) WriteFrame(payload []byte, pts uint64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -587,7 +606,7 @@ func (w *ivfWriter) WriteFrame(payload []byte, _ uint64) error {
 
 	var rec [ivfFrameHeaderSize]byte
 	binary.LittleEndian.PutUint32(rec[0:4], uint32(len(payload)))
-	binary.LittleEndian.PutUint64(rec[4:12], w.frameSeq) // PTS = frame index
+	binary.LittleEndian.PutUint64(rec[4:12], pts)
 
 	if _, err := w.f.Write(rec[:]); err != nil {
 		return err
@@ -595,7 +614,7 @@ func (w *ivfWriter) WriteFrame(payload []byte, _ uint64) error {
 	if _, err := w.f.Write(payload); err != nil {
 		return err
 	}
-	w.frameSeq++
+	w.written++
 	return nil
 }
 
@@ -606,9 +625,25 @@ func (w *ivfWriter) Close() error {
 	if w.f == nil {
 		return nil
 	}
-	err := w.f.Close()
+	var finalizeErr error
+	if _, err := w.f.Seek(24, io.SeekStart); err != nil {
+		finalizeErr = err
+	} else {
+		var count [4]byte
+		binary.LittleEndian.PutUint32(count[:], uint32(w.written))
+		_, finalizeErr = w.f.Write(count[:])
+	}
+	syncErr := w.f.Sync()
+	closeErr := w.f.Close()
 	w.f = nil
-	return err
+	w.written = 0
+	return errors.Join(finalizeErr, syncErr, closeErr)
+}
+
+func (w *ivfWriter) Written() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.written
 }
 
 // ─── YUV writer ──────────────────────────────────────────────────────────────
@@ -626,12 +661,17 @@ func (w *ivfWriter) Close() error {
 // Each frame is written as packed rows (stride padding is stripped) in
 // Y-then-U-then-V order, in 4:2:0 layout.
 type yuvWriter struct {
-	path   string
-	mu     sync.Mutex
-	f      *os.File
-	isY4M  bool // true if output uses YUV4MPEG2 container
-	headOK bool // true after Y4M stream header has been emitted
-	wrote  int  // number of frames written so far
+	path     string
+	mu       sync.Mutex
+	f        *os.File
+	isY4M    bool // true if output uses YUV4MPEG2 container
+	headOK   bool // true after Y4M stream header has been emitted
+	wrote    int  // number of frames written so far
+	firstPTS uint64
+	lastPTS  uint64
+	ptsSet   bool
+	width    int
+	height   int
 }
 
 func (w *yuvWriter) ensureOpen() error {
@@ -651,7 +691,7 @@ func (w *yuvWriter) ensureOpen() error {
 // WriteFrame writes one decoded picture, stripping any stride alignment
 // padding so each row is exactly Width (or ChromaWidth) bytes wide.
 // For Y4M output, the first call also emits the stream header.
-func (w *yuvWriter) WriteFrame(pic *av1.Picture) error {
+func (w *yuvWriter) WriteFrame(pic *av1.Picture, pts uint64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -660,16 +700,21 @@ func (w *yuvWriter) WriteFrame(pic *av1.Picture) error {
 	}
 
 	if w.isY4M && !w.headOK {
-		// Hard-coded 30 fps to match webrtc-av1d's IVF timebase. Aspect 1:1,
-		// progressive frames, 4:2:0 chroma — common defaults that ffplay
-		// accepts without further hints.
-		hdr := fmt.Sprintf("YUV4MPEG2 W%d H%d F30:1 Ip A1:1 C420\n",
-			pic.Width, pic.Height)
+		// Y4M only supports a constant frame rate. Use a fixed-width field so
+		// Close can replace this initial value with the observed average rate.
+		hdr := y4mHeader(pic.Width, pic.Height, 30, 1)
 		if _, err := w.f.WriteString(hdr); err != nil {
 			return err
 		}
 		w.headOK = true
+		w.width = pic.Width
+		w.height = pic.Height
 	}
+	if !w.ptsSet {
+		w.firstPTS = pts
+		w.ptsSet = true
+	}
+	w.lastPTS = pts
 	if w.isY4M {
 		if _, err := w.f.WriteString("FRAME\n"); err != nil {
 			return err
@@ -722,9 +767,50 @@ func (w *yuvWriter) Close() error {
 	if w.f == nil {
 		return nil
 	}
-	err := w.f.Close()
+	var finalizeErr error
+	if w.isY4M && w.headOK && w.wrote > 1 && w.lastPTS > w.firstPTS {
+		num := uint64(w.wrote-1) * rtpVideoClock
+		den := w.lastPTS - w.firstPTS
+		divisor := gcd64(num, den)
+		num /= divisor
+		den /= divisor
+		if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+			finalizeErr = err
+		} else if _, err := w.f.WriteString(y4mHeader(w.width, w.height, num, den)); err != nil {
+			finalizeErr = err
+		} else {
+			log.Printf("Y4M timing: %d frames, %d/%d fps, %.3f seconds",
+				w.wrote, num, den, float64(w.lastPTS-w.firstPTS)/rtpVideoClock)
+		}
+	}
+	syncErr := w.f.Sync()
+	closeErr := w.f.Close()
 	w.f = nil
-	return err
+	w.isY4M = false
+	w.headOK = false
+	w.wrote = 0
+	w.ptsSet = false
+	w.width = 0
+	w.height = 0
+	return errors.Join(finalizeErr, syncErr, closeErr)
+}
+
+func (w *yuvWriter) Written() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.wrote
+}
+
+func y4mHeader(width, height int, fpsNum, fpsDen uint64) string {
+	return fmt.Sprintf("YUV4MPEG2 W%d H%d F%010d:%010d Ip A1:1 C420\n",
+		width, height, fpsNum, fpsDen)
+}
+
+func gcd64(a, b uint64) uint64 {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
 }
 
 // ─── Pixel verification helper ───────────────────────────────────────────────
