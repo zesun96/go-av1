@@ -4331,17 +4331,18 @@ func ref2Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 }
 
 func ref3Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
-	cnt := [3]int{}
+	cnt := [4]int{}
 	forEachNeighbourRef(fs, fhdr, bx, by, func(ref int) {
-		if ref >= 0 && ref <= 2 {
+		if ref >= 0 && ref < 4 {
 			cnt[ref]++
 		}
 	})
-	cnt[1] += cnt[2]
-	if cnt[0] == cnt[1] {
+	cnt[0] += cnt[1]
+	cnt[2] += cnt[3]
+	if cnt[0] == cnt[2] {
 		return 1
 	}
-	if cnt[0] < cnt[1] {
+	if cnt[0] < cnt[2] {
 		return 0
 	}
 	return 2
@@ -4960,20 +4961,18 @@ func applyNeighbourGridMV(st *interState, fs *FrameState, fb *FrameBuf, fhdr *he
 	if !ok || blk.Ref[0] <= 0 {
 		return false
 	}
-	gridRefSlot, okRef := frameRefSlot(fhdr, int(blk.Ref[0]))
-	if !okRef || gridRefSlot < 0 || gridRefSlot >= len(fb.Refs) || fb.Refs[gridRefSlot] == nil {
-		return false
-	}
-	st.mv = blk.MV[0]
-	st.refSlot = gridRefSlot
-	st.refFrame = int(blk.Ref[0])
-	st.ref = fb.Refs[gridRefSlot]
-	for i, idx := range fhdr.Refidx {
-		if int(idx) == st.refSlot {
-			st.refOrder = i
+	mvIdx := -1
+	for i, refFrame := range blk.Ref {
+		if int(refFrame) == st.refFrame {
+			mvIdx = i
 			break
 		}
 	}
+	if mvIdx < 0 || st.refSlot < 0 || st.refSlot >= len(fb.Refs) || fb.Refs[st.refSlot] == nil {
+		return false
+	}
+	st.mv = blk.MV[mvIdx]
+	st.interMode = InterModeNearestMV
 	return true
 }
 
@@ -5102,10 +5101,13 @@ func resolveSingleRefMotion(st *interState, fs *FrameState, fb *FrameBuf, fhdr *
 	if st.mv == (refmvs.MV{}) && applyCandidateInterMotion(st, fs, fb, fhdr, bx, by, syntax.bw, syntax.bh, syntax.modeHint, syntax.drlIdx) {
 		return
 	}
-	if st.mv == (refmvs.MV{}) && applyNeighbourGridMV(st, fs, fb, fhdr, bx, by) {
+	if !syntax.hasRef && st.mv == (refmvs.MV{}) && applyNeighbourGridMV(st, fs, fb, fhdr, bx, by) {
 		return
 	}
-	if st.mv == (refmvs.MV{}) && fs != nil && !st.skipMode {
+	// Legacy callers without decoded reference syntax may select a neighbouring
+	// reference as a best-effort fallback. A bitstream-selected reference must
+	// never be replaced merely because its normative MV stack is empty.
+	if !syntax.hasRef && st.mv == (refmvs.MV{}) && fs != nil && !st.skipMode {
 		if neighMV, ok := fs.NeighbourInterMV(bx, by); ok {
 			st.mv = neighMV
 			st.interMode = InterModeNearestMV

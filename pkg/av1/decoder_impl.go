@@ -728,9 +728,6 @@ func (d *decoderImpl) applyCDEF(pic *Picture, fhdr *header.FrameHeader) {
 }
 
 func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader, fs *tile.FrameState) {
-	if fhdr.CDEF.NBits == 0 {
-		return // CDEF disabled
-	}
 	damping := int(fhdr.CDEF.Damping)
 	dirW := (pic.Width + 7) / 8
 	dirH := (pic.Height + 7) / 8
@@ -851,8 +848,8 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 					variances[dirIdx] = variance
 				}
 				priStrength = adjustCDEFStrength(priStrength, variance)
-			} else if dirIdx >= 0 && dirIdx < len(dirs) {
-				dir = int(dirs[dirIdx])
+			} else {
+				dir = chromaCDEFDirection(priStrength, dirIdx, dirs)
 			}
 			for y := 0; y < bh; y++ {
 				copy(work[(by+y)*stride+bx:(by+y)*stride+bx+bw], src[(by+y)*stride+bx:(by+y)*stride+bx+bw])
@@ -871,6 +868,14 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			}
 		}
 	}
+}
+
+func chromaCDEFDirection(priStrength, dirIdx int, dirs []uint8) int {
+	// dav1d passes direction zero for secondary-only chroma filtering.
+	if priStrength == 0 || dirIdx < 0 || dirIdx >= len(dirs) {
+		return 0
+	}
+	return int(dirs[dirIdx])
 }
 
 func cdefBlockHasNonSkip(fs *tile.FrameState, bx, by, bw, bh, planeID int) bool {

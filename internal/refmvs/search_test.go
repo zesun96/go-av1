@@ -226,8 +226,53 @@ func TestFindWithoutOrderHintsKeepsGlobalMVContextZero(t *testing.T) {
 	}
 }
 
+func TestFindExtendsSingleReferenceStackFromDifferentReference(t *testing.T) {
+	frame := NewFrame(640, 480)
+	frame.OrderHint, frame.OrderBits = 10, 5
+	frame.RefFrameOrderHints[0] = 9 // LAST and GOLDEN are both in the past.
+	frame.RefFrameOrderHints[3] = 7
+	frame.PutGridBlock(120, 48, 4, 4, Block{
+		Ref: RefPair{1, -1}, MV: MVPair{{Y: -64}}, BS: 12,
+	})
+
+	got := Find(SearchConfig{
+		Frame: frame, Ref: 4, Bx4: 120, By4: 52, Bw4: 4, Bh4: 4,
+		TileX1: 160, TileY1: 120, BlockDims: testFullBlockDims(),
+	})
+	if got.Count != 1 || got.Candidates[0].MV[0] != (MV{Y: -64}) || got.Candidates[0].Weight != 2 {
+		t.Fatalf("extended candidates=%+v count=%d", got.Candidates, got.Count)
+	}
+}
+
+func TestFindExtendedCandidateFlipsAcrossReferenceDirections(t *testing.T) {
+	frame := NewFrame(32, 32)
+	frame.OrderHint, frame.OrderBits = 10, 5
+	frame.RefFrameOrderHints[0] = 9  // LAST is in the past.
+	frame.RefFrameOrderHints[4] = 12 // BWDREF is in the future.
+	frame.PutGridBlock(2, 0, 2, 2, Block{
+		Ref: RefPair{1, -1}, MV: MVPair{{Y: -16, X: 8}}, BS: 17,
+	})
+
+	got := Find(SearchConfig{
+		Frame: frame, Ref: 5, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2,
+		TileX1: 8, TileY1: 8, BlockDims: testFullBlockDims(),
+	})
+	if got.Count != 1 || got.Candidates[0].MV[0] != (MV{Y: 16, X: -8}) {
+		t.Fatalf("direction-adjusted candidates=%+v count=%d", got.Candidates, got.Count)
+	}
+}
+
 func testBlockDims() [][2]uint8 {
 	return [][2]uint8{{1, 1}, {2, 1}}
+}
+
+func testFullBlockDims() [][2]uint8 {
+	return [][2]uint8{
+		{32, 32}, {32, 16}, {16, 32}, {16, 16}, {16, 8}, {16, 4},
+		{8, 16}, {8, 8}, {8, 4}, {8, 2}, {4, 16}, {4, 8}, {4, 4},
+		{4, 2}, {4, 1}, {2, 8}, {2, 4}, {2, 2}, {2, 1}, {1, 4},
+		{1, 2}, {1, 1},
+	}
 }
 
 func projectTestSource(current, source *Frame, slot int) {

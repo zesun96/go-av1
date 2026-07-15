@@ -35,21 +35,87 @@ func Find(cfg SearchConfig) SearchResult {
 	// dav1d initializes globalmv_ctx from use_ref_frame_mvs. Without order
 	// hints temporal projection is disabled, so the context remains zero even
 	// when a decoded reference picture is available.
-	if cfg.TemporalSource == nil || cfg.TargetSlot < 0 || cfg.Frame == nil || cfg.Frame.OrderBits == 0 {
-		return out
+	if cfg.TemporalSource != nil && cfg.TargetSlot >= 0 && cfg.Frame != nil && cfg.Frame.OrderBits != 0 {
+		out.GlobalMVContext = 1
+		temporal := temporalCandidates(cfg)
+		if len(temporal) > 0 {
+			dx := absSearch(int(temporal[0].X) - int(cfg.GlobalMV.X))
+			dy := absSearch(int(temporal[0].Y) - int(cfg.GlobalMV.Y))
+			out.GlobalMVContext = boolSearch(dx|dy >= 16)
+		}
+		for _, mv := range temporal {
+			out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, 2)
+		}
+		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
 	}
-	out.GlobalMVContext = 1
-	temporal := temporalCandidates(cfg)
-	if len(temporal) > 0 {
-		dx := absSearch(int(temporal[0].X) - int(cfg.GlobalMV.X))
-		dy := absSearch(int(temporal[0].Y) - int(cfg.GlobalMV.Y))
-		out.GlobalMVContext = boolSearch(dx|dy >= 16)
-	}
-	for _, mv := range temporal {
-		out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, 2)
-	}
-	SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
+	appendSingleExtendedCandidates(&out, cfg)
 	return out
+}
+
+// appendSingleExtendedCandidates mirrors dav1d's non-self-reference fallback.
+// When fewer than two candidates match the requested logical reference, MVs
+// from the nearest top and left blocks are reused, reversing their direction
+// when the source and target references lie on opposite sides of this frame.
+func appendSingleExtendedCandidates(out *SearchResult, cfg SearchConfig) {
+	if out == nil || out.Count >= 2 || cfg.Frame == nil || cfg.Ref <= 0 || cfg.Ref2 > 0 {
+		return
+	}
+	w4 := minSearch(minSearch(cfg.Bw4, 16), cfg.Frame.IW4-cfg.Bx4)
+	h4 := minSearch(minSearch(cfg.Bh4, 16), cfg.Frame.IH4-cfg.By4)
+	sz4 := minSearch(w4, h4)
+	if sz4 <= 0 {
+		return
+	}
+	targetSign := referenceSignBias(cfg.Frame, cfg.Ref)
+	addBlock := func(blk Block) {
+		for n := 0; n < 2 && out.Count < 2; n++ {
+			candRef := blk.Ref[n]
+			if candRef <= 0 {
+				break
+			}
+			mv := blk.MV[n]
+			if targetSign != referenceSignBias(cfg.Frame, candRef) {
+				mv.Y = -mv.Y
+				mv.X = -mv.X
+			}
+			out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, 2)
+		}
+	}
+	if cfg.By4 > cfg.TileY0 {
+		for x := 0; x < sz4 && out.Count < 2; {
+			blk, ok := cfg.Frame.GridBlock(cfg.Bx4+x, cfg.By4-1)
+			if !ok {
+				break
+			}
+			addBlock(blk)
+			bw, _, ok := dimsForSearch(cfg, blk)
+			if !ok {
+				break
+			}
+			x += bw
+		}
+	}
+	if cfg.Bx4 > cfg.TileX0 {
+		for y := 0; y < sz4 && out.Count < 2; {
+			blk, ok := cfg.Frame.GridBlock(cfg.Bx4-1, cfg.By4+y)
+			if !ok {
+				break
+			}
+			addBlock(blk)
+			_, bh, ok := dimsForSearch(cfg, blk)
+			if !ok {
+				break
+			}
+			y += bh
+		}
+	}
+}
+
+func referenceSignBias(frame *Frame, ref int8) bool {
+	if frame == nil || ref <= 0 || int(ref) > len(frame.RefFrameOrderHints) || frame.OrderBits == 0 {
+		return false
+	}
+	return RelativeDist(frame.RefFrameOrderHints[ref-1], frame.OrderHint, frame.OrderBits) > 0
 }
 
 func temporalCandidates(cfg SearchConfig) []MV {

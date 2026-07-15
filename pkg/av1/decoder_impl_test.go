@@ -247,6 +247,33 @@ func TestCDEFBlockHasNonSkip(t *testing.T) {
 	}
 }
 
+func TestChromaCDEFDirectionSecondaryOnlyIsZero(t *testing.T) {
+	dirs := []uint8{6}
+	if got := chromaCDEFDirection(0, 0, dirs); got != 0 {
+		t.Fatalf("secondary-only chroma direction=%d want 0", got)
+	}
+	if got := chromaCDEFDirection(1, 0, dirs); got != 6 {
+		t.Fatalf("primary chroma direction=%d want 6", got)
+	}
+}
+
+func TestCDEFZeroIndexBitsStillUsesPresetZero(t *testing.T) {
+	pic := &Picture{Width: 8, Height: 8, StrideY: 8, Chroma: ChromaMonochrome}
+	pic.Y = make([]byte, 64)
+	for i := range pic.Y {
+		pic.Y[i] = 100
+	}
+	pic.Y[4*8+4] = 104
+	before := append([]byte(nil), pic.Y...)
+	fhdr := &header.FrameHeader{CDEF: header.FrameHeaderCDEF{
+		NBits: 0, Damping: 3, YStrength: [header.MaxCDEFStrengths]uint8{35},
+	}}
+	(&decoderImpl{}).applyCDEF(pic, fhdr)
+	if bytes.Equal(pic.Y, before) {
+		t.Fatal("CDEF preset zero was ignored when NBits is zero")
+	}
+}
+
 func loopFilterTestPicture() *Picture {
 	p := &Picture{Width: 8, Height: 8, StrideY: 8, StrideUV: 4, Chroma: Chroma420}
 	p.Y = make([]byte, 64)

@@ -963,3 +963,53 @@ func TestDeriveSingleRefInterSyntaxPrefersTopThenLeft(t *testing.T) {
 		t.Fatalf("syntax.modeHint=%d want ref", syntax.modeHint)
 	}
 }
+
+func TestApplyNeighbourGridMVKeepsDecodedReference(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.MVFrame = refmvs.NewFrame(32, 32)
+	fb := &FrameBuf{}
+	fb.Refs[6] = &PlaneBuf{Y: make([]byte, 32*32), StrideY: 32, Width: 32, Height: 32}
+	fh := &header.FrameHeader{}
+	st := interState{refSlot: 6, refFrame: 4, ref: fb.Refs[6]}
+
+	fs.MVFrame.PutGridBlock(2, 1, 1, 1, refmvs.Block{
+		Ref: refmvs.RefPair{1, -1},
+		MV:  refmvs.MVPair{{X: 8}, {}},
+	})
+	if applyNeighbourGridMV(&st, fs, fb, fh, 8, 8) {
+		t.Fatal("accepted neighbour from a different reference frame")
+	}
+	if st.refSlot != 6 || st.refFrame != 4 {
+		t.Fatalf("decoded reference changed to slot=%d frame=%d", st.refSlot, st.refFrame)
+	}
+
+	fs.MVFrame.PutGridBlock(2, 1, 1, 1, refmvs.Block{
+		Ref: refmvs.RefPair{1, 4},
+		MV:  refmvs.MVPair{{X: 8}, {Y: -16, X: 24}},
+	})
+	if !applyNeighbourGridMV(&st, fs, fb, fh, 8, 8) {
+		t.Fatal("rejected matching compound neighbour reference")
+	}
+	if st.refSlot != 6 || st.refFrame != 4 || st.mv != (refmvs.MV{Y: -16, X: 24}) {
+		t.Fatalf("state after neighbour MV = %+v", st)
+	}
+}
+
+func TestForwardReferenceContextGroupsAllFourRefs(t *testing.T) {
+	fh := &header.FrameHeader{}
+	fs := NewFrameState(32, 32)
+	if got := ref3Ctx(fs, fh, 8, 8); got != 1 {
+		t.Fatalf("empty context = %d, want 1", got)
+	}
+
+	fs.SetBlockState(4, 8, 4, 4, Av1Block{RefFrame: 4})
+	fs.LeftPresent[2] = 1
+	if got := ref3Ctx(fs, fh, 8, 8); got != 0 {
+		t.Fatalf("ref3 context = %d, want high-group context 0", got)
+	}
+
+	fs.SetBlockState(4, 8, 4, 4, Av1Block{RefFrame: 1})
+	if got := ref3Ctx(fs, fh, 8, 8); got != 2 {
+		t.Fatalf("ref0 context = %d, want low-group context 2", got)
+	}
+}
