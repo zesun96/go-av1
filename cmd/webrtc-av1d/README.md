@@ -52,10 +52,10 @@ go build -o webrtc-av1d .
 
 ```sh
 # ffplay supports IVF natively
-ffplay output.ivf
+ffplay output.y4m
 
 # Convert to WebM for VLC / other players (stream copy, lossless)
-ffmpeg -i output.ivf -c:v copy output.webm
+ffmpeg -i output.y4m -c:v libaom-av1 -b:v 2M -cpu-used 4 -row-mt 1 -tiles 2x2 output.webm
 ```
 
 > **Note:** VLC does not support the IVF container. Use `ffmpeg` to convert
