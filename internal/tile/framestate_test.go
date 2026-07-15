@@ -179,3 +179,48 @@ func TestFrameStateCommitInterBlockSetsNewMVFlag(t *testing.T) {
 		t.Fatalf("block state=%+v", got)
 	}
 }
+
+func TestFrameStateCommitIntraMVBlockStoresActualSize(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
+
+	fs.CommitIntraMVBlock(8, 4, 16, 32)
+
+	for y := 1; y < 9; y++ {
+		for x := 2; x < 6; x++ {
+			blk, ok := fs.MVFrame.GridBlock(x, y)
+			if !ok {
+				t.Fatalf("GridBlock(%d,%d) missing", x, y)
+			}
+			if !blk.Ref.IsIntra() || blk.Ref[1] != -1 {
+				t.Fatalf("GridBlock(%d,%d) ref=%v want intra", x, y, blk.Ref)
+			}
+			if blk.BS != BS16x32 || blk.X4 != 2 || blk.Y4 != 1 {
+				t.Fatalf("GridBlock(%d,%d)=%+v", x, y, blk)
+			}
+		}
+	}
+}
+
+func TestFrameStateCommitCompoundBlockStoresReferencePair(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
+	blk := Av1Block{
+		Compound: true, InterMode: InterModeGlobalMV,
+		RefSlot: 2, RefFrame: 1, MV: [2]int16{8, -4},
+		RefSlot2: 6, RefFrame2: 7, MV2: [2]int16{-12, 20},
+	}
+
+	fs.CommitInterBlock(16, 8, 32, 16, blk, 1)
+
+	got, ok := fs.MVFrame.GridBlock(4, 2)
+	if !ok {
+		t.Fatal("compound MV grid block missing")
+	}
+	if got.Ref != (refmvs.RefPair{1, 7}) || got.MV != (refmvs.MVPair{{Y: 8, X: -4}, {Y: -12, X: 20}}) {
+		t.Fatalf("compound MV grid block=%+v", got)
+	}
+	if got.BS != BS32x16 || got.MF != 1 {
+		t.Fatalf("compound MV metadata bs=%d mf=%d", got.BS, got.MF)
+	}
+}

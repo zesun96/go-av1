@@ -675,6 +675,24 @@ func (fs *FrameState) CommitInterBlock(bx, by, bw, bh int, blk Av1Block, refFram
 		int(blk.InterMode),
 		refmvs.MV{Y: blk.MV[0], X: blk.MV[1]},
 	)
+	if blk.Compound {
+		fs.setCurrentCompoundMVBlock(bx, by, bw, bh, blk)
+	}
+}
+
+// CommitIntraMVBlock records an intra block in the reference-MV grid. Spatial
+// scans need its real dimensions to skip over the block even though it cannot
+// contribute a motion-vector candidate.
+func (fs *FrameState) CommitIntraMVBlock(bx, by, bw, bh int) {
+	if fs.MVFrame == nil {
+		return
+	}
+	bw4 := (bw + 3) >> 2
+	bh4 := (bh + 3) >> 2
+	fs.MVFrame.PutGridBlock(bx>>2, by>>2, bw4, bh4, refmvs.Block{
+		Ref: refmvs.RefPair{0, -1},
+		BS:  uint8(maxInt(bsizeFromDim(bw, bh), 0)),
+	})
 }
 
 func (fs *FrameState) setTemporalMVBlock(bx, by, bw, bh int, refFrame int, mv refmvs.MV) {
@@ -733,6 +751,28 @@ func (fs *FrameState) setCurrentMVBlock(bx, by, bw, bh int, refFrame, interMode 
 		MF:  mf,
 	}
 	fs.MVFrame.PutGridBlock(bx>>2, by>>2, bw4, bh4, blk)
+}
+
+func (fs *FrameState) setCurrentCompoundMVBlock(bx, by, bw, bh int, av1Blk Av1Block) {
+	if fs.MVFrame == nil {
+		return
+	}
+	mf := uint8(0)
+	if int(av1Blk.InterMode) == InterModeGlobalMV {
+		mf |= 1
+	}
+	if int(av1Blk.InterMode) == InterModeNewMV {
+		mf |= 2
+	}
+	fs.MVFrame.PutGridBlock(bx>>2, by>>2, (bw+3)>>2, (bh+3)>>2, refmvs.Block{
+		MV: refmvs.MVPair{
+			{Y: av1Blk.MV[0], X: av1Blk.MV[1]},
+			{Y: av1Blk.MV2[0], X: av1Blk.MV2[1]},
+		},
+		Ref: refmvs.RefPair{av1Blk.RefFrame, av1Blk.RefFrame2},
+		BS:  uint8(maxInt(bsizeFromDim(bw, bh), 0)),
+		MF:  mf,
+	})
 }
 
 func (fs *FrameState) NeighbourInterRef(bx, by int) (slot int, ok bool) {

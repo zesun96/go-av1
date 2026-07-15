@@ -33,6 +33,16 @@ func TestCompoundFlagContextWithoutNeighbours(t *testing.T) {
 	}
 }
 
+func TestCompoundFlagContextUsesRefTypeNotDPBSlot(t *testing.T) {
+	fs := NewFrameState(128, 64)
+	fs.TileX1, fs.TileY1 = 128, 64
+	fs.SetBlockState(0, 0, 64, 64, Av1Block{RefSlot: 4, RefFrame: 1})
+
+	if got := compoundFlagContext(fs, 64, 0); got != 0 {
+		t.Fatalf("compound context for LAST in slot 4 = %d, want 0", got)
+	}
+}
+
 func TestCompoundFlagContextCompoundTopForwardLeft(t *testing.T) {
 	fs := NewFrameState(128, 256)
 	fs.TileX1, fs.TileY1 = 128, 256
@@ -59,6 +69,25 @@ func TestCompoundDirContextSingleRefNeighbours(t *testing.T) {
 	fs.CommitInterBlock(0, 16, 16, 16, Av1Block{RefSlot: 1, RefFrame: 1, InterMode: InterModeNearestMV}, 1)
 	if got := compoundDirContext(fs, fh, 16, 16); got != 3 {
 		t.Fatalf("same-direction single refs context=%d want 3", got)
+	}
+}
+
+func TestCompoundContextsIncludeSecondReference(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fh := &header.FrameHeader{}
+	top := Av1Block{
+		RefSlot: 1, RefFrame: 1, RefSlot2: 7, RefFrame2: 7,
+		Compound: true, InterMode: InterModeGlobalMV,
+	}
+	left := Av1Block{RefSlot: 1, RefFrame: 1, InterMode: InterModeNearestMV}
+	fs.CommitInterBlock(16, 0, 16, 16, top, 1)
+	fs.CommitInterBlock(0, 16, 16, 16, left, 1)
+
+	if got := compoundDirContext(fs, fh, 16, 16); got != 1 {
+		t.Fatalf("bidir compound plus forward single context=%d want 1", got)
+	}
+	if got := ref2Ctx(fs, fh, 16, 16); got != 0 {
+		t.Fatalf("backward context with ALTREF second reference=%d want 0", got)
 	}
 }
 

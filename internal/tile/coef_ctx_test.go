@@ -80,6 +80,7 @@ func TestSingleRefModeContextsIncludesSecondaryLeftMatch(t *testing.T) {
 	fs.SetBlockState(220, 0, 4, 16, Av1Block{Intra: false, RefSlot: 0, InterMode: InterModeNearestMV})
 	fs.SetBlockState(224, 0, 16, 16, Av1Block{Intra: true, RefSlot: -1})
 	fs.MVFrame.PutGridBlock(55, 0, 1, 4, refmvs.Block{Ref: refmvs.RefPair{1, -1}, BS: BS4x16})
+	fs.CommitIntraMVBlock(224, 0, 16, 16)
 
 	newCtx, globalCtx, refCtx := singleRefModeContexts(fs, fhdr, nil, 0, 1, 240, 0, 16, 16)
 	if newCtx != 1 || globalCtx != 0 || refCtx != 1 {
@@ -100,6 +101,7 @@ func TestSingleRefModeContextsCombinesDirectAndSecondaryDirections(t *testing.T)
 	fs.SetBlockState(224, 16, 16, 16, Av1Block{Intra: true, RefSlot: -1})
 	fs.MVFrame.PutGridBlock(60, 0, 4, 4, refmvs.Block{Ref: refmvs.RefPair{1, -1}, BS: BS16x16, MF: 2})
 	fs.MVFrame.PutGridBlock(55, 4, 1, 4, refmvs.Block{Ref: refmvs.RefPair{1, -1}, BS: BS4x16})
+	fs.CommitIntraMVBlock(224, 16, 16, 16)
 
 	newCtx, globalCtx, refCtx := singleRefModeContexts(fs, fhdr, nil, 0, 1, 240, 16, 16, 16)
 	if newCtx != 2 || globalCtx != 0 || refCtx != 4 {

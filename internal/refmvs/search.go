@@ -6,6 +6,7 @@ type SearchConfig struct {
 	Frame              *Frame
 	TemporalSource     *Frame
 	Ref                int8
+	Ref2               int8
 	TargetSlot         int
 	GlobalMV           MV
 	Bx4, By4, Bw4, Bh4 int
@@ -137,105 +138,152 @@ func FindSpatial(cfg SearchConfig) SearchResult {
 	if cfg.Frame == nil || cfg.Bw4 <= 0 || cfg.Bh4 <= 0 || len(cfg.BlockDims) == 0 {
 		return out
 	}
-	add := func(blk Block, weight int, row bool) {
-		if weight <= 0 || blk.Ref[0] == 0 {
-			return
-		}
-		mv := InvalidMV
-		for i := 0; i < 2; i++ {
-			if blk.Ref[i] == cfg.Ref {
-				mv = blk.MV[i]
-				break
-			}
-		}
-		if mv.IsInvalid() {
-			return
-		}
-		if row {
-			out.RowMatch = true
-		} else {
-			out.ColMatch = true
-		}
-		out.HaveNewMV = out.HaveNewMV || blk.MF&2 != 0
-		out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, weight)
+	tileX1, tileY1 := cfg.TileX1, cfg.TileY1
+	if tileX1 <= cfg.TileX0 {
+		tileX1 = cfg.Frame.IW4
 	}
-	dims := func(blk Block) (int, int, bool) {
-		if int(blk.BS) >= len(cfg.BlockDims) {
-			return 0, 0, false
-		}
-		d := cfg.BlockDims[blk.BS]
-		return maxSearch(1, int(d[0])), maxSearch(1, int(d[1])), true
+	if tileY1 <= cfg.TileY0 {
+		tileY1 = cfg.Frame.IH4
 	}
-
+	w4 := minSearch(minSearch(cfg.Bw4, 16), tileX1-cfg.Bx4)
+	h4 := minSearch(minSearch(cfg.Bh4, 16), tileY1-cfg.By4)
+	nRows, nCols := -1, -1
+	maxRows, maxCols := 0, 0
 	if cfg.By4 > cfg.TileY0 {
-		maxRows := minSearch((cfg.By4-cfg.TileY0+1)>>1, 2+boolSearch(cfg.Bh4 > 1))
+		maxRows = minSearch((cfg.By4-cfg.TileY0+1)>>1, 2+boolSearch(cfg.Bh4 > 1))
 		step := 1
 		if cfg.Bw4 >= 16 {
 			step = 4
 		}
-		for x := 0; x < cfg.Bw4; {
-			probeX := cfg.Bx4 + x
-			blk, ok := cfg.Frame.GridBlock(probeX, cfg.By4-1)
-			if !ok {
-				break
-			}
-			cw, ch, ok := dims(blk)
-			if !ok {
-				break
-			}
-			remainingW := maxSearch(1, cw-(probeX-int(blk.X4)))
-			length := maxSearch(step, minSearch(cfg.Bw4-x, remainingW))
-			if cfg.Bw4-x <= remainingW {
-				weight := 2
-				if cfg.Bw4 > 1 {
-					weight = maxSearch(2, minSearch(2*maxRows, ch))
-				}
-				add(blk, length*weight, true)
-				break
-			}
-			add(blk, length*2, true)
-			x += length
-		}
+		nRows = scanSpatialRow(&out, cfg, cfg.Bx4, cfg.By4-1, cfg.Bw4, w4, maxRows, step, true)
 	}
 	if cfg.Bx4 > cfg.TileX0 {
-		maxCols := minSearch((cfg.Bx4-cfg.TileX0+1)>>1, 2+boolSearch(cfg.Bw4 > 1))
+		maxCols = minSearch((cfg.Bx4-cfg.TileX0+1)>>1, 2+boolSearch(cfg.Bw4 > 1))
 		step := 1
 		if cfg.Bh4 >= 16 {
 			step = 4
 		}
-		for y := 0; y < cfg.Bh4; {
-			probeY := cfg.By4 + y
-			blk, ok := cfg.Frame.GridBlock(cfg.Bx4-1, probeY)
-			if !ok {
-				break
-			}
-			cw, ch, ok := dims(blk)
-			if !ok {
-				break
-			}
-			remainingH := maxSearch(1, ch-(probeY-int(blk.Y4)))
-			length := maxSearch(step, minSearch(cfg.Bh4-y, remainingH))
-			if cfg.Bh4-y <= remainingH {
-				weight := 2
-				if cfg.Bh4 > 1 {
-					weight = maxSearch(2, minSearch(2*maxCols, cw))
-				}
-				add(blk, length*weight, false)
-				break
-			}
-			add(blk, length*2, false)
-			y += length
-		}
+		nCols = scanSpatialCol(&out, cfg, cfg.Bx4-1, cfg.By4, cfg.Bh4, h4, maxCols, step, true)
 	}
 	appendTopRight(&out, cfg)
 	nearestCount := out.Count
-	appendSecondarySpatial(&out, cfg)
 	out.NearestCount = nearestCount
 	for i := 0; i < out.NearestCount; i++ {
 		out.Candidates[i].Weight += 640
 	}
+	appendSecondarySpatial(&out, cfg, nRows, nCols, maxRows, maxCols, w4, h4)
 	SortCandidates(out.Candidates[:], out.NearestCount)
 	return out
+}
+
+func addSpatialCandidate(out *SearchResult, cfg SearchConfig, blk Block, weight int, row, direct, trackNewMV bool) {
+	if out == nil || weight <= 0 || blk.Ref.IsIntra() {
+		return
+	}
+	mvp := MVPair{InvalidMV, {}}
+	if cfg.Ref2 > 0 {
+		if blk.Ref != (RefPair{cfg.Ref, cfg.Ref2}) {
+			return
+		}
+		mvp = blk.MV
+	} else {
+		for i := 0; i < 2; i++ {
+			if blk.Ref[i] == cfg.Ref {
+				mvp[0] = blk.MV[i]
+				break
+			}
+		}
+	}
+	if mvp[0].IsInvalid() || cfg.Ref2 > 0 && mvp[1].IsInvalid() {
+		return
+	}
+	if row {
+		if direct {
+			out.RowMatch = true
+		} else {
+			out.SecondaryRowMatch = true
+		}
+	} else if direct {
+		out.ColMatch = true
+	} else {
+		out.SecondaryColMatch = true
+	}
+	if trackNewMV {
+		out.HaveNewMV = out.HaveNewMV || blk.MF&2 != 0
+	}
+	out.Count = AddCandidate(out.Candidates[:], out.Count, mvp, weight)
+}
+
+func scanSpatialRow(out *SearchResult, cfg SearchConfig, x4, y4, bw4, w4, maxRows, step int, direct bool) int {
+	blk, ok := cfg.Frame.GridBlock(x4, y4)
+	if !ok {
+		return 0
+	}
+	candW, candH, ok := dimsForSearch(cfg, blk)
+	if !ok {
+		return 0
+	}
+	length := maxSearch(step, minSearch(bw4, candW))
+	if bw4 <= candW {
+		weight := 2
+		if bw4 != 1 {
+			weight = maxSearch(2, minSearch(2*maxRows, candH))
+		}
+		addSpatialCandidate(out, cfg, blk, length*weight, true, direct, direct)
+		return weight >> 1
+	}
+	for x := 0; ; {
+		addSpatialCandidate(out, cfg, blk, length*2, true, direct, direct)
+		x += length
+		if x >= w4 {
+			return 1
+		}
+		blk, ok = cfg.Frame.GridBlock(x4+x, y4)
+		if !ok {
+			return 1
+		}
+		candW, _, ok = dimsForSearch(cfg, blk)
+		if !ok {
+			return 1
+		}
+		length = maxSearch(step, candW)
+	}
+}
+
+func scanSpatialCol(out *SearchResult, cfg SearchConfig, x4, y4, bh4, h4, maxCols, step int, direct bool) int {
+	blk, ok := cfg.Frame.GridBlock(x4, y4)
+	if !ok {
+		return 0
+	}
+	candW, candH, ok := dimsForSearch(cfg, blk)
+	if !ok {
+		return 0
+	}
+	length := maxSearch(step, minSearch(bh4, candH))
+	if bh4 <= candH {
+		weight := 2
+		if bh4 != 1 {
+			weight = maxSearch(2, minSearch(2*maxCols, candW))
+		}
+		addSpatialCandidate(out, cfg, blk, length*weight, false, direct, direct)
+		return weight >> 1
+	}
+	for y := 0; ; {
+		addSpatialCandidate(out, cfg, blk, length*2, false, direct, direct)
+		y += length
+		if y >= h4 {
+			return 1
+		}
+		blk, ok = cfg.Frame.GridBlock(x4, y4+y)
+		if !ok {
+			return 1
+		}
+		_, candH, ok = dimsForSearch(cfg, blk)
+		if !ok {
+			return 1
+		}
+		length = maxSearch(step, candH)
+	}
 }
 
 func appendTopRight(out *SearchResult, cfg SearchConfig) {
@@ -244,85 +292,29 @@ func appendTopRight(out *SearchResult, cfg SearchConfig) {
 		return
 	}
 	blk, ok := cfg.Frame.GridBlock(cfg.Bx4+cfg.Bw4, cfg.By4-1)
-	if !ok || blk.Ref[0] == 0 {
+	if !ok {
 		return
 	}
-	mv := InvalidMV
-	for i := 0; i < 2; i++ {
-		if blk.Ref[i] == cfg.Ref {
-			mv = blk.MV[i]
-			break
-		}
-	}
-	if mv.IsInvalid() {
-		return
-	}
-	out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, 4)
-	out.RowMatch = true
-	out.HaveNewMV = out.HaveNewMV || blk.MF&2 != 0
+	addSpatialCandidate(out, cfg, blk, 4, true, true, true)
 }
 
-func appendSecondarySpatial(out *SearchResult, cfg SearchConfig) {
+func appendSecondarySpatial(out *SearchResult, cfg SearchConfig, nRows, nCols, maxRows, maxCols, w4, h4 int) {
 	if out == nil || cfg.Frame == nil {
 		return
 	}
-	add := func(x4, y4, weight int, row, col, trackNewMV bool) bool {
-		blk, ok := cfg.Frame.GridBlock(x4, y4)
-		if !ok || blk.Ref[0] == 0 {
-			return false
-		}
-		mv := InvalidMV
-		for i := 0; i < 2; i++ {
-			if blk.Ref[i] == cfg.Ref {
-				mv = blk.MV[i]
-				break
-			}
-		}
-		if mv.IsInvalid() {
-			return false
-		}
-		out.SecondaryRowMatch = out.SecondaryRowMatch || row
-		out.SecondaryColMatch = out.SecondaryColMatch || col
-		if trackNewMV {
-			out.HaveNewMV = out.HaveNewMV || blk.MF&2 != 0
-		}
-		out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, weight)
-		return true
-	}
-	if cfg.By4 > cfg.TileY0 && cfg.Bx4 > cfg.TileX0 {
-		// The diagonal contributes a candidate, but it is not a row or column
-		// match for mode-context derivation.
-		add(cfg.Bx4-1, cfg.By4-1, 4, false, false, false)
-	}
-	leftCoversHeight := false
-	if blk, ok := cfg.Frame.GridBlock(cfg.Bx4-1, cfg.By4); ok {
-		if _, ch, ok := dimsForSearch(cfg, blk); ok {
-			leftCoversHeight = ch >= cfg.Bh4
+	if nRows >= 0 && nCols >= 0 {
+		if blk, ok := cfg.Frame.GridBlock(cfg.Bx4-1, cfg.By4-1); ok {
+			addSpatialCandidate(out, cfg, blk, 4, true, false, false)
 		}
 	}
-	topIsNarrower := false
-	if blk, ok := cfg.Frame.GridBlock(cfg.Bx4, cfg.By4-1); ok {
-		if cw, _, ok := dimsForSearch(cfg, blk); ok {
-			topIsNarrower = cw < cfg.Bw4
-		}
-	}
-	// dav1d's direct column scan reports all three covered columns here, so
-	// col-n2/n3 must not count the same tall left block again. Its secondary
-	// row probes cover four 4x4 units rather than the usual single 8x8 probe.
-	asymmetricLargeEdges := cfg.Bw4 == 16 && cfg.Bh4 == 16 && leftCoversHeight && topIsNarrower
-	rowWeight := 4
-	if asymmetricLargeEdges {
-		rowWeight = 16
-	}
-	// dav1d's secondary scan positions are at odd 8x8-resolution offsets.
 	for n := 2; n <= 3; n++ {
-		y4 := (cfg.By4 - 2*n + 1) | 1
-		if y4 >= cfg.TileY0 {
-			add(cfg.Bx4|1, y4, rowWeight, true, false, false)
+		if n > nRows && n <= maxRows {
+			nRows += scanSpatialRow(out, cfg, cfg.Bx4|1, (cfg.By4-2*n+1)|1,
+				cfg.Bw4, w4, 1+maxRows-n, 2+2*boolSearch(cfg.Bw4 >= 16), false)
 		}
-		x4 := (cfg.Bx4 - 2*n + 1) | 1
-		if (!asymmetricLargeEdges || !leftCoversHeight) && x4 >= cfg.TileX0 {
-			add(x4, cfg.By4|1, 4, false, true, false)
+		if n > nCols && n <= maxCols {
+			nCols += scanSpatialCol(out, cfg, (cfg.Bx4-2*n+1)|1, cfg.By4|1,
+				cfg.Bh4, h4, 1+maxCols-n, 2+2*boolSearch(cfg.Bh4 >= 16), false)
 		}
 	}
 	SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)

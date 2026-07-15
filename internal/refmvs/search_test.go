@@ -108,7 +108,7 @@ func TestFindAppendsTemporalCandidate(t *testing.T) {
 	}
 }
 
-func TestFindSpatialDiagonalDoesNotSetDirectionalMatch(t *testing.T) {
+func TestFindSpatialDiagonalSetsSecondaryRowMatch(t *testing.T) {
 	frame := NewFrame(32, 32)
 	frame.PutGridBlock(1, 1, 1, 1, Block{
 		Ref: RefPair{1, -1}, MV: MVPair{{Y: 4, X: -2}}, BS: 0,
@@ -121,8 +121,8 @@ func TestFindSpatialDiagonalDoesNotSetDirectionalMatch(t *testing.T) {
 	if r.Count != 1 || r.Candidates[0].MV[0] != (MV{Y: 4, X: -2}) {
 		t.Fatalf("diagonal candidate result = %+v", r)
 	}
-	if r.SecondaryRowMatch || r.SecondaryColMatch {
-		t.Fatalf("diagonal set directional matches: row=%t col=%t", r.SecondaryRowMatch, r.SecondaryColMatch)
+	if !r.SecondaryRowMatch || r.SecondaryColMatch {
+		t.Fatalf("diagonal directional matches: row=%t col=%t", r.SecondaryRowMatch, r.SecondaryColMatch)
 	}
 }
 

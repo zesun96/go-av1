@@ -946,6 +946,7 @@ func commitIntraBlockState(fs *FrameState, bx, by, bw, bh int, st blockSyntaxSta
 	intraSt.blockState.Uvtx = intraSt.txUV
 	intraSt.blockState.LFDelta = st.lfDelta
 	fs.SetBlockState(bx, by, st.ctxBW, st.ctxBH, intraSt.blockState)
+	fs.CommitIntraMVBlock(bx, by, st.ctxBW, st.ctxBH)
 	if st.hasChroma {
 		fs.SetChromaBlockState(bx, by, st.ctxBW, st.ctxBH, intraSt.blockState)
 	}
@@ -3776,7 +3777,7 @@ func decodeSingleRefInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		// Compound reference parsing/reconstruction is not wired yet. Consuming
 		// the flag is still required for the normative single-reference branch.
 		if isCompound {
-			decodeCompoundInterSyntax(m, ctx, fs, fhdr, bx, by, &syntax)
+			decodeCompoundInterSyntax(m, ctx, fs, fhdr, bx, by, bw, bh, &syntax)
 			return syntax
 		}
 	}
@@ -3863,23 +3864,45 @@ func decodeSingleRefInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 }
 
 func decodeCompoundInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, fhdr *header.FrameHeader,
-	bx, by int, syntax *singleRefInterSyntax) {
+	bx, by, bw, bh int, syntax *singleRefInterSyntax) {
 	if m == nil || ctx == nil || syntax == nil {
 		return
 	}
 	ref0, ref1 := 0, 0
 	dirCtx := compoundDirContext(fs, fhdr, bx, by)
 	bidir := m.BoolAdapt(ctx.CompDirCDF[dirCtx][:]) != 0
+	ms := m.State()
+	fs.tracef("sym compound_ref x=%d y=%d kind=dir ctx=%d val=%t rng=%d", bx, by, dirCtx, bidir, ms.Range)
 	if bidir {
-		if m.BoolAdapt(ctx.CompFwdRefCDF[0][ref3Ctx(fs, fhdr, bx, by)][:]) != 0 {
-			ref0 = 2 + int(m.BoolAdapt(ctx.CompFwdRefCDF[2][ref5Ctx(fs, fhdr, bx, by)][:]))
+		fwdCtx := ref3Ctx(fs, fhdr, bx, by)
+		fwdHigh := m.BoolAdapt(ctx.CompFwdRefCDF[0][fwdCtx][:]) != 0
+		ms = m.State()
+		fs.tracef("sym compound_ref x=%d y=%d kind=fwd ctx=%d val=%t rng=%d", bx, by, fwdCtx, fwdHigh, ms.Range)
+		if fwdHigh {
+			fwd2Ctx := ref5Ctx(fs, fhdr, bx, by)
+			v := m.BoolAdapt(ctx.CompFwdRefCDF[2][fwd2Ctx][:])
+			ref0 = 2 + int(v)
+			ms = m.State()
+			fs.tracef("sym compound_ref x=%d y=%d kind=fwd2 ctx=%d val=%d rng=%d", bx, by, fwd2Ctx, v, ms.Range)
 		} else {
-			ref0 = int(m.BoolAdapt(ctx.CompFwdRefCDF[1][ref4Ctx(fs, fhdr, bx, by)][:]))
+			fwd1Ctx := ref4Ctx(fs, fhdr, bx, by)
+			v := m.BoolAdapt(ctx.CompFwdRefCDF[1][fwd1Ctx][:])
+			ref0 = int(v)
+			ms = m.State()
+			fs.tracef("sym compound_ref x=%d y=%d kind=fwd1 ctx=%d val=%d rng=%d", bx, by, fwd1Ctx, v, ms.Range)
 		}
-		if m.BoolAdapt(ctx.CompBwdRefCDF[0][ref2Ctx(fs, fhdr, bx, by)][:]) != 0 {
+		bwdCtx := ref2Ctx(fs, fhdr, bx, by)
+		bwdAlt := m.BoolAdapt(ctx.CompBwdRefCDF[0][bwdCtx][:]) != 0
+		ms = m.State()
+		fs.tracef("sym compound_ref x=%d y=%d kind=bwd ctx=%d val=%t rng=%d", bx, by, bwdCtx, bwdAlt, ms.Range)
+		if bwdAlt {
 			ref1 = 6
 		} else {
-			ref1 = 4 + int(m.BoolAdapt(ctx.CompBwdRefCDF[1][ref6Ctx(fs, fhdr, bx, by)][:]))
+			bwd1Ctx := ref6Ctx(fs, fhdr, bx, by)
+			v := m.BoolAdapt(ctx.CompBwdRefCDF[1][bwd1Ctx][:])
+			ref1 = 4 + int(v)
+			ms = m.State()
+			fs.tracef("sym compound_ref x=%d y=%d kind=bwd1 ctx=%d val=%d rng=%d", bx, by, bwd1Ctx, v, ms.Range)
 		}
 	} else {
 		if m.BoolAdapt(ctx.CompUniRefCDF[0][refCtx(fs, fhdr, bx, by)][:]) != 0 {
@@ -3899,37 +3922,130 @@ func decodeCompoundInterSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, 
 	syntax.refSlot2, _ = frameRefSlot(fhdr, syntax.refFrame2)
 	syntax.hasRef = syntax.refSlot >= 0 && syntax.refSlot2 >= 0
 
-	// Compound MV-stack context support is added with the paired stack. Context
-	// zero is the normative no-pair-match context and is used by the WebRTC
-	// target block (dav1d reports ctx=0, n_mvs=2).
-	modeCtx := 0
+	modeCtx := compoundInterModeContext(fs, fhdr, syntax.refFrame, syntax.refFrame2, bx, by, bw, bh)
+	modeInput := m.State()
+	modeBefore := ctx.CompInterModeCDF[modeCtx]
 	syntax.compMode = int(m.SymbolAdaptDav1d(ctx.CompInterModeCDF[modeCtx][:], 7))
 	if syntax.compMode == 6 { // GLOBALMV_GLOBALMV
 		syntax.motionSource = interMotionSourceGlobal
 		syntax.modeHint = interModeHintAuto
 	}
-	ms := m.State()
-	fs.tracef("sym compound x=%d y=%d dir_ctx=%d bidir=%t refs=%d/%d slots=%d/%d mode_ctx=%d mode=%d rng=%d cnt=%d off=%d",
+	ms = m.State()
+	fs.tracef("sym compound x=%d y=%d dir_ctx=%d bidir=%t refs=%d/%d slots=%d/%d mode_ctx=%d mode=%d mode_in_rng=%d mode_cdf=%v->%v rng=%d cnt=%d off=%d",
 		bx, by, dirCtx, bidir, ref0, ref1, syntax.refSlot, syntax.refSlot2,
-		modeCtx, syntax.compMode, ms.Range, ms.Count, ms.BufferPosition)
+		modeCtx, syntax.compMode, modeInput.Range, modeBefore, ctx.CompInterModeCDF[modeCtx], ms.Range, ms.Count, ms.BufferPosition)
+}
+
+func compoundInterModeContext(fs *FrameState, fhdr *header.FrameHeader,
+	refFrame, refFrame2, bx, by, bw, bh int) int {
+	if fs == nil || fs.MVFrame == nil || fhdr == nil || refFrame <= 0 || refFrame2 <= 0 {
+		return 0
+	}
+	result := refmvs.FindSpatial(refmvs.SearchConfig{
+		Frame: fs.MVFrame,
+		Ref:   int8(refFrame), Ref2: int8(refFrame2),
+		Bx4: bx >> 2, By4: by >> 2, Bw4: (bw + 3) >> 2, Bh4: (bh + 3) >> 2,
+		TileX0: fs.TileX0 >> 2, TileY0: fs.TileY0 >> 2,
+		TileX1: fs.TileX1 >> 2, TileY1: fs.TileY1 >> 2, BlockDims: refMVBlockDims[:],
+	})
+	nearestMatch := boolInt(result.RowMatch) + boolInt(result.ColMatch)
+	refMatchCount := boolInt(result.RowMatch || result.SecondaryRowMatch) +
+		boolInt(result.ColMatch || result.SecondaryColMatch)
+	haveNewMV := boolInt(result.HaveNewMV)
+	refMVCtx, newMVCtx := 0, 0
+	switch nearestMatch {
+	case 0:
+		refMVCtx = minInt(2, refMatchCount)
+		newMVCtx = boolInt(refMatchCount > 0)
+	case 1:
+		refMVCtx = minInt(refMatchCount*3, 4)
+		newMVCtx = 3 - haveNewMV
+	default:
+		refMVCtx = 5
+		newMVCtx = 5 - haveNewMV
+	}
+	switch refMVCtx >> 1 {
+	case 0:
+		return minInt(newMVCtx, 1)
+	case 1:
+		return 1 + minInt(newMVCtx, 3)
+	default:
+		return clampInt(3+newMVCtx, 4, 7)
+	}
 }
 
 func compoundDirContext(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
-	top, topOK := neighbourSingleRefFrame(fs, fhdr, bx, by, true)
-	left, leftOK := neighbourSingleRefFrame(fs, fhdr, bx, by, false)
+	top, topOK := neighbourContextBlock(fs, bx, by, true)
+	left, leftOK := neighbourContextBlock(fs, bx, by, false)
+	ref0 := func(blk Av1Block) int {
+		refs, n := blockRefOrders(blk, fhdr)
+		if n == 0 {
+			return -1
+		}
+		return refs[0]
+	}
+	hasUniComp := func(blk Av1Block) bool {
+		refs, n := blockRefOrders(blk, fhdr)
+		return blk.Compound && n == 2 && (refs[0] < 4) == (refs[1] < 4)
+	}
 	if topOK && leftOK {
-		return 1 + 2*btoi((top >= 4) == (left >= 4))
+		if top.Intra && left.Intra {
+			return 2
+		}
+		if top.Intra || left.Intra {
+			edge := top
+			if top.Intra {
+				edge = left
+			}
+			if !edge.Compound {
+				return 2
+			}
+			return 1 + 2*btoi(hasUniComp(edge))
+		}
+		topComp, leftComp := top.Compound, left.Compound
+		topRef, leftRef := ref0(top), ref0(left)
+		if !topComp && !leftComp {
+			return 1 + 2*btoi((topRef >= 4) == (leftRef >= 4))
+		}
+		if !topComp || !leftComp {
+			edge := top
+			if !topComp {
+				edge = left
+			}
+			if !hasUniComp(edge) {
+				return 1
+			}
+			return 3 + btoi((topRef >= 4) == (leftRef >= 4))
+		}
+		topUni, leftUni := hasUniComp(top), hasUniComp(left)
+		if !topUni && !leftUni {
+			return 0
+		}
+		if !topUni || !leftUni {
+			return 2
+		}
+		return 3 + btoi((topRef == 4) == (leftRef == 4))
+	}
+	if topOK || leftOK {
+		edge := top
+		if leftOK {
+			edge = left
+		}
+		if edge.Intra || !edge.Compound {
+			return 2
+		}
+		return 4 * btoi(hasUniComp(edge))
 	}
 	return 2
 }
 
 func uniP1Context(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 	cnt := [3]int{}
-	for _, top := range []bool{true, false} {
-		if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, top); ok && ref >= 1 && ref <= 3 {
+	forEachNeighbourRef(fs, fhdr, bx, by, func(ref int) {
+		if ref >= 1 && ref <= 3 {
 			cnt[ref-1]++
 		}
-	}
+	})
 	cnt[1] += cnt[2]
 	if cnt[0] == cnt[1] {
 		return 1
@@ -3960,9 +4076,11 @@ func compoundFlagContext(fs *FrameState, bx, by int) int {
 	haveTop = haveTop && by > fs.TileY0
 	haveLeft = haveLeft && bx > fs.TileX0
 	isCompound := func(blk Av1Block) bool { return !blk.Intra && blk.Compound }
-	col4, row4 := bx>>2, by>>2
-	topBackward := haveTop && col4 >= 0 && col4 < len(fs.AboveRef) && fs.AboveRef[col4] >= 4
-	leftBackward := haveLeft && row4 >= 0 && row4 < len(fs.LeftRef) && fs.LeftRef[row4] >= 4
+	// RefFrame is the AV1 reference type (LAST_FRAME=1), while AboveRef and
+	// LeftRef contain DPB slot indices. dav1d's context compares reference
+	// types, not slots.
+	topBackward := haveTop && !top.Intra && top.RefFrame >= 5
+	leftBackward := haveLeft && !left.Intra && left.RefFrame >= 5
 	if haveTop && haveLeft {
 		if isCompound(top) {
 			if isCompound(left) {
@@ -4047,8 +4165,8 @@ func singleRefModeContexts(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBu
 		return 0, 0, 0
 	}
 	nearestMatch := boolInt(result.RowMatch) + boolInt(result.ColMatch)
-	secondaryMatches := boolInt(result.SecondaryRowMatch) + boolInt(result.SecondaryColMatch)
-	refMatchCount := maxInt(nearestMatch, secondaryMatches)
+	refMatchCount := boolInt(result.RowMatch || result.SecondaryRowMatch) +
+		boolInt(result.ColMatch || result.SecondaryColMatch)
 	haveNewMV := boolInt(result.HaveNewMV)
 	switch nearestMatch {
 	case 0:
@@ -4114,42 +4232,78 @@ func singleRefSearch(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, ref
 }
 
 func neighbourSingleRefFrame(fs *FrameState, fhdr *header.FrameHeader, bx, by int, top bool) (int, bool) {
-	if fs == nil || fhdr == nil {
+	blk, ok := neighbourContextBlock(fs, bx, by, top)
+	if !ok || blk.Intra || fhdr == nil {
 		return 0, false
 	}
-	var blk Av1Block
-	var ok bool
+	refs, n := blockRefOrders(blk, fhdr)
+	return refs[0], n > 0
+}
+
+func neighbourContextBlock(fs *FrameState, bx, by int, top bool) (Av1Block, bool) {
+	if fs == nil {
+		return Av1Block{}, false
+	}
 	if top {
 		col4 := bx >> 2
 		if by <= fs.TileY0 || col4 < 0 || col4 >= len(fs.AbovePresent) || fs.AbovePresent[col4] == 0 {
-			return 0, false
+			return Av1Block{}, false
 		}
-		blk, ok = fs.BlockState(bx, by-4)
+		return fs.BlockState(bx, by-4)
 	} else {
 		row4 := by >> 2
 		if bx <= fs.TileX0 || row4 < 0 || row4 >= len(fs.LeftPresent) || fs.LeftPresent[row4] == 0 {
-			return 0, false
+			return Av1Block{}, false
 		}
-		blk, ok = fs.BlockState(bx-4, by)
+		return fs.BlockState(bx-4, by)
 	}
-	if !ok || blk.Intra || blk.RefSlot < 0 {
-		return 0, false
+}
+
+func blockRefOrders(blk Av1Block, fhdr *header.FrameHeader) ([2]int, int) {
+	refs := [2]int{-1, -1}
+	if blk.Intra || fhdr == nil {
+		return refs, 0
 	}
-	refFrame, ok := slotRefFrame(fhdr, int(blk.RefSlot))
-	if !ok || refFrame <= 0 {
-		return 0, false
+	refFrame := int(blk.RefFrame)
+	if refFrame <= 0 {
+		refFrame, _ = slotRefFrame(fhdr, int(blk.RefSlot))
 	}
-	return refFrame - 1, true
+	if refFrame <= 0 {
+		return refs, 0
+	}
+	refs[0] = refFrame - 1
+	if !blk.Compound {
+		return refs, 1
+	}
+	refFrame2 := int(blk.RefFrame2)
+	if refFrame2 <= 0 {
+		refFrame2, _ = slotRefFrame(fhdr, int(blk.RefSlot2))
+	}
+	if refFrame2 <= 0 {
+		return refs, 1
+	}
+	refs[1] = refFrame2 - 1
+	return refs, 2
+}
+
+func forEachNeighbourRef(fs *FrameState, fhdr *header.FrameHeader, bx, by int, fn func(int)) {
+	for _, top := range []bool{true, false} {
+		blk, ok := neighbourContextBlock(fs, bx, by, top)
+		if !ok || blk.Intra {
+			continue
+		}
+		refs, n := blockRefOrders(blk, fhdr)
+		for i := 0; i < n; i++ {
+			fn(refs[i])
+		}
+	}
 }
 
 func refCtx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 	cnt := [2]int{}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, true); ok {
+	forEachNeighbourRef(fs, fhdr, bx, by, func(ref int) {
 		cnt[boolInt(ref >= 4)]++
-	}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, false); ok {
-		cnt[boolInt(ref >= 4)]++
-	}
+	})
 	if cnt[0] == cnt[1] {
 		return 1
 	}
@@ -4161,12 +4315,11 @@ func refCtx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 
 func ref2Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 	cnt := [3]int{}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, true); ok && ref >= 4 {
-		cnt[ref-4]++
-	}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, false); ok && ref >= 4 {
-		cnt[ref-4]++
-	}
+	forEachNeighbourRef(fs, fhdr, bx, by, func(ref int) {
+		if ref >= 4 && ref <= 6 {
+			cnt[ref-4]++
+		}
+	})
 	cnt[1] += cnt[0]
 	if cnt[2] == cnt[1] {
 		return 1
@@ -4179,12 +4332,11 @@ func ref2Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 
 func ref3Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 	cnt := [3]int{}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, true); ok && ref >= 0 && ref <= 2 {
-		cnt[ref]++
-	}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, false); ok && ref >= 0 && ref <= 2 {
-		cnt[ref]++
-	}
+	forEachNeighbourRef(fs, fhdr, bx, by, func(ref int) {
+		if ref >= 0 && ref <= 2 {
+			cnt[ref]++
+		}
+	})
 	cnt[1] += cnt[2]
 	if cnt[0] == cnt[1] {
 		return 1
@@ -4197,12 +4349,11 @@ func ref3Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 
 func ref4Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 	cnt := [2]int{}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, true); ok && (ref^0) < 2 {
-		cnt[ref]++
-	}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, false); ok && (ref^0) < 2 {
-		cnt[ref]++
-	}
+	forEachNeighbourRef(fs, fhdr, bx, by, func(ref int) {
+		if ref >= 0 && ref < 2 {
+			cnt[ref]++
+		}
+	})
 	if cnt[0] == cnt[1] {
 		return 1
 	}
@@ -4214,12 +4365,11 @@ func ref4Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 
 func ref5Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 	cnt := [2]int{}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, true); ok && (ref^2) < 2 {
-		cnt[ref-2]++
-	}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, false); ok && (ref^2) < 2 {
-		cnt[ref-2]++
-	}
+	forEachNeighbourRef(fs, fhdr, bx, by, func(ref int) {
+		if ref >= 2 && ref < 4 {
+			cnt[ref-2]++
+		}
+	})
 	if cnt[0] == cnt[1] {
 		return 1
 	}
@@ -4231,12 +4381,11 @@ func ref5Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 
 func ref6Ctx(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 	cnt := [3]int{}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, true); ok && ref >= 4 {
-		cnt[ref-4]++
-	}
-	if ref, ok := neighbourSingleRefFrame(fs, fhdr, bx, by, false); ok && ref >= 4 {
-		cnt[ref-4]++
-	}
+	forEachNeighbourRef(fs, fhdr, bx, by, func(ref int) {
+		if ref >= 4 && ref <= 6 {
+			cnt[ref-4]++
+		}
+	})
 	if cnt[0] == cnt[1] {
 		return 1
 	}
