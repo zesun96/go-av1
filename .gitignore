@@ -42,3 +42,4 @@ cover
 /cmd/webrtc-av1d/*.png
 docs/plan/*
 .plan/*
+.gocache/
