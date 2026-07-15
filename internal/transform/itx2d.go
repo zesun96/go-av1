@@ -95,8 +95,10 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 	}
 
 	txtps := Tx1dTypes[txtp]
-	first1d := Tx1dFns[td.Lw][txtps[0]]
-	second1d := Tx1dFns[td.Lh][txtps[1]]
+	// TxfmType names are vertical_horizontal, while the transposed coefficient
+	// layout makes dav1d execute the horizontal pass first.
+	first1d := Tx1dFns[td.Lw][txtps[1]]
+	second1d := Tx1dFns[td.Lh][txtps[0]]
 
 	// Guard against unimplemented transform combinations (e.g. ADST for TX32/TX64).
 	// Fall back to DCT if the requested 1D function is nil.
@@ -133,11 +135,11 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 	lastNonzeroCol := sh - 1
 	if exactLastNonzeroCol >= 0 {
 		lastNonzeroCol = exactLastNonzeroCol
-	} else if txtps[1] == Tx1dIDENTITY && txtps[0] != Tx1dIDENTITY {
+	} else if txtps[0] == Tx1dIDENTITY && txtps[1] != Tx1dIDENTITY {
 		if eob < lastNonzeroCol {
 			lastNonzeroCol = eob
 		}
-	} else if txtps[0] == Tx1dIDENTITY && txtps[1] != Tx1dIDENTITY {
+	} else if txtps[1] == Tx1dIDENTITY && txtps[0] != Tx1dIDENTITY {
 		lastNonzeroCol = eob >> (int(td.Lw) + 2)
 	}
 	if lastNonzeroCol >= sh {

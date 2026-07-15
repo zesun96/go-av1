@@ -336,11 +336,11 @@ func TestReconBlock_UsesExactLastNonzeroColPath(t *testing.T) {
 }
 
 func TestLastNonzeroColForReconFollowsDav1d1DRules(t *testing.T) {
-	if got := lastNonzeroColForRecon(transform.RTX16x8, transform.H_DCT, 19); got != 1 {
-		t.Fatalf("H_DCT lastNonzeroCol = %d, want 1", got)
+	if got := lastNonzeroColForRecon(transform.RTX16x8, transform.H_DCT, 19); got != 7 {
+		t.Fatalf("H_DCT lastNonzeroCol = %d, want 7", got)
 	}
-	if got := lastNonzeroColForRecon(transform.RTX8x16, transform.V_DCT, 9); got != 9 {
-		t.Fatalf("V_DCT lastNonzeroCol = %d, want 9", got)
+	if got := lastNonzeroColForRecon(transform.RTX8x16, transform.V_DCT, 9); got != 1 {
+		t.Fatalf("V_DCT lastNonzeroCol = %d, want 1", got)
 	}
 	if exact, ok := LastNonzeroColFromEOB(transform.TX8x8, 15); !ok {
 		t.Fatal("expected exact 2D last-nonzero-col table for TX8x8")

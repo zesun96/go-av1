@@ -85,6 +85,14 @@ func TestFrameStatePaletteCtx(t *testing.T) {
 	if got := fs.PaletteUVCtx(8, 16); got != 1 {
 		t.Fatalf("PaletteUVCtx top-only = %d, want 1", got)
 	}
+
+	fs.SetPaletteCtx(16, 16, 16, 16, 0, 0)
+	if got := fs.PaletteYCtx(32, 16); got != 0 {
+		t.Fatalf("PaletteYCtx after inter clear = %d, want 0", got)
+	}
+	if got := fs.PaletteUVCtx(8, 16); got != 0 {
+		t.Fatalf("PaletteUVCtx after inter clear = %d, want 0", got)
+	}
 }
 
 func TestFrameStateSetInterBlock(t *testing.T) {

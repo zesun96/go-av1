@@ -29,6 +29,20 @@ func TestFindSpatialDeduplicatesEdges(t *testing.T) {
 	}
 }
 
+func TestFindClampsCandidatesAtFrameEdge(t *testing.T) {
+	f := NewFrame(2560, 1440)
+	f.PutGridBlock(616, 20, 4, 4, Block{
+		MV: MVPair{{X: 896}, {}}, Ref: RefPair{1, -1}, BS: 0,
+	})
+	r := Find(SearchConfig{
+		Frame: f, Ref: 1, Bx4: 620, By4: 20, Bw4: 4, Bh4: 4,
+		BlockDims: [][2]uint8{{4, 4}},
+	})
+	if r.Count != 1 || r.Candidates[0].MV[0] != (MV{X: 768}) {
+		t.Fatalf("right-edge candidate = %+v, want X=768", r)
+	}
+}
+
 func TestFindSpatialSortsSecondarySeparately(t *testing.T) {
 	f := NewFrame(64, 64)
 	dims := [][2]uint8{{2, 2}}

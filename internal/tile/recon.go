@@ -47,7 +47,7 @@ func applyResidualAdd(dst []uint8, stride int, coeff []int32,
 func lastNonzeroColForRecon(tx uint8, txtp uint8, eob int) int {
 	txtps := transform.Tx1dTypes[txtp]
 	switch {
-	case txtps[1] == transform.Tx1dIDENTITY && txtps[0] != transform.Tx1dIDENTITY:
+	case txtps[0] == transform.Tx1dIDENTITY && txtps[1] != transform.Tx1dIDENTITY:
 		td := transform.TxfmDimensions[tx]
 		sh := int(td.H) * 4
 		if sh > 32 {
@@ -60,7 +60,7 @@ func lastNonzeroColForRecon(tx uint8, txtp uint8, eob int) int {
 			return sh - 1
 		}
 		return eob
-	case txtps[0] == transform.Tx1dIDENTITY && txtps[1] != transform.Tx1dIDENTITY:
+	case txtps[1] == transform.Tx1dIDENTITY && txtps[0] != transform.Tx1dIDENTITY:
 		td := transform.TxfmDimensions[tx]
 		if eob < 0 {
 			return 0

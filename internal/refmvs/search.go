@@ -49,7 +49,26 @@ func Find(cfg SearchConfig) SearchResult {
 		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
 	}
 	appendSingleExtendedCandidates(&out, cfg)
+	clampCandidates(&out, cfg)
 	return out
+}
+
+func clampCandidates(out *SearchResult, cfg SearchConfig) {
+	if out == nil || cfg.Frame == nil || out.Count == 0 {
+		return
+	}
+	left := -(cfg.Bx4 + cfg.Bw4 + 4) * 32
+	right := (cfg.Frame.IW4 - cfg.Bx4 + 4) * 32
+	top := -(cfg.By4 + cfg.Bh4 + 4) * 32
+	bottom := (cfg.Frame.IH4 - cfg.By4 + 4) * 32
+	for i := 0; i < out.Count; i++ {
+		out.Candidates[i].MV[0].X = int16(clampSearch(int(out.Candidates[i].MV[0].X), left, right))
+		out.Candidates[i].MV[0].Y = int16(clampSearch(int(out.Candidates[i].MV[0].Y), top, bottom))
+		if cfg.Ref2 > 0 {
+			out.Candidates[i].MV[1].X = int16(clampSearch(int(out.Candidates[i].MV[1].X), left, right))
+			out.Candidates[i].MV[1].Y = int16(clampSearch(int(out.Candidates[i].MV[1].Y), top, bottom))
+		}
+	}
 }
 
 // appendSingleExtendedCandidates mirrors dav1d's non-self-reference fallback.
@@ -416,6 +435,16 @@ func boolSearch(v bool) int {
 func absSearch(v int) int {
 	if v < 0 {
 		return -v
+	}
+	return v
+}
+
+func clampSearch(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
 	}
 	return v
 }

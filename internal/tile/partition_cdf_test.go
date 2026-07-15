@@ -13,3 +13,14 @@ func TestPartition32CDFDefaults(t *testing.T) {
 		t.Fatalf("Partition32CDFDefault = %v, want %v", Partition32CDFDefault, want)
 	}
 }
+
+func TestUVModeCDFDefaultCFLVertical(t *testing.T) {
+	// dav1d default_cdf.m.uv_mode[1][VERT_PRED], converted from CDF13.
+	want := [NUVIntraModes + 1]uint16{
+		28236, 12988, 12711, 12553, 12340, 11697, 11569, 11317,
+		10669, 8540, 8075, 5736, 3296, 0, 0,
+	}
+	if got := UVModeCDFDefault[1][VertPred]; got != want {
+		t.Fatalf("UVModeCDFDefault[1][VERT_PRED] = %v, want %v", got, want)
+	}
+}

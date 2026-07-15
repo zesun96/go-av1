@@ -22,6 +22,7 @@ func main() {
 	threads := flag.Int("threads", 0, "worker threads (0 = NumCPU)")
 	filters := flag.String("filters", "all", "in-loop filters: all, none, or comma-separated deblock,cdef,restoration")
 	traceSymbols := flag.Bool("trace-symbols", false, "log tile syntax symbols and MSAC state")
+	traceFrame := flag.Int("trace-frame", -1, "only trace this zero-based IVF frame (-1 = all)")
 	limit := flag.Int("limit", 0, "stop after decoding this many frames (0 = all)")
 	flag.Parse()
 
@@ -56,7 +57,9 @@ func main() {
 
 	var logger av1.Logger
 	if *traceSymbols {
-		_ = os.Setenv("GOAV1_TRACE_SYMBOLS", "1")
+		if *traceFrame < 0 {
+			_ = os.Setenv("GOAV1_TRACE_SYMBOLS", "1")
+		}
 		logger = stderrLogger{}
 	}
 	dec, err := av1.NewDecoder(av1.DecoderOptions{
@@ -86,6 +89,7 @@ func main() {
 	}
 
 	frameCount := 0
+	inputFrame := 0
 	for {
 		if *limit > 0 && frameCount >= *limit {
 			break
@@ -99,8 +103,16 @@ func main() {
 			break
 		}
 
+		traceThisFrame := *traceSymbols && *traceFrame >= 0 && inputFrame == *traceFrame
+		if traceThisFrame {
+			_ = os.Setenv("GOAV1_TRACE_SYMBOLS", "1")
+		}
 		if err := dec.SendData(payload); err != nil {
 			fmt.Fprintf(os.Stderr, "send data: %v\n", err)
+			if traceThisFrame {
+				_ = os.Unsetenv("GOAV1_TRACE_SYMBOLS")
+			}
+			inputFrame++
 			continue
 		}
 
@@ -115,6 +127,10 @@ func main() {
 			}
 			pic.Release()
 		}
+		if traceThisFrame {
+			_ = os.Unsetenv("GOAV1_TRACE_SYMBOLS")
+		}
+		inputFrame++
 	}
 
 	// Flush remaining frames.

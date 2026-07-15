@@ -643,8 +643,13 @@ func decodeIntraSyntaxState(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		bx, by, bw, bh, intraSt.yMode, ms.Range, ms.Count, ms.BufferPosition)
 
 	if intraSt.yMode >= VertPred && intraSt.yMode <= VertLeftPred && angleDeltaAllowed(st.ctxBW, st.ctxBH) {
-		v := int(m.SymbolAdaptDav1d(ctx.AngleDeltaCDF[intraSt.yMode-VertPred][:], 6))
+		angleCtx := intraSt.yMode - VertPred
+		beforeCDF := ctx.AngleDeltaCDF[angleCtx]
+		v := int(m.SymbolAdaptDav1d(ctx.AngleDeltaCDF[angleCtx][:], 6))
 		intraSt.yAngleDelta = v - 3
+		ms = m.State()
+		fs.tracef("sym y_angle x=%d y=%d val=%d cdf=%v->%v rng=%d cnt=%d off=%d",
+			bx, by, intraSt.yAngleDelta, beforeCDF, ctx.AngleDeltaCDF[angleCtx], ms.Range, ms.Count, ms.BufferPosition)
 	}
 
 	cflAllowed := 0
@@ -657,15 +662,22 @@ func decodeIntraSyntaxState(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		if cflAllowed != 0 {
 			uvModeSyms = NUVIntraModes
 		}
+		beforeCDF := ctx.UVModeCDF[cflAllowed][intraSt.yMode]
 		intraSt.uvMode = int(m.SymbolAdaptDav1d(ctx.UVModeCDF[cflAllowed][intraSt.yMode][:], uvModeSyms-1))
 		ms = m.State()
-		fs.tracef("sym uv_mode x=%d y=%d cfl=%d val=%d rng=%d cnt=%d off=%d",
-			bx, by, cflAllowed, intraSt.uvMode, ms.Range, ms.Count, ms.BufferPosition)
+		fs.tracef("sym uv_mode x=%d y=%d cfl=%d val=%d cdf=%v->%v rng=%d cnt=%d off=%d",
+			bx, by, cflAllowed, intraSt.uvMode, beforeCDF,
+			ctx.UVModeCDF[cflAllowed][intraSt.yMode], ms.Range, ms.Count, ms.BufferPosition)
 	}
 
 	if st.hasChroma && intraSt.uvMode >= VertPred && intraSt.uvMode <= VertLeftPred && angleDeltaAllowed(st.ctxBW, st.ctxBH) {
-		v := int(m.SymbolAdaptDav1d(ctx.AngleDeltaCDF[intraSt.uvMode-VertPred][:], 6))
+		angleCtx := intraSt.uvMode - VertPred
+		beforeCDF := ctx.AngleDeltaCDF[angleCtx]
+		v := int(m.SymbolAdaptDav1d(ctx.AngleDeltaCDF[angleCtx][:], 6))
 		intraSt.uvAngleDelta = v - 3
+		ms = m.State()
+		fs.tracef("sym uv_angle x=%d y=%d val=%d cdf=%v->%v rng=%d cnt=%d off=%d",
+			bx, by, intraSt.uvAngleDelta, beforeCDF, ctx.AngleDeltaCDF[angleCtx], ms.Range, ms.Count, ms.BufferPosition)
 	}
 	if st.hasChroma && intraSt.uvMode == CFLPred {
 		intraSt.cflAlphaU, intraSt.cflAlphaV = decodeCFLAlphas(m, ctx)
@@ -675,9 +687,24 @@ func decodeIntraSyntaxState(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		szCtx := palSzCtx(st.ctxBW, st.ctxBH)
 		if intraSt.yMode == DCPred {
 			palCtx := fs.PaletteYCtx(bx, by)
-			if m.BoolAdapt(ctx.PaletteYCDF[szCtx][palCtx][:]) != 0 {
+			col4, row4 := bx>>2, by>>2
+			abovePal, leftPal := uint8(0), uint8(0)
+			if col4 >= 0 && col4 < len(fs.AbovePalY) {
+				abovePal = fs.AbovePalY[col4]
+			}
+			if row4 >= 0 && row4 < len(fs.LeftPalY) {
+				leftPal = fs.LeftPalY[row4]
+			}
+			usePalette := m.BoolAdapt(ctx.PaletteYCDF[szCtx][palCtx][:]) != 0
+			ms = m.State()
+			fs.tracef("sym palette_y x=%d y=%d ctx=%d above=%d left=%d use=%t rng=%d cnt=%d off=%d",
+				bx, by, palCtx, abovePal, leftPal, usePalette, ms.Range, ms.Count, ms.BufferPosition)
+			if usePalette {
 				intraSt.palSzY = int(m.SymbolAdaptDav1d(ctx.PaletteSizeCDF[0][szCtx][:], 6)) + 2
 				intraSt.pal[0] = readPalettePlane(m, ctx, fs, seq, 0, szCtx, bx, by, intraSt.palSzY)
+				ms = m.State()
+				fs.tracef("sym palette_y_values x=%d y=%d size=%d values=%v rng=%d cnt=%d off=%d",
+					bx, by, intraSt.palSzY, intraSt.pal[0], ms.Range, ms.Count, ms.BufferPosition)
 			}
 		}
 		if st.hasChroma && intraSt.uvMode == DCPred {
@@ -685,7 +712,11 @@ func decodeIntraSyntaxState(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 			if intraSt.palSzY > 0 {
 				palCtx = 1
 			}
-			if m.BoolAdapt(ctx.PaletteUVCDF[palCtx][:]) != 0 {
+			usePalette := m.BoolAdapt(ctx.PaletteUVCDF[palCtx][:]) != 0
+			ms = m.State()
+			fs.tracef("sym palette_uv x=%d y=%d ctx=%d use=%t rng=%d cnt=%d off=%d",
+				bx, by, palCtx, usePalette, ms.Range, ms.Count, ms.BufferPosition)
+			if usePalette {
 				intraSt.palSzUV = int(m.SymbolAdaptDav1d(ctx.PaletteSizeCDF[1][szCtx][:], 6)) + 2
 				intraSt.pal[1], intraSt.pal[2] = readPaletteUV(m, ctx, fs, seq, szCtx, bx, by, intraSt.palSzUV)
 			}
@@ -713,6 +744,9 @@ func decodeIntraSyntaxState(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 
 	if intraSt.palSzY > 0 {
 		intraSt.palIdxY = readPalIndices(m, &ctx.ColorMapCDF[0][intraSt.palSzY-2], intraSt.palSzY, bw, bh, st.ctxBW, st.ctxBH)
+		ms = m.State()
+		fs.tracef("sym palette_y_indices x=%d y=%d rng=%d cnt=%d off=%d",
+			bx, by, ms.Range, ms.Count, ms.BufferPosition)
 	}
 	if st.hasChroma && intraSt.palSzUV > 0 {
 		_, _, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
@@ -1128,6 +1162,11 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	if by+bh > fb.Height {
 		bh = fb.Height - by
 	}
+	defer func() {
+		ms := m.State()
+		fs.tracef("sym block_done x=%d y=%d w=%d h=%d rng=%d dif=%016x cnt=%d off=%d",
+			bx, by, ctxBW, ctxBH, ms.Range, ms.Dif, ms.Count, ms.BufferPosition)
+	}()
 
 	// --- Segment id (dav1d decode_b 鎼?.11.9, intra-only path) ---
 	// When segmentation is disabled the spec mandates seg_id = 0 and no bits
@@ -1140,6 +1179,9 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 
 	if !st.isIntra {
 		decodeInterBlock(m, ctx, fs, fhdr, seq, fb, st, bx, by, bw, bh)
+		// Inter blocks publish zero palette sizes to the above/left edge
+		// contexts. Otherwise an older intra palette leaks across the block.
+		fs.SetPaletteCtx(bx, by, st.ctxBW, st.ctxBH, 0, 0)
 		return
 	}
 
@@ -1228,7 +1270,11 @@ func readCDEFIndex(m *bitstream.MSAC, fs *FrameState, fhdr *header.FrameHeader, 
 		return
 	}
 
+	before := m.State()
 	v := int8(m.Bools(int(fhdr.CDEF.NBits)))
+	after := m.State()
+	fs.tracef("sym cdef_index x=%d y=%d nbits=%d val=%d before_rng=%d before_dif=%016x after_rng=%d after_dif=%016x",
+		bx, by, fhdr.CDEF.NBits, v, before.Range, before.Dif, after.Range, after.Dif)
 	col64End := (bx + bw + 63) / 64
 	row64End := (by + bh + 63) / 64
 	for r := row64Start; r < row64End; r++ {
@@ -3147,8 +3193,8 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, tx uint
 // If either dimension doesn't support the decoded 1D type, fall back to DCT_DCT.
 func clampTxType(txtp, lw, lh uint8) uint8 {
 	txtps := transform.Tx1dTypes[txtp]
-	row1d := txtps[0] // first 1D pass over rows
-	col1d := txtps[1] // second 1D pass over columns
+	row1d := txtps[1] // horizontal pass over rows
+	col1d := txtps[0] // vertical pass over columns
 
 	// Check row transform
 	if lw >= 3 { // TX32 or TX64 in width

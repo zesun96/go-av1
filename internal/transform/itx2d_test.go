@@ -185,6 +185,30 @@ func TestInvTxfmAdd_Full_16x16_V_DCT(t *testing.T) {
 	}
 }
 
+func TestInvTxfmAdd_16x16_DCTADST_DCVector(t *testing.T) {
+	dst := make([]uint8, 16*16)
+	for i := range dst {
+		dst[i] = 128
+	}
+	coeff := make([]int32, 16*16)
+	coeff[0] = -111
+
+	InvTxfmAdd(dst, 16, coeff, 0, TX16x16, 2, DCT_ADST, 8)
+
+	// Reference vector from dav1d's C inverse transform.
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			want := uint8(127)
+			if x < 5 {
+				want = 128
+			}
+			if got := dst[y*16+x]; got != want {
+				t.Fatalf("dst[%d,%d]=%d, want %d; row=%v", y, x, got, want, dst[y*16:(y+1)*16])
+			}
+		}
+	}
+}
+
 func TestInvTxfmAdd_Full_4x4_IDTX(t *testing.T) {
 	dst := make([]uint8, 4*4)
 	coeff := make([]int32, 4*4)
@@ -366,7 +390,7 @@ func TestInvTxfmAddWithLastNonzeroColPrefersCallerValue(t *testing.T) {
 	// the transform type. Passing the same explicit value should produce the
 	// identical reconstruction and leave no second source of truth.
 	InvTxfmAdd(dstA, 8, coeffA, 19, RTX16x8, 1, H_DCT, 8)
-	InvTxfmAddWithLastNonzeroCol(dstB, 8, coeffB, 19, RTX16x8, 1, H_DCT, 1, 8)
+	InvTxfmAddWithLastNonzeroCol(dstB, 8, coeffB, 19, RTX16x8, 1, H_DCT, 7, 8)
 
 	for i := range dstA {
 		if dstA[i] != dstB[i] {
