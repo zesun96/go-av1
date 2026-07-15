@@ -463,6 +463,11 @@ func (d *decoderImpl) applyLoopFilter(pic *Picture, fhdr *header.FrameHeader) {
 }
 
 func (d *decoderImpl) applyLoopFilterWithState(pic *Picture, fhdr *header.FrameHeader, filterState *tile.FrameState) {
+	// When both luma levels are zero, AV1 disables deblocking for every
+	// plane; mode/reference deltas must not turn filtering back on.
+	if fhdr == nil || fhdr.LoopFilter.LevelY[0] == 0 && fhdr.LoopFilter.LevelY[1] == 0 {
+		return
+	}
 	if filterState != nil {
 		d.applyLumaLoopFilter(pic, fhdr, filterState)
 		d.applyChromaLoopFilter(pic, fhdr, filterState)
@@ -752,7 +757,8 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 	work := append([]byte(nil), plane...)
 	for by := 0; by < h; by += blockSz {
 		for bx := 0; bx < w; bx += blockSz {
-			if fs != nil && !cdefBlockHasNonSkip(fs, bx, by, blockSz, blockSz, planeID) {
+			hasNonSkip := cdefBlockHasNonSkip(fs, bx, by, blockSz, blockSz, planeID)
+			if fs != nil && !hasNonSkip {
 				continue
 			}
 			preset := 0
@@ -841,13 +847,23 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			dirIdx := (by/blockSz)*dirStride + bx/blockSz
 			dir := 0
 			if planeID == 0 {
-				var variance uint
-				dir, variance = cdef.FindDir(src, by*stride+bx, stride)
-				if dirIdx >= 0 && dirIdx < len(dirs) {
-					dirs[dirIdx] = uint8(dir)
-					variances[dirIdx] = variance
+				rawPriStrength := priStrength
+				uvPriStrength := int(fhdr.CDEF.UVStrength[preset]) >> 2
+				if rawPriStrength != 0 || uvPriStrength != 0 {
+					var variance uint
+					dir, variance = cdef.FindDir(src, by*stride+bx, stride)
+					if dirIdx >= 0 && dirIdx < len(dirs) {
+						dirs[dirIdx] = uint8(dir)
+						variances[dirIdx] = variance
+					}
+					if rawPriStrength != 0 {
+						priStrength = adjustCDEFStrength(rawPriStrength, variance)
+					} else {
+						dir = 0
+					}
+				} else {
+					dir = 0
 				}
-				priStrength = adjustCDEFStrength(priStrength, variance)
 			} else {
 				dir = chromaCDEFDirection(priStrength, dirIdx, dirs)
 			}

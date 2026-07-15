@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/zesun96/go-av1/internal/cdef"
 	"github.com/zesun96/go-av1/internal/header"
 	"github.com/zesun96/go-av1/internal/refmvs"
 	"github.com/zesun96/go-av1/internal/tile"
@@ -191,6 +192,29 @@ func TestApplyLoopFilterZeroChromaLevelsLeaveChromaUntouched(t *testing.T) {
 	}
 }
 
+func TestApplyLoopFilterZeroLumaLevelsDisableModeRefDeltas(t *testing.T) {
+	pic := loopFilterTestPicture()
+	wantY := append([]byte(nil), pic.Y...)
+	wantU := append([]byte(nil), pic.U...)
+	wantV := append([]byte(nil), pic.V...)
+	fs := tile.NewFrameState(pic.Width, pic.Height)
+	fs.SetSubsampling(1, 1)
+	fs.SetBlockState(0, 0, 4, pic.Height, tile.Av1Block{RefFrame: 1, InterMode: tile.InterModeNearestMV})
+	fs.SetBlockState(4, 0, pic.Width-4, pic.Height, tile.Av1Block{RefFrame: 1, InterMode: tile.InterModeNearestMV})
+	fs.SetTxState(0, 0, 4, pic.Height, 0)
+	fs.SetTxState(4, 0, pic.Width-4, pic.Height, 0)
+	fhdr := &header.FrameHeader{LoopFilter: header.FrameHeaderLoopFilter{
+		ModeRefDeltaEnabled: 1,
+		ModeRefDeltas: header.LoopfilterModeRefDeltas{
+			RefDelta: [header.TotalRefsPerFrame]int8{1, 1},
+		},
+	}}
+	(&decoderImpl{}).applyLoopFilterWithState(pic, fhdr, fs)
+	if !bytes.Equal(pic.Y, wantY) || !bytes.Equal(pic.U, wantU) || !bytes.Equal(pic.V, wantV) {
+		t.Fatal("zero luma levels allowed mode/reference deltas to enable deblocking")
+	}
+}
+
 func TestApplyLoopFilterSecondYLevelIsIndependent(t *testing.T) {
 	pic := loopFilterTestPicture()
 	wantY := append([]byte(nil), pic.Y...)
@@ -254,6 +278,30 @@ func TestChromaCDEFDirectionSecondaryOnlyIsZero(t *testing.T) {
 	}
 	if got := chromaCDEFDirection(1, 0, dirs); got != 6 {
 		t.Fatalf("primary chroma direction=%d want 6", got)
+	}
+}
+
+func TestCDEFSecondaryOnlyLumaUsesDirectionZero(t *testing.T) {
+	pic := &Picture{Width: 8, Height: 8, StrideY: 8, Chroma: ChromaMonochrome}
+	pic.Y = make([]byte, 64)
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			pic.Y[y*8+x] = 32
+			if x == y {
+				pic.Y[y*8+x] = 44
+			}
+		}
+	}
+	want := append([]byte(nil), pic.Y...)
+	left := make([][2]uint8, 8)
+	cdef.FilterBlock(want, 0, 8, left, make([]byte, 8), 0, 8,
+		make([]byte, 8), 0, 8, 0, 1, 0, 4, 8, 8, 0)
+	fhdr := &header.FrameHeader{CDEF: header.FrameHeaderCDEF{
+		Damping: 4, YStrength: [header.MaxCDEFStrengths]uint8{1},
+	}}
+	(&decoderImpl{}).applyCDEF(pic, fhdr)
+	if !bytes.Equal(pic.Y, want) {
+		t.Fatal("secondary-only luma CDEF did not use direction zero")
 	}
 }
 
