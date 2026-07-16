@@ -38,6 +38,26 @@ func TestWaitForTracks(t *testing.T) {
 	}
 }
 
+func TestFrontendUsesDirectICECandidates(t *testing.T) {
+	data, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(data)
+	if strings.Contains(page, `id="stunEnabled" type="checkbox" checked`) {
+		t.Fatal("frontend must keep STUN disabled by default")
+	}
+	if !strings.Contains(page, "if (!stunEnabled.checked) return undefined;") {
+		t.Fatal("frontend does not conditionally enable STUN")
+	}
+	if !strings.Contains(page, "new RTCPeerConnection(peerConnectionConfig())") {
+		t.Fatal("frontend does not apply the selected ICE configuration")
+	}
+	if !strings.Contains(page, "timeoutMs = 2000") {
+		t.Fatal("frontend ICE gathering fallback is not bounded to two seconds")
+	}
+}
+
 func TestIVFWriterPreservesRTPTimestamps(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "output.ivf")
 	w := &ivfWriter{path: path}

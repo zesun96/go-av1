@@ -21,6 +21,12 @@ Media capture works on `localhost`. Access from another machine normally
 requires serving the page over HTTPS because camera and desktop capture are
 secure-context browser APIs.
 
+STUN is disabled by default, so local and LAN connections use direct ICE host
+candidates without waiting for a public-network timeout. Enable **STUN** on the
+page and edit its server URL when server-reflexive candidates are needed. The
+page bounds non-trickle ICE gathering to two seconds; production deployments
+across NAT should normally use configurable STUN/TURN with trickle ICE.
+
 ## Build and run
 
 ```sh
