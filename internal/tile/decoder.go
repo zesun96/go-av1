@@ -278,14 +278,20 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	}
 
 	half := blSz / 2
-	haveHSplit := fb.Width > bx+half
-	haveVSplit := fb.Height > by+half
-	if bl == BL8X8 && (!haveHSplit || !haveVSplit) {
-		decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, blSz)
-		fs.SetPartition(bx, by, bl, PartitionNone, blSz)
-		return
-	}
+	// Partition syntax operates on the 8x8-aligned block grid. Reconstruction
+	// is clipped to the actual plane dimensions later, but using the visible
+	// pixel bounds here would incorrectly turn the last 8x8 node of e.g. a
+	// 180-line frame into a one-sided partition decision.
+	partitionW := (fb.Width + 7) &^ 7
+	partitionH := (fb.Height + 7) &^ 7
+	haveHSplit := partitionW > bx+half
+	haveVSplit := partitionH > by+half
 	if !haveHSplit && !haveVSplit {
+		if bl == BL8X8 {
+			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, half, half)
+			fs.SetPartition(bx, by, bl, PartitionSplit, blSz)
+			return
+		}
 		decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
 		return
 	}
@@ -299,8 +305,13 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		fs.tracef("sym partition x=%d y=%d bl=%d ctx=%d val=%d rng=%d cnt=%d off=%d",
 			bx, by, bl, partCtx, part, ms.Range, ms.Count, ms.BufferPosition)
 		if isSplit != 0 {
-			decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
-			decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by, bl+1)
+			if bl == BL8X8 {
+				decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, half, half)
+				decodeBlock(m, ctx, fs, fhdr, seq, fb, bx+half, by, half, half)
+			} else {
+				decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+				decodePartition(m, ctx, fs, fhdr, seq, fb, bx+half, by, bl+1)
+			}
 		} else {
 			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, blSz, half)
 			fs.SetPartition(bx, by, bl, PartitionH, blSz)
@@ -317,8 +328,13 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		fs.tracef("sym partition x=%d y=%d bl=%d ctx=%d val=%d rng=%d cnt=%d off=%d",
 			bx, by, bl, partCtx, part, ms.Range, ms.Count, ms.BufferPosition)
 		if isSplit != 0 {
-			decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
-			decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by+half, bl+1)
+			if bl == BL8X8 {
+				decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, half, half)
+				decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by+half, half, half)
+			} else {
+				decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by, bl+1)
+				decodePartition(m, ctx, fs, fhdr, seq, fb, bx, by+half, bl+1)
+			}
 		} else {
 			decodeBlock(m, ctx, fs, fhdr, seq, fb, bx, by, half, blSz)
 			fs.SetPartition(bx, by, bl, PartitionV, blSz)
@@ -1155,12 +1171,15 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	if bx >= fb.Width || by >= fb.Height {
 		return
 	}
-	// Clamp block to frame boundary.
-	if bx+bw > fb.Width {
-		bw = fb.Width - bx
+	// Syntax and prediction operate on the 8x8-aligned coded grid. Plane
+	// writes are clipped to the visible dimensions by the reconstruction path.
+	codedW := (fb.Width + 7) &^ 7
+	codedH := (fb.Height + 7) &^ 7
+	if bx+bw > codedW {
+		bw = codedW - bx
 	}
-	if by+bh > fb.Height {
-		bh = fb.Height - by
+	if by+bh > codedH {
+		bh = codedH - by
 	}
 	defer func() {
 		ms := m.State()
@@ -1661,7 +1680,8 @@ func decodeIntraPlaneCFL(
 				coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, tx, plane, bx+tbx, by+tby, ctxBW, ctxBH, tw, th, coeffMode, true, transform.DCT_DCT, reducedTxtpSet, qidxIsZero, lossless, dq)
 				fs.SetCoefCtxBlock(plane, bx+tbx, by+tby, tw, th, resCtx)
 				if eob >= 0 && len(coeff) > 0 {
-					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, tw, th)
+					visW, visH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, planeW, planeH)
+					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, visW, visH)
 				}
 			} else {
 				fs.SetCoefCtxBlock(plane, bx+tbx, by+tby, tw, th, 0x40)
@@ -1776,7 +1796,8 @@ func decodePalettePlane(
 				coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, tx, plane, bx+tbx, by+tby, ctxBW, ctxBH, tw, th, yMode, true, transform.DCT_DCT, reducedTxtpSet, qidxIsZero, lossless, dq)
 				fs.SetCoefCtxBlock(plane, bx+tbx, by+tby, tw, th, resCtx)
 				if eob >= 0 && len(coeff) > 0 {
-					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, tw, th)
+					visW, visH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, planeW, planeH)
+					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, visW, visH)
 				}
 			} else {
 				fs.SetCoefCtxBlock(plane, bx+tbx, by+tby, tw, th, 0x40)
@@ -2295,12 +2316,6 @@ func decodeIntraPlane(
 	td := transform.TxfmDimensions[tx]
 	tw := int(td.W) * 4
 	th := int(td.H) * 4
-	if tw > bw {
-		tw = bw
-	}
-	if th > bh {
-		th = bh
-	}
 
 	// Iterate over transform blocks within the coding block.
 	predBuf := make([]byte, tw*th)
@@ -2315,6 +2330,10 @@ func decodeIntraPlane(
 
 	for tby := 0; tby < bh; tby += th {
 		for tbx := 0; tbx < bw; tbx += tw {
+			visW, visH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, planeW, planeH)
+			if visW <= 0 || visH <= 0 {
+				continue
+			}
 			dstOff := (by+tby)*stride + (bx + tbx)
 			if dstOff >= len(planeBuf) {
 				continue
@@ -2333,12 +2352,12 @@ func decodeIntraPlane(
 			callPreparedIntraPred(dispatchMode, packedAngle, filterMode, predBuf, tw, tlBuf, tl, tw, th)
 
 			// 2. Copy prediction to destination.
-			for row := 0; row < th; row++ {
+			for row := 0; row < visH; row++ {
 				dstRow := (by+tby+row)*stride + (bx + tbx)
-				if dstRow+tw > len(planeBuf) {
+				if dstRow+visW > len(planeBuf) {
 					break
 				}
-				copy(planeBuf[dstRow:dstRow+tw], predBuf[row*tw:(row+1)*tw])
+				copy(planeBuf[dstRow:dstRow+visW], predBuf[row*tw:row*tw+visW])
 			}
 
 			// 3. Decode and apply residual (if not skipped).
@@ -2349,7 +2368,7 @@ func decodeIntraPlane(
 				}
 				fs.SetCoefCtxBlock(plane, bx+tbx, by+tby, tw, th, resCtx)
 				if eob >= 0 && len(coeff) > 0 {
-					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, tw, th)
+					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, visW, visH)
 				}
 			} else {
 				if plane > 0 {
@@ -2360,6 +2379,16 @@ func decodeIntraPlane(
 
 		}
 	}
+}
+
+func visiblePlaneBlock(x, y, width, height, planeW, planeH int) (int, int) {
+	if remaining := planeW - x; width > remaining {
+		width = remaining
+	}
+	if remaining := planeH - y; height > remaining {
+		height = remaining
+	}
+	return width, height
 }
 
 // ---------------------------------------------------------------------------
@@ -4122,9 +4151,7 @@ func compoundFlagContext(fs *FrameState, bx, by int) int {
 	haveTop = haveTop && by > fs.TileY0
 	haveLeft = haveLeft && bx > fs.TileX0
 	isCompound := func(blk Av1Block) bool { return !blk.Intra && blk.Compound }
-	// RefFrame is the AV1 reference type (LAST_FRAME=1), while AboveRef and
-	// LeftRef contain DPB slot indices. dav1d's context compares reference
-	// types, not slots.
+	// Go stores one-based inter reference types; dav1d uses zero-based types.
 	topBackward := haveTop && !top.Intra && top.RefFrame >= 5
 	leftBackward := haveLeft && !left.Intra && left.RefFrame >= 5
 	if haveTop && haveLeft {
@@ -4132,10 +4159,12 @@ func compoundFlagContext(fs *FrameState, bx, by int) int {
 			if isCompound(left) {
 				return 4
 			}
-			return 2 + btoi(leftBackward)
+			// dav1d uses an unsigned comparison in this branch, so its intra
+			// reference value -1 is grouped with backward references.
+			return 2 + btoi(left.Intra || leftBackward)
 		}
 		if isCompound(left) {
-			return 2 + btoi(topBackward)
+			return 2 + btoi(top.Intra || topBackward)
 		}
 		return btoi(leftBackward) ^ btoi(topBackward)
 	}

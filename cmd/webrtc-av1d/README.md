@@ -60,6 +60,12 @@ The source controls are locked while streaming because Y4M has fixed dimensions
 for the complete file. Stop the current stream before selecting another camera
 or switching between camera and desktop capture.
 
+The sender requests WebRTC's `maintain-resolution` degradation preference. If
+the browser still changes encoded resolution, the server keeps IVF as one
+complete stream and starts a new valid Y4M segment (`output-001.y4m`,
+`output-002.y4m`, and so on) instead of mixing different frame sizes in one
+Y4M file.
+
 Camera labels may be hidden until camera permission is granted. The page
 refreshes the device list after permission succeeds and when devices change.
 

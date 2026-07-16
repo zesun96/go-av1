@@ -40,7 +40,8 @@ type FileHeader struct {
 	Width uint16
 	// Height is the encoded video height in pixels.
 	Height uint16
-	// TimebaseNum and TimebaseDen describe the timestamp time-base.
+	// TimebaseNum and TimebaseDen retain the historical API names for the IVF
+	// frame-rate numerator and denominator. One PTS tick lasts Den/Num seconds.
 	TimebaseNum uint32
 	TimebaseDen uint32
 	// FrameCount is the (informational) number of frames in the file.
@@ -52,7 +53,7 @@ type FrameHeader struct {
 	// Size is the payload size in bytes.
 	Size uint32
 	// PTS is the frame presentation timestamp expressed in
-	// FileHeader.TimebaseNum / FileHeader.TimebaseDen units.
+	// FileHeader.TimebaseDen / FileHeader.TimebaseNum seconds per tick.
 	PTS uint64
 }
 

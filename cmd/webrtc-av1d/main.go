@@ -661,30 +661,34 @@ func (w *ivfWriter) Written() uint64 {
 // Each frame is written as packed rows (stride padding is stripped) in
 // Y-then-U-then-V order, in 4:2:0 layout.
 type yuvWriter struct {
-	path     string
-	mu       sync.Mutex
-	f        *os.File
-	isY4M    bool // true if output uses YUV4MPEG2 container
-	headOK   bool // true after Y4M stream header has been emitted
-	wrote    int  // number of frames written so far
-	firstPTS uint64
-	lastPTS  uint64
-	ptsSet   bool
-	width    int
-	height   int
+	path       string
+	mu         sync.Mutex
+	f          *os.File
+	activePath string
+	isY4M      bool // true if output uses YUV4MPEG2 container
+	headOK     bool // true after Y4M stream header has been emitted
+	wrote      int  // number of frames written to the current segment
+	totalWrote int  // number of frames written across all segments
+	segment    int
+	firstPTS   uint64
+	lastPTS    uint64
+	ptsSet     bool
+	width      int
+	height     int
 }
 
 func (w *yuvWriter) ensureOpen() error {
 	if w.f != nil {
 		return nil
 	}
-	f, err := os.Create(w.path)
+	w.activePath = yuvSegmentPath(w.path, w.segment)
+	f, err := os.Create(w.activePath)
 	if err != nil {
 		return err
 	}
 	w.f = f
 	w.isY4M = strings.EqualFold(filepath.Ext(w.path), ".y4m")
-	log.Printf("YUV output opened: %s (format=%s)", w.path, map[bool]string{true: "Y4M", false: "raw"}[w.isY4M])
+	log.Printf("YUV output opened: %s (format=%s)", w.activePath, map[bool]string{true: "Y4M", false: "raw"}[w.isY4M])
 	return nil
 }
 
@@ -698,13 +702,30 @@ func (w *yuvWriter) WriteFrame(pic *av1.Picture, pts uint64) error {
 	if err := w.ensureOpen(); err != nil {
 		return err
 	}
+	if w.headOK && (pic.Width != w.width || pic.Height != w.height) {
+		if !w.isY4M {
+			return fmt.Errorf("raw YUV resolution changed from %dx%d to %dx%d", w.width, w.height, pic.Width, pic.Height)
+		}
+		oldWidth, oldHeight := w.width, w.height
+		if err := w.closeCurrentLocked(); err != nil {
+			return err
+		}
+		w.segment++
+		log.Printf("Y4M resolution changed: %dx%d -> %dx%d; starting segment %d",
+			oldWidth, oldHeight, pic.Width, pic.Height, w.segment)
+		if err := w.ensureOpen(); err != nil {
+			return err
+		}
+	}
 
-	if w.isY4M && !w.headOK {
+	if !w.headOK {
 		// Y4M only supports a constant frame rate. Use a fixed-width field so
 		// Close can replace this initial value with the observed average rate.
-		hdr := y4mHeader(pic.Width, pic.Height, 30, 1)
-		if _, err := w.f.WriteString(hdr); err != nil {
-			return err
+		if w.isY4M {
+			hdr := y4mHeader(pic.Width, pic.Height, 30, 1)
+			if _, err := w.f.WriteString(hdr); err != nil {
+				return err
+			}
 		}
 		w.headOK = true
 		w.width = pic.Width
@@ -757,6 +778,7 @@ func (w *yuvWriter) WriteFrame(pic *av1.Picture, pts uint64) error {
 		}
 	}
 	w.wrote++
+	w.totalWrote++
 	return nil
 }
 
@@ -764,6 +786,13 @@ func (w *yuvWriter) WriteFrame(pic *av1.Picture, pts uint64) error {
 func (w *yuvWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	err := w.closeCurrentLocked()
+	w.segment = 0
+	w.totalWrote = 0
+	return err
+}
+
+func (w *yuvWriter) closeCurrentLocked() error {
 	if w.f == nil {
 		return nil
 	}
@@ -786,6 +815,7 @@ func (w *yuvWriter) Close() error {
 	syncErr := w.f.Sync()
 	closeErr := w.f.Close()
 	w.f = nil
+	w.activePath = ""
 	w.isY4M = false
 	w.headOK = false
 	w.wrote = 0
@@ -798,7 +828,15 @@ func (w *yuvWriter) Close() error {
 func (w *yuvWriter) Written() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.wrote
+	return w.totalWrote
+}
+
+func yuvSegmentPath(path string, segment int) string {
+	if segment == 0 {
+		return path
+	}
+	ext := filepath.Ext(path)
+	return fmt.Sprintf("%s-%03d%s", strings.TrimSuffix(path, ext), segment, ext)
 }
 
 func y4mHeader(width, height int, fpsNum, fpsDen uint64) string {

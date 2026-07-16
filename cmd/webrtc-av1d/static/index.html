@@ -319,6 +319,16 @@
             };
             pc.onconnectionstatechange = () => pc && log('Connection state: ' + pc.connectionState);
             const sender = pc.addTrack(videoTrack, localStream);
+            try {
+                const parameters = sender.getParameters();
+                parameters.degradationPreference = 'maintain-resolution';
+                if (parameters.encodings && parameters.encodings.length) {
+                    parameters.encodings[0].scaleResolutionDownBy = 1;
+                }
+                await sender.setParameters(parameters);
+            } catch (error) {
+                log('Unable to lock sender resolution; adaptive resolution remains enabled: ' + error.message);
+            }
             preferAV1(sender);
             const offer = await pc.createOffer({ offerToReceiveVideo: false, offerToReceiveAudio: false });
             await pc.setLocalDescription(offer);

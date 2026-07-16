@@ -57,6 +57,24 @@ func TestCompoundFlagContextCompoundTopForwardLeft(t *testing.T) {
 	}
 }
 
+func TestCompoundFlagContextTreatsIntraAsUnsignedHighRef(t *testing.T) {
+	fs := NewFrameState(128, 256)
+	fs.TileX1, fs.TileY1 = 128, 256
+	fs.SetBlockState(64, 160, 32, 32, Av1Block{
+		RefFrame: 1, RefFrame2: 7, Compound: true,
+	})
+	fs.SetBlockState(32, 192, 32, 64, Av1Block{Intra: true})
+	if got := compoundFlagContext(fs, 64, 192); got != 3 {
+		t.Fatalf("compound top plus intra left context=%d want 3", got)
+	}
+
+	fs.SetBlockState(64, 160, 32, 32, Av1Block{Intra: true})
+	fs.SetBlockState(32, 192, 32, 64, Av1Block{RefFrame: 1})
+	if got := compoundFlagContext(fs, 64, 192); got != 0 {
+		t.Fatalf("intra top plus forward left context=%d want 0", got)
+	}
+}
+
 func TestCompoundDirContextSingleRefNeighbours(t *testing.T) {
 	fs := NewFrameState(64, 64)
 	fh := &header.FrameHeader{}

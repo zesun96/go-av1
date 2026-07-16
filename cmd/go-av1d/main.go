@@ -47,7 +47,7 @@ func main() {
 	}
 	hdr := dm.Header()
 	fmt.Fprintf(os.Stderr, "stream: %dx%d  fps: %d/%d\n",
-		hdr.Width, hdr.Height, hdr.TimebaseDen, hdr.TimebaseNum)
+		hdr.Width, hdr.Height, hdr.TimebaseNum, hdr.TimebaseDen)
 
 	inloopFilters, err := parseInloopFilters(*filters)
 	if err != nil {
@@ -149,12 +149,12 @@ func (stderrLogger) Logf(format string, args ...any) {
 // On the first frame it emits the Y4M stream header.
 func writeY4MFrame(w io.Writer, pic *av1.Picture, first bool, hdr ivf.FileHeader) {
 	if first {
-		var fpsDen, fpsNum uint32 = hdr.TimebaseDen, hdr.TimebaseNum
-		if fpsNum == 0 {
+		fpsNum, fpsDen := hdr.TimebaseNum, hdr.TimebaseDen
+		if fpsNum == 0 || fpsDen == 0 {
 			fpsNum, fpsDen = 1, 1
 		}
 		fmt.Fprintf(w, "YUV4MPEG2 W%d H%d F%d:%d Ip A0:0 C420\n",
-			pic.Width, pic.Height, fpsDen, fpsNum)
+			pic.Width, pic.Height, fpsNum, fpsDen)
 	}
 	fmt.Fprint(w, "FRAME\n")
 	// Write luma plane.

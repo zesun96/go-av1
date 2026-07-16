@@ -102,8 +102,20 @@ func ReconBlockDequantizedVisible(dst []uint8, stride int, coeff []int32,
 	td := transform.TxfmDimensions[tx]
 	fullW := int(td.W) * 4
 	fullH := int(td.H) * 4
-	if visW <= 0 || visH <= 0 {
+	if visW > fullW {
+		visW = fullW
+	}
+	if visH > fullH {
+		visH = fullH
+	}
+	if visW <= 0 || visH <= 0 || stride <= 0 || len(dst) < visW {
 		return
+	}
+	// A slice starting near the bottom edge can contain fewer complete rows
+	// than the coding-block dimensions suggest. Limit writes to rows for which
+	// all visW samples are addressable.
+	if maxRows := 1 + (len(dst)-visW)/stride; visH > maxRows {
+		visH = maxRows
 	}
 	if visW >= fullW && visH >= fullH {
 		applyResidualAdd(dst, stride, coeff, eob, tx, txtp, bitDepth)
