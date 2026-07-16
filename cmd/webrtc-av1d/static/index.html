@@ -39,7 +39,7 @@
             box-shadow: 0 20px 55px rgba(0, 0, 0, .2);
         }
         .card h2 { margin: 0 0 14px; color: #c7d1cc; font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; }
-        .source-grid { display: grid; grid-template-columns: 160px minmax(0, 1fr) auto; gap: 10px; margin-bottom: 14px; }
+        .source-grid { display: grid; grid-template-columns: 140px minmax(0, 1fr) 170px auto; gap: 10px; margin-bottom: 14px; }
         label { display: grid; gap: 6px; color: var(--muted); font-size: .76rem; }
         select, button {
             min-height: 40px;
@@ -131,6 +131,18 @@
             <label id="cameraField">Camera
                 <select id="cameraSelect"><option value="">Default camera</option></select>
             </label>
+            <label id="resolutionField">Camera resolution
+                <select id="resolutionSelect">
+                    <option value="">Browser default</option>
+                    <option value="320x240">320 x 240 (4:3)</option>
+                    <option value="640x360">640 x 360 (16:9)</option>
+                    <option value="640x480">640 x 480 (4:3)</option>
+                    <option value="1280x720" selected>1280 x 720 (16:9)</option>
+                    <option value="1920x1080">1920 x 1080 (16:9)</option>
+                    <option value="2560x1440">2560 x 1440 (16:9)</option>
+                    <option value="3840x2160">3840 x 2160 (16:9)</option>
+                </select>
+            </label>
             <button id="btnRefresh" type="button">Refresh cameras</button>
         </div>
         <div class="preview-shell">
@@ -157,6 +169,8 @@
     const sourceType = document.getElementById('sourceType');
     const cameraSelect = document.getElementById('cameraSelect');
     const cameraField = document.getElementById('cameraField');
+    const resolutionSelect = document.getElementById('resolutionSelect');
+    const resolutionField = document.getElementById('resolutionField');
     const btnRefresh = document.getElementById('btnRefresh');
     const btnStart = document.getElementById('btnStart');
     const btnStop = document.getElementById('btnStop');
@@ -191,6 +205,7 @@
     function updateSourceControls() {
         const camera = sourceType.value === 'camera';
         cameraField.hidden = !camera;
+        resolutionField.hidden = !camera;
         btnRefresh.hidden = !camera;
         sourceBadge.textContent = camera ? selectedCameraLabel() : 'Shared desktop';
     }
@@ -222,9 +237,25 @@
         }
     }
     function cameraConstraints() {
-        const video = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 60 } };
+        const video = { frameRate: { ideal: 30, max: 60 } };
+        const match = /^(\d+)x(\d+)$/.exec(resolutionSelect.value);
+        if (match) {
+            video.width = { exact: Number(match[1]) };
+            video.height = { exact: Number(match[2]) };
+        }
         if (cameraSelect.value) video.deviceId = { exact: cameraSelect.value };
         return { video, audio: false };
+    }
+    function logCameraTrackDetails(track) {
+        const settings = track.getSettings ? track.getSettings() : {};
+        const size = settings.width && settings.height ? `${settings.width}x${settings.height}` : 'unknown';
+        const fps = settings.frameRate ? ` at ${settings.frameRate.toFixed(2)} fps` : '';
+        log(`Camera output: ${size}${fps}`);
+        if (!track.getCapabilities) return;
+        const caps = track.getCapabilities();
+        if (caps.width && caps.height) {
+            log(`Camera capability range: width ${caps.width.min}-${caps.width.max}, height ${caps.height.min}-${caps.height.max}`);
+        }
     }
     async function acquireSelectedSource() {
         if (!navigator.mediaDevices) throw new Error('Media capture requires HTTPS or localhost');
@@ -304,6 +335,7 @@
             localStream = await acquireSelectedSource();
             const videoTrack = localStream.getVideoTracks()[0];
             if (!videoTrack) throw new Error('Selected source did not provide a video track');
+            if (sourceType.value === 'camera') logCameraTrackDetails(videoTrack);
             localVideo.srcObject = localStream;
             watchDisplayEnded(localStream);
             updateSourceControls();
@@ -319,15 +351,17 @@
             };
             pc.onconnectionstatechange = () => pc && log('Connection state: ' + pc.connectionState);
             const sender = pc.addTrack(videoTrack, localStream);
-            try {
-                const parameters = sender.getParameters();
-                parameters.degradationPreference = 'maintain-resolution';
-                if (parameters.encodings && parameters.encodings.length) {
-                    parameters.encodings[0].scaleResolutionDownBy = 1;
+            if (sourceType.value === 'camera') {
+                try {
+                    const parameters = sender.getParameters();
+                    parameters.degradationPreference = 'maintain-resolution';
+                    if (parameters.encodings && parameters.encodings.length) {
+                        parameters.encodings[0].scaleResolutionDownBy = 1;
+                    }
+                    await sender.setParameters(parameters);
+                } catch (error) {
+                    log('Unable to lock camera sender resolution; adaptive resolution remains enabled: ' + error.message);
                 }
-                await sender.setParameters(parameters);
-            } catch (error) {
-                log('Unable to lock sender resolution; adaptive resolution remains enabled: ' + error.message);
             }
             preferAV1(sender);
             const offer = await pc.createOffer({ offerToReceiveVideo: false, offerToReceiveAudio: false });
@@ -351,6 +385,7 @@
             const connected = Boolean(pc);
             sourceType.disabled = connected;
             cameraSelect.disabled = connected;
+            resolutionSelect.disabled = connected;
             btnRefresh.disabled = connected;
             btnStart.disabled = connected;
         }
@@ -366,6 +401,7 @@
         btnStop.disabled = true;
         sourceType.disabled = false;
         cameraSelect.disabled = false;
+        resolutionSelect.disabled = false;
         btnRefresh.disabled = false;
         setStatus('Disconnected');
     }

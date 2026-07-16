@@ -44,7 +44,8 @@ go build -o webrtc-av1d .
 ## Capture workflow
 
 1. Start the server and open `http://localhost:<port>`.
-2. Select **Camera** and the desired camera, or select **Shared desktop**.
+2. Select **Camera**, the desired camera and a resolution preset, or select
+   **Shared desktop**.
 3. Click **Start stream**. Desktop capture opens the browser's screen, window,
    or tab picker.
 4. The browser AV1-encodes the selected source and sends it over WebRTC.
@@ -55,19 +56,30 @@ go build -o webrtc-av1d .
 
 When the track ends, the server finalizes and closes both output files. Wait for
 the `YUV output finalized` log entry before opening the completed Y4M file.
+Pressing `Ctrl+C` also closes active WebRTC connections, waits for recording
+finalization, and then shuts down the HTTP server. Output close does not force a
+full disk-cache sync, avoiding a long pause for large Y4M files while still
+writing the final container headers before the files are closed.
 
 The source controls are locked while streaming because Y4M has fixed dimensions
 for the complete file. Stop the current stream before selecting another camera
 or switching between camera and desktop capture.
 
-The sender requests WebRTC's `maintain-resolution` degradation preference. If
-the browser still changes encoded resolution, the server keeps IVF as one
-complete stream and starts a new valid Y4M segment (`output-001.y4m`,
+For camera capture, the sender requests WebRTC's `maintain-resolution`
+degradation preference. Desktop capture keeps the browser's adaptive sender
+behaviour. If the browser changes encoded resolution, the server keeps IVF as
+one complete stream and starts a new valid Y4M segment (`output-001.y4m`,
 `output-002.y4m`, and so on) instead of mixing different frame sizes in one
 Y4M file.
 
 Camera labels may be hidden until camera permission is granted. The page
 refreshes the device list after permission succeeds and when devices change.
+Selected camera resolution presets use exact width and height constraints, so
+unsupported camera/driver combinations fail visibly instead of silently using
+another size. The page logs the actual output size and the capability range
+reported by the browser. Web APIs expose width and height ranges rather than an
+exhaustive list of discrete hardware modes, so the menu contains explicit
+common presets.
 
 ## Playback
 

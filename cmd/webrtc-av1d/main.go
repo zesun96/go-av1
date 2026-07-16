@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/binary"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -73,9 +75,10 @@ func main() {
 
 	// Global state shared between requests.
 	srv := &server{
-		dec:  dec,
-		ivfw: ivfw,
-		yuv:  yuv,
+		dec:         dec,
+		ivfw:        ivfw,
+		yuv:         yuv,
+		connections: make(map[*webrtc.PeerConnection]struct{}),
 	}
 
 	http.HandleFunc("/", srv.handleIndex)
@@ -83,8 +86,36 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", *flagPort)
 	log.Printf("listening on http://localhost%s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("http: %v", err)
+	httpServer := &http.Server{Addr: addr}
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- httpServer.ListenAndServe()
+	}()
+
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopSignals()
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("http: %v", err)
+		}
+	case <-signalCtx.Done():
+		// Restore the default handler so a second Ctrl+C can force termination.
+		stopSignals()
+		log.Printf("shutdown requested; finalizing active recording")
+		srv.stopping.Store(true)
+		srv.closePeerConnections()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("http shutdown: %v", err)
+		}
+		if !srv.waitForTracks(10 * time.Second) {
+			log.Printf("track shutdown timed out; output finalization may be incomplete")
+		}
+		srv.closeTrackOutputs()
+		log.Printf("shutdown complete")
 	}
 }
 
@@ -95,8 +126,79 @@ type server struct {
 	ivfw *ivfWriter
 	yuv  *yuvWriter
 
-	mu         sync.Mutex
-	frameCount int64
+	mu           sync.Mutex
+	frameCount   int64
+	stopping     atomic.Bool
+	connections  map[*webrtc.PeerConnection]struct{}
+	connectionMu sync.Mutex
+	trackMu      sync.Mutex
+	activeTracks int
+}
+
+func (s *server) registerPeerConnection(pc *webrtc.PeerConnection) bool {
+	s.connectionMu.Lock()
+	defer s.connectionMu.Unlock()
+	if s.stopping.Load() {
+		return false
+	}
+	if s.connections == nil {
+		s.connections = make(map[*webrtc.PeerConnection]struct{})
+	}
+	s.connections[pc] = struct{}{}
+	return true
+}
+
+func (s *server) unregisterPeerConnection(pc *webrtc.PeerConnection) {
+	s.connectionMu.Lock()
+	delete(s.connections, pc)
+	s.connectionMu.Unlock()
+}
+
+func (s *server) closePeerConnections() {
+	s.connectionMu.Lock()
+	connections := make([]*webrtc.PeerConnection, 0, len(s.connections))
+	for pc := range s.connections {
+		connections = append(connections, pc)
+	}
+	s.connectionMu.Unlock()
+	for _, pc := range connections {
+		if err := pc.Close(); err != nil {
+			log.Printf("peer connection close: %v", err)
+		}
+		s.unregisterPeerConnection(pc)
+	}
+}
+
+func (s *server) trackStarted() bool {
+	s.trackMu.Lock()
+	defer s.trackMu.Unlock()
+	if s.stopping.Load() {
+		return false
+	}
+	s.activeTracks++
+	return true
+}
+
+func (s *server) trackFinished() {
+	s.trackMu.Lock()
+	s.activeTracks--
+	s.trackMu.Unlock()
+}
+
+func (s *server) waitForTracks(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		s.trackMu.Lock()
+		active := s.activeTracks
+		s.trackMu.Unlock()
+		if active == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // handleIndex serves the single-page frontend from static/index.html.
@@ -184,9 +286,26 @@ func (s *server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "new peer connection: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if !s.registerPeerConnection(pc) {
+		pc.Close() //nolint:errcheck
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	negotiated := false
+	defer func() {
+		if !negotiated {
+			s.unregisterPeerConnection(pc)
+			pc.Close() //nolint:errcheck
+		}
+	}()
 
 	// Register track handler.
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		if !s.trackStarted() {
+			pc.Close() //nolint:errcheck
+			return
+		}
+		defer s.trackFinished()
 		log.Printf("track received: codec=%s ssrc=%d", track.Codec().MimeType, track.SSRC())
 		s.consumeAV1Track(track)
 	})
@@ -195,6 +314,7 @@ func (s *server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ICE state: %s", state)
 		if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateClosed {
 			pc.Close() //nolint:errcheck
+			s.unregisterPeerConnection(pc)
 		}
 	})
 
@@ -232,6 +352,7 @@ func (s *server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		SDP:  local.SDP,
 		Type: local.Type.String(),
 	})
+	negotiated = true
 	log.Println("answer sent to browser")
 }
 
@@ -255,7 +376,7 @@ func (s *server) consumeAV1Track(track *webrtc.TrackRemote) {
 	for {
 		pkt, _, err := track.ReadRTP()
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
+			if !errors.Is(err, io.EOF) && !s.stopping.Load() {
 				log.Printf("rtp read: %v", err)
 			}
 			break
@@ -633,11 +754,10 @@ func (w *ivfWriter) Close() error {
 		binary.LittleEndian.PutUint32(count[:], uint32(w.written))
 		_, finalizeErr = w.f.Write(count[:])
 	}
-	syncErr := w.f.Sync()
 	closeErr := w.f.Close()
 	w.f = nil
 	w.written = 0
-	return errors.Join(finalizeErr, syncErr, closeErr)
+	return errors.Join(finalizeErr, closeErr)
 }
 
 func (w *ivfWriter) Written() uint64 {
@@ -812,7 +932,6 @@ func (w *yuvWriter) closeCurrentLocked() error {
 				w.wrote, num, den, float64(w.lastPTS-w.firstPTS)/rtpVideoClock)
 		}
 	}
-	syncErr := w.f.Sync()
 	closeErr := w.f.Close()
 	w.f = nil
 	w.activePath = ""
@@ -822,7 +941,7 @@ func (w *yuvWriter) closeCurrentLocked() error {
 	w.ptsSet = false
 	w.width = 0
 	w.height = 0
-	return errors.Join(finalizeErr, syncErr, closeErr)
+	return errors.Join(finalizeErr, closeErr)
 }
 
 func (w *yuvWriter) Written() int {

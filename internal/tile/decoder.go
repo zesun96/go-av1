@@ -1144,21 +1144,36 @@ func decodeInterResidual(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	reconSt := buildInterReconState(fhdr, st.qidx)
 	txtpGrid := newInterTxtpGrid(bx, by, bw, bh, uint8(transform.DCT_DCT))
 	lumaTxtp := uint8(transform.DCT_DCT)
-	// readVarTxTree already records the exact transform leaves in syntax order.
-	// Prefer that list over reconstructing it from the compact split masks: the
-	// mask bit coordinates are metadata and are not a stable traversal format.
+	var yBlocks []txBlockSpec
 	if len(txSt.yTxBlocks) > 0 {
-		lumaTxtp = decodeInterPlaneResidualVarTx(m, ctx, fs, fb, 0, bx, by, bw, bh, st.ctxBW, st.ctxBH, txSt.yTxBlocks, reconSt.dqY, st.skip, txtpGrid, uint8(transform.DCT_DCT), reconSt.reducedTxtpSet, st.qidxIsZero, st.lossless)
+		// readVarTxTree records the exact transform leaves in syntax order.
+		yBlocks = txSt.yTxBlocks
 	} else if txSt.block.TxSplit0 != 0 || txSt.block.TxSplit1 != 0 {
-		lumaTxtp = decodeInterPlaneResidualTree(m, ctx, fs, fb, 0, bx, by, bw, bh, st.ctxBW, st.ctxBH, txSt.block.MaxYTx, txSt.block.TxSplit0, txSt.block.TxSplit1, reconSt.dqY, st.skip, seq, txtpGrid, uint8(transform.DCT_DCT), reconSt.reducedTxtpSet, st.qidxIsZero, st.lossless)
+		yBlocks = collectTxBlocksFromSplits(bx, by, bw, bh, fb.Width, fb.Height, txSt.block.MaxYTx, txSt.block.TxSplit0, txSt.block.TxSplit1)
 	} else {
-		lumaTxtp = decodeInterPlaneResidual(m, ctx, fs, fb, 0, bx, by, bw, bh, st.ctxBW, st.ctxBH, txSt.maxYTx, reconSt.dqY, st.skip, seq, txtpGrid, uint8(transform.DCT_DCT), reconSt.reducedTxtpSet, st.qidxIsZero, st.lossless)
+		yBlocks = collectUniformTxBlocks(bw, bh, txSt.maxYTx)
 	}
-	if st.hasChroma && len(fb.U) > 0 {
-		cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
-		_, _, ctxCBW, ctxCBH := chromaRect(seq, bx, by, st.ctxBW, st.ctxBH)
-		decodeInterPlaneResidual(m, ctx, fs, fb, 1, cbx, cby, cbw, cbh, ctxCBW, ctxCBH, txSt.uvtx, reconSt.dqU, st.skip, seq, txtpGrid, lumaTxtp, reconSt.reducedTxtpSet, st.qidxIsZero, st.lossless)
-		decodeInterPlaneResidual(m, ctx, fs, fb, 2, cbx, cby, cbw, cbh, ctxCBW, ctxCBH, txSt.uvtx, reconSt.dqV, st.skip, seq, txtpGrid, lumaTxtp, reconSt.reducedTxtpSet, st.qidxIsZero, st.lossless)
+
+	// AV1 interleaves coefficients per 64x64 luma region: all luma leaves in
+	// the region, then U and V. Decoding all luma for a 128x128 block before
+	// chroma consumes the same symbols in the wrong order and desynchronizes
+	// the arithmetic decoder at the second region.
+	_, _, ctxCBW, ctxCBH := chromaRect(seq, bx, by, st.ctxBW, st.ctxBH)
+	for regionY := 0; regionY < bh; regionY += 64 {
+		regionH := minInt(64, bh-regionY)
+		for regionX := 0; regionX < bw; regionX += 64 {
+			regionW := minInt(64, bw-regionX)
+			regionBlocks := txBlocksInRegion(yBlocks, regionX, regionY, regionW, regionH)
+			if len(regionBlocks) > 0 {
+				lumaTxtp = decodeInterPlaneResidualVarTxImpl(m, ctx, fs, fb, 0, bx, by, bw, bh, st.ctxBW, st.ctxBH, regionBlocks, reconSt.dqY, st.skip, seq, txtpGrid, uint8(transform.DCT_DCT), reconSt.reducedTxtpSet, st.qidxIsZero, st.lossless)
+			}
+			if !st.hasChroma || len(fb.U) == 0 {
+				continue
+			}
+			cbx, cby, cbw, cbh := chromaRect(seq, bx+regionX, by+regionY, regionW, regionH)
+			decodeInterPlaneResidual(m, ctx, fs, fb, 1, cbx, cby, cbw, cbh, ctxCBW, ctxCBH, txSt.uvtx, reconSt.dqU, st.skip, seq, txtpGrid, lumaTxtp, reconSt.reducedTxtpSet, st.qidxIsZero, st.lossless)
+			decodeInterPlaneResidual(m, ctx, fs, fb, 2, cbx, cby, cbw, cbh, ctxCBW, ctxCBH, txSt.uvtx, reconSt.dqV, st.skip, seq, txtpGrid, lumaTxtp, reconSt.reducedTxtpSet, st.qidxIsZero, st.lossless)
+		}
 	}
 }
 
@@ -1909,6 +1924,16 @@ func collectUniformTxBlocks(bw, bh int, tx uint8) []txBlockSpec {
 	return specs
 }
 
+func txBlocksInRegion(blocks []txBlockSpec, x, y, w, h int) []txBlockSpec {
+	region := make([]txBlockSpec, 0, len(blocks))
+	for _, block := range blocks {
+		if block.x >= x && block.x < x+w && block.y >= y && block.y < y+h {
+			region = append(region, block)
+		}
+	}
+	return region
+}
+
 func collectTxBlocksFromSplits(bx, by, bw, bh, frameW, frameH int, maxTx uint8, split0 uint8, split1 uint16) []txBlockSpec {
 	specs := make([]txBlockSpec, 0, 16)
 	collectTxBlocksFromSplitNode(bx, by, bw, bh, frameW, frameH, maxTx, 0, 0, 0, split0, split1, &specs)
@@ -2296,6 +2321,12 @@ func decodeIntraPlane(
 		bh = planeH - by
 	}
 
+	// Transform dimensions. The prediction still covers the complete transform
+	// block when the coded block is clipped by the visible frame boundary.
+	td := transform.TxfmDimensions[tx]
+	tw := int(td.W) * 4
+	th := int(td.H) * 4
+
 	// Build topleft reference buffer for intra prediction.
 	// Layout (matches intra package convention, with extension for Z1/Z3
 	// directional prediction which can index up to ~2*(w+h) samples):
@@ -2304,18 +2335,7 @@ func decodeIntraPlane(
 	//   topleft[tl]                = top-left sample
 	//   topleft[tl+1..tl+2*maxDim] = top samples (left-to-right),
 	//                                extended past bw by replicating last
-	maxDim := bw
-	if bh > maxDim {
-		maxDim = bh
-	}
-	tlBufSize := 4*maxDim + 2 // extended for Z1/Z3 directional reach
-	tlBuf := make([]byte, tlBufSize)
-	tl := 2 * maxDim // index of the top-left sample
-
-	// Transform dimensions.
-	td := transform.TxfmDimensions[tx]
-	tw := int(td.W) * 4
-	th := int(td.H) * 4
+	tlBuf, tl := newIntraEdgeBuffer(bw, bh, tw, th)
 
 	// Iterate over transform blocks within the coding block.
 	predBuf := make([]byte, tw*th)
@@ -2495,6 +2515,17 @@ func callPreparedIntraPred(mode, packedAngle, filterMode int, dst []byte, stride
 	default:
 		callIntraPred(mode, 0, -1, dst, stride, topleft, tl, width, height, true, true)
 	}
+}
+
+func newIntraEdgeBuffer(dimensions ...int) ([]byte, int) {
+	maxDim := 0
+	for _, dimension := range dimensions {
+		if dimension > maxDim {
+			maxDim = dimension
+		}
+	}
+	tl := 2 * maxDim
+	return make([]byte, 4*maxDim+2), tl
 }
 
 func prepareIntraPrediction(

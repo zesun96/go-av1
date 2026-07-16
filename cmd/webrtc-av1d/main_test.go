@@ -6,9 +6,37 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zesun96/go-av1/pkg/av1"
 )
+
+func TestWaitForTracks(t *testing.T) {
+	s := &server{}
+	if !s.trackStarted() {
+		t.Fatal("track did not start")
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		s.trackFinished()
+	}()
+	if !s.waitForTracks(time.Second) {
+		t.Fatal("waitForTracks timed out after track finished")
+	}
+
+	if !s.trackStarted() {
+		t.Fatal("second track did not start")
+	}
+	if s.waitForTracks(20 * time.Millisecond) {
+		t.Fatal("waitForTracks succeeded with an active track")
+	}
+	s.trackFinished()
+
+	s.stopping.Store(true)
+	if s.trackStarted() {
+		t.Fatal("track started during shutdown")
+	}
+}
 
 func TestIVFWriterPreservesRTPTimestamps(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "output.ivf")

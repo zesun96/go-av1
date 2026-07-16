@@ -339,6 +339,22 @@ func TestCollectTxBlocksFromSplitsClipsAgainstFrameEdge(t *testing.T) {
 	}
 }
 
+func TestTxBlocksInRegionPreservesSyntaxOrder(t *testing.T) {
+	blocks := []txBlockSpec{
+		{tx: transform.TX16x16, x: 0, y: 0},
+		{tx: transform.TX16x16, x: 64, y: 0},
+		{tx: transform.TX16x16, x: 16, y: 16},
+		{tx: transform.TX16x16, x: 80, y: 16},
+	}
+	got := txBlocksInRegion(blocks, 0, 0, 64, 64)
+	if len(got) != 2 {
+		t.Fatalf("region block count = %d, want 2", len(got))
+	}
+	if got[0].x != 0 || got[0].y != 0 || got[1].x != 16 || got[1].y != 16 {
+		t.Fatalf("region order = %+v, want [(0,0), (16,16)]", got)
+	}
+}
+
 func TestGetLoCtx1DReturnsDav1dHiMag(t *testing.T) {
 	levels := make([]uint8, 16*6)
 	levels[1] = 2
