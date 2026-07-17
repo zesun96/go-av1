@@ -164,6 +164,28 @@ func TestFindSpatialTallLeftBlockIsNotCountedBySecondaryColumns(t *testing.T) {
 	t.Fatalf("missing tall-left candidate: %+v", r.Candidates)
 }
 
+func TestFindSpatialUsesNominalBlockSizeAtBottomEdge(t *testing.T) {
+	frame := NewFrame(2560, 1392)
+	dims := testFullBlockDims()
+	top := Block{Ref: RefPair{1, -1}, MV: MVPair{{X: 2}}, BS: 3, MF: 2}
+	zero := Block{Ref: RefPair{1, -1}, BS: 3}
+	frame.PutGridBlock(240, 320, 16, 16, top)
+	frame.PutGridBlock(224, 336, 16, 16, zero)
+	frame.PutGridBlock(256, 320, 16, 16, zero)
+	frame.PutGridBlock(224, 320, 16, 16, zero)
+
+	r := FindSpatial(SearchConfig{
+		Frame: frame, Ref: 1, Bx4: 240, By4: 336, Bw4: 16, Bh4: 16,
+		TileX0: 160, TileY0: 176, TileX1: 320, TileY1: 352, BlockDims: dims,
+	})
+	if r.Count < 2 || r.Candidates[0].MV[0] != (MV{}) || r.Candidates[0].Weight != 744 {
+		t.Fatalf("bottom-edge candidates=%+v, want zero MV first with weight 744", r.Candidates[:r.Count])
+	}
+	if r.Candidates[1].MV[0] != (MV{X: 2}) || r.Candidates[1].Weight != 736 {
+		t.Fatalf("bottom-edge second candidate=%+v, want X=2 weight 736", r.Candidates[1])
+	}
+}
+
 func TestFindMergesMatchingSpatialAndTemporal(t *testing.T) {
 	current := NewFrame(32, 32)
 	current.OrderHint, current.OrderBits = 9, 5

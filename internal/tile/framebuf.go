@@ -29,12 +29,18 @@ type FrameBuf struct {
 	StrideY int
 	Width   int
 	Height  int
+	// CodedWidth/CodedHeight include the 8x8-aligned reconstruction padding.
+	// Width/Height remain the visible frame dimensions.
+	CodedWidth  int
+	CodedHeight int
 
 	// Chroma planes.
-	U, V     []byte
-	StrideUV int
-	ChromaW  int
-	ChromaH  int
+	U, V         []byte
+	StrideUV     int
+	ChromaW      int
+	ChromaH      int
+	CodedChromaW int
+	CodedChromaH int
 
 	// Monochrome: if true, U/V are nil.
 	Monochrome bool
@@ -49,4 +55,33 @@ type FrameBuf struct {
 	// independently decoded tile states. Post-filters consume this after tile
 	// entropy and neighbour contexts have gone out of scope.
 	FilterState *FrameState
+}
+
+func (fb *FrameBuf) codedLumaSize() (int, int) {
+	w, h := fb.CodedWidth, fb.CodedHeight
+	if w <= 0 {
+		w = fb.Width
+	}
+	if h <= 0 {
+		h = fb.Height
+	}
+	return w, h
+}
+
+func (fb *FrameBuf) codedChromaSize() (int, int) {
+	w, h := fb.CodedChromaW, fb.CodedChromaH
+	if w <= 0 {
+		w = fb.ChromaW
+	}
+	if h <= 0 {
+		h = fb.ChromaH
+	}
+	return w, h
+}
+
+func (fb *FrameBuf) codedPlaneSize(plane int) (int, int) {
+	if plane == 0 {
+		return fb.codedLumaSize()
+	}
+	return fb.codedChromaSize()
 }

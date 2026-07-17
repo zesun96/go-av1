@@ -6,6 +6,17 @@ import (
 	"github.com/zesun96/go-av1/internal/refmvs"
 )
 
+func TestNewFrameStateIncludesFinalCodedFourByFourRow(t *testing.T) {
+	fs := NewFrameState(1510, 1012)
+	if fs.W4 != 378 || fs.H4 != 254 {
+		t.Fatalf("coded 4x4 grid = %dx%d, want 378x254", fs.W4, fs.H4)
+	}
+	fs.SetCoefCtxBlock(0, 0, 1008, 4, 8, 7)
+	if got := fs.LeftLCoef[253]; got != 7 {
+		t.Fatalf("last coded luma context = %d, want 7", got)
+	}
+}
+
 func TestMergeFilterStateCopiesOnlyTileRegion(t *testing.T) {
 	dst := NewFrameState(128, 64)
 	src := NewFrameState(128, 64)

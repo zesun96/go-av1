@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
@@ -221,6 +222,77 @@ func TestY4MWriterSegmentsResolutionChanges(t *testing.T) {
 		if got := strings.Count(string(data), "FRAME\n"); got != 1 {
 			t.Fatalf("frame count in %s = %d, want 1", want.path, got)
 		}
+	}
+
+	stem := strings.TrimSuffix(path, filepath.Ext(path))
+	list, err := os.ReadFile(stem + ".ffplay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantList := "# Y4M segments in playback order\noutput.y4m\noutput-001.y4m\n"
+	if string(list) != wantList {
+		t.Fatalf("ffplay list = %q, want %q", list, wantList)
+	}
+	launcher, err := os.ReadFile(stem + "-play.cmd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(launcher), `ffplay -autoexit -loglevel warning "%~dp0%%F"`) {
+		t.Fatalf("unexpected ffplay launcher: %q", launcher)
+	}
+}
+
+func TestY4MWriterPadsSmallerFramesOnFixedCanvas(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "output.y4m")
+	w := &yuvWriter{path: path}
+	first := testPicture(6, 6)
+	second := testPicture(2, 2)
+	for i := range second.Y {
+		second.Y[i] = 200
+	}
+	second.U[0], second.V[0] = 30, 40
+
+	if err := w.WriteFrame(first, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteFrame(second, 3000); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(yuvSegmentPath(path, 1)); !os.IsNotExist(err) {
+		t.Fatalf("smaller frame unexpectedly created a segment: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := bytes.Split(data, []byte("FRAME\n"))
+	if len(parts) != 3 {
+		t.Fatalf("Y4M frame sections = %d, want 3", len(parts))
+	}
+	frame := parts[2]
+	if len(frame) != 54 { // 6x6 Y plus two 3x3 chroma planes.
+		t.Fatalf("padded frame length = %d, want 54", len(frame))
+	}
+	for y := 0; y < 6; y++ {
+		for x := 0; x < 6; x++ {
+			want := byte(16)
+			if x >= 2 && x < 4 && y >= 2 && y < 4 {
+				want = 200
+			}
+			if got := frame[y*6+x]; got != want {
+				t.Fatalf("Y[%d,%d] = %d, want %d", x, y, got, want)
+			}
+		}
+	}
+	if got := frame[36+1*3+1]; got != 30 {
+		t.Fatalf("centered U = %d, want 30", got)
+	}
+	if got := frame[45+1*3+1]; got != 40 {
+		t.Fatalf("centered V = %d, want 40", got)
 	}
 }
 

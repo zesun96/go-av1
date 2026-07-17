@@ -928,6 +928,7 @@ type yuvWriter struct {
 	ptsSet     bool
 	width      int
 	height     int
+	segments   []string
 }
 
 func (w *yuvWriter) ensureOpen() error {
@@ -940,6 +941,7 @@ func (w *yuvWriter) ensureOpen() error {
 		return err
 	}
 	w.f = f
+	w.segments = append(w.segments, w.activePath)
 	w.isY4M = strings.EqualFold(filepath.Ext(w.path), ".y4m")
 	log.Printf("YUV output opened: %s (format=%s)", w.activePath, map[bool]string{true: "Y4M", false: "raw"}[w.isY4M])
 	return nil
@@ -959,15 +961,17 @@ func (w *yuvWriter) WriteFrame(pic *av1.Picture, pts uint64) error {
 		if !w.isY4M {
 			return fmt.Errorf("raw YUV resolution changed from %dx%d to %dx%d", w.width, w.height, pic.Width, pic.Height)
 		}
-		oldWidth, oldHeight := w.width, w.height
-		if err := w.closeCurrentLocked(); err != nil {
-			return err
-		}
-		w.segment++
-		log.Printf("Y4M resolution changed: %dx%d -> %dx%d; starting segment %d",
-			oldWidth, oldHeight, pic.Width, pic.Height, w.segment)
-		if err := w.ensureOpen(); err != nil {
-			return err
+		if pic.Width > w.width || pic.Height > w.height {
+			oldWidth, oldHeight := w.width, w.height
+			if err := w.closeCurrentLocked(); err != nil {
+				return err
+			}
+			w.segment++
+			log.Printf("Y4M canvas exceeded: %dx%d -> %dx%d; starting segment %d",
+				oldWidth, oldHeight, pic.Width, pic.Height, w.segment)
+			if err := w.ensureOpen(); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -995,43 +999,48 @@ func (w *yuvWriter) WriteFrame(pic *av1.Picture, pts uint64) error {
 		}
 	}
 
-	// Write Y plane row by row (strip stride padding).
-	for row := 0; row < pic.Height; row++ {
-		start := row * pic.StrideY
-		end := start + pic.Width
-		if end > len(pic.Y) {
-			end = len(pic.Y)
-		}
-		if _, err := w.f.Write(pic.Y[start:end]); err != nil {
-			return err
-		}
+	if err := writeCenteredPlane(w.f, pic.Y, pic.StrideY, pic.Width, pic.Height, w.width, w.height, 16, true); err != nil {
+		return fmt.Errorf("write Y plane: %w", err)
 	}
-
-	// Write U and V planes (chroma subsampled rows).
-	cw := pic.ChromaWidth()
-	ch := pic.ChromaHeight()
-	for row := 0; row < ch; row++ {
-		uStart := row * pic.StrideUV
-		uEnd := uStart + cw
-		if uEnd > len(pic.U) {
-			uEnd = len(pic.U)
-		}
-		if _, err := w.f.Write(pic.U[uStart:uEnd]); err != nil {
-			return err
-		}
+	cw, ch := pic.ChromaWidth(), pic.ChromaHeight()
+	canvasCW, canvasCH := (w.width+1)/2, (w.height+1)/2
+	if err := writeCenteredPlane(w.f, pic.U, pic.StrideUV, cw, ch, canvasCW, canvasCH, 128, false); err != nil {
+		return fmt.Errorf("write U plane: %w", err)
 	}
-	for row := 0; row < ch; row++ {
-		vStart := row * pic.StrideUV
-		vEnd := vStart + cw
-		if vEnd > len(pic.V) {
-			vEnd = len(pic.V)
-		}
-		if _, err := w.f.Write(pic.V[vStart:vEnd]); err != nil {
-			return err
-		}
+	if err := writeCenteredPlane(w.f, pic.V, pic.StrideUV, cw, ch, canvasCW, canvasCH, 128, false); err != nil {
+		return fmt.Errorf("write V plane: %w", err)
 	}
 	w.wrote++
 	w.totalWrote++
+	return nil
+}
+
+func writeCenteredPlane(dst io.Writer, src []byte, srcStride, srcW, srcH, dstW, dstH int, fill byte, alignEven bool) error {
+	if srcW <= 0 || srcH <= 0 || srcStride < srcW || dstW < srcW || dstH < srcH {
+		return fmt.Errorf("invalid plane geometry src=%dx%d stride=%d dst=%dx%d", srcW, srcH, srcStride, dstW, dstH)
+	}
+	if (srcH-1)*srcStride+srcW > len(src) {
+		return io.ErrUnexpectedEOF
+	}
+	xOff := (dstW - srcW) / 2
+	yOff := (dstH - srcH) / 2
+	if alignEven {
+		xOff &^= 1
+		yOff &^= 1
+	}
+	rowBuf := make([]byte, dstW)
+	for y := 0; y < dstH; y++ {
+		for x := range rowBuf {
+			rowBuf[x] = fill
+		}
+		if y >= yOff && y < yOff+srcH {
+			srcOff := (y - yOff) * srcStride
+			copy(rowBuf[xOff:xOff+srcW], src[srcOff:srcOff+srcW])
+		}
+		if _, err := dst.Write(rowBuf); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1040,8 +1049,12 @@ func (w *yuvWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	err := w.closeCurrentLocked()
+	if len(w.segments) > 0 && strings.EqualFold(filepath.Ext(w.path), ".y4m") {
+		err = errors.Join(err, writeFFPlayList(w.path, w.segments))
+	}
 	w.segment = 0
 	w.totalWrote = 0
+	w.segments = nil
 	return err
 }
 
@@ -1089,6 +1102,34 @@ func yuvSegmentPath(path string, segment int) string {
 	}
 	ext := filepath.Ext(path)
 	return fmt.Sprintf("%s-%03d%s", strings.TrimSuffix(path, ext), segment, ext)
+}
+
+func writeFFPlayList(y4mPath string, segments []string) error {
+	stem := strings.TrimSuffix(y4mPath, filepath.Ext(y4mPath))
+	listPath := stem + ".ffplay"
+	var list strings.Builder
+	list.WriteString("# Y4M segments in playback order\n")
+	for _, segment := range segments {
+		fmt.Fprintln(&list, filepath.Base(segment))
+	}
+	if err := os.WriteFile(listPath, []byte(list.String()), 0o644); err != nil {
+		return fmt.Errorf("write ffplay list: %w", err)
+	}
+
+	cmdPath := stem + "-play.cmd"
+	cmd := "@echo off\r\n" +
+		"setlocal\r\n" +
+		"echo Dynamic Y4M segments restart ffplay when the frame size changes.\r\n" +
+		fmt.Sprintf("for /f \"usebackq eol=# delims=\" %%%%F in (\"%%~dp0%s\") do (\r\n", filepath.Base(listPath)) +
+		"  ffplay -autoexit -loglevel warning \"%~dp0%%F\"\r\n" +
+		"  if errorlevel 1 exit /b 1\r\n" +
+		")\r\n"
+	if err := os.WriteFile(cmdPath, []byte(cmd), 0o755); err != nil {
+		return fmt.Errorf("write ffplay launcher: %w", err)
+	}
+	log.Printf("FFplay list finalized: %s (%d segments); run %s",
+		listPath, len(segments), cmdPath)
+	return nil
 }
 
 func y4mHeader(width, height int, fpsNum, fpsDen uint64) string {

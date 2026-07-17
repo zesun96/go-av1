@@ -43,8 +43,8 @@ func (c ChromaFormat) String() string {
 // The plane slices alias the underlying pool buffers; do not retain them past
 // the picture's lifetime.
 type Picture struct {
-	// Y, U, V are the per-plane sample buffers. Length equals
-	// StrideY*Height for Y and StrideUV*ChromaHeight() for U/V.
+	// Y, U, V are the per-plane sample buffers. They may include coded-grid
+	// padding beyond the visible Width and Height.
 	Y, U, V []byte
 
 	// StrideY and StrideUV are the byte distances between consecutive rows.
@@ -73,6 +73,15 @@ type Picture struct {
 	// release is invoked when the reference count drops to zero. The decoder
 	// installs a callback that returns the buffer to the pool.
 	release func(*Picture)
+}
+
+func (p *Picture) codedSize() (int, int) {
+	return (p.Width + 7) &^ 7, (p.Height + 7) &^ 7
+}
+
+func (p *Picture) codedChromaSize() (int, int) {
+	w, h := p.codedSize()
+	return (w + 1) >> 1, (h + 1) >> 1
 }
 
 // ChromaWidth returns the chroma plane width in samples.

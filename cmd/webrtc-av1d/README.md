@@ -80,10 +80,19 @@ or switching between camera and desktop capture.
 
 For camera capture, the sender requests WebRTC's `maintain-resolution`
 degradation preference. Desktop capture keeps the browser's adaptive sender
-behaviour. If the browser changes encoded resolution, the server keeps IVF as
-one complete stream and starts a new valid Y4M segment (`output-001.y4m`,
-`output-002.y4m`, and so on) instead of mixing different frame sizes in one
-Y4M file.
+behaviour. The first decoded frame defines a fixed Y4M canvas. Smaller frames
+are centered on that canvas with black padding, so browser window resizing does
+not restart playback. If a later frame exceeds the canvas, the server starts a
+new valid Y4M segment (`output-001.y4m`, `output-002.y4m`, and so on).
+Finalization also creates `output.ffplay`, which lists all segments in playback
+order, and `output-play.cmd`. Run the latter to play every segment:
+
+```powershell
+.\output-play.cmd
+```
+
+An FFconcat playlist cannot be used here because its raw-video stream keeps
+the first segment's dimensions and rejects differently sized frames.
 
 Camera labels may be hidden until camera permission is granted. The page
 refreshes the device list after permission succeeds and when devices change.

@@ -40,6 +40,8 @@ go.work.sum
 cov.txt
 cover
 /cmd/webrtc-av1d/*.png
+/cmd/webrtc-av1d/*.ffplay
+/cmd/webrtc-av1d/*-play.cmd
 docs/plan/*
 .plan/*
 .gocache/

@@ -319,17 +319,23 @@ func (d *decoderImpl) obuRefs() *[header.NumRefFrames]obu.FrameReference {
 // picToFrameBuf wraps a *Picture as a tile.FrameBuf so the tile package does
 // not need to import pkg/av1 (which would create an import cycle).
 func (d *decoderImpl) picToFrameBuf(p *Picture) *tile.FrameBuf {
+	codedW := (p.Width + 7) &^ 7
+	codedH := (p.Height + 7) &^ 7
 	fb := &tile.FrameBuf{
-		Y:          p.Y,
-		StrideY:    p.StrideY,
-		Width:      p.Width,
-		Height:     p.Height,
-		U:          p.U,
-		V:          p.V,
-		StrideUV:   p.StrideUV,
-		ChromaW:    p.ChromaWidth(),
-		ChromaH:    p.ChromaHeight(),
-		Monochrome: p.Chroma == ChromaMonochrome,
+		Y:            p.Y,
+		StrideY:      p.StrideY,
+		Width:        p.Width,
+		Height:       p.Height,
+		CodedWidth:   codedW,
+		CodedHeight:  codedH,
+		U:            p.U,
+		V:            p.V,
+		StrideUV:     p.StrideUV,
+		ChromaW:      p.ChromaWidth(),
+		ChromaH:      p.ChromaHeight(),
+		CodedChromaW: (codedW + 1) >> 1,
+		CodedChromaH: (codedH + 1) >> 1,
+		Monochrome:   p.Chroma == ChromaMonochrome,
 	}
 	for i, ref := range d.refs {
 		fb.RefMVs[i] = ref.mv
@@ -363,15 +369,17 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 	if h <= 0 {
 		h = 1
 	}
-	strideY := (w + 15) &^ 15
+	codedW := (w + 7) &^ 7
+	codedH := (h + 7) &^ 7
+	strideY := (codedW + 15) &^ 15
 	cw := (w + 1) >> 1
-	ch := (h + 1) >> 1
 	strideUV := (cw + 15) &^ 15
+	codedCh := (codedH + 1) >> 1
 
 	pic := &Picture{
-		Y:        make([]byte, strideY*h),
-		U:        make([]byte, strideUV*ch),
-		V:        make([]byte, strideUV*ch),
+		Y:        make([]byte, strideY*codedH),
+		U:        make([]byte, strideUV*codedCh),
+		V:        make([]byte, strideUV*codedCh),
 		StrideY:  strideY,
 		StrideUV: strideUV,
 		Width:    w,
@@ -493,9 +501,9 @@ func (d *decoderImpl) applyLoopFilterWithState(pic *Picture, fhdr *header.FrameH
 		sharpness := int(fhdr.LoopFilter.Sharpness)
 		levelYV := int(fhdr.LoopFilter.LevelY[0])
 		levelYH := int(fhdr.LoopFilter.LevelY[1])
-		deblockPlaneLevels(pic.Y, pic.StrideY, pic.Width, pic.Height, 4, levelYH, levelYV, sharpness)
-		cw := pic.ChromaWidth()
-		ch := pic.ChromaHeight()
+		w, h := pic.codedSize()
+		deblockPlaneLevels(pic.Y, pic.StrideY, w, h, 4, levelYH, levelYV, sharpness)
+		cw, ch := pic.codedChromaSize()
 		deblockPlaneLevels(pic.U, pic.StrideUV, cw, ch, 4, int(fhdr.LoopFilter.LevelU), int(fhdr.LoopFilter.LevelU), sharpness)
 		deblockPlaneLevels(pic.V, pic.StrideUV, cw, ch, 4, int(fhdr.LoopFilter.LevelV), int(fhdr.LoopFilter.LevelV), sharpness)
 	}
@@ -503,7 +511,7 @@ func (d *decoderImpl) applyLoopFilterWithState(pic *Picture, fhdr *header.FrameH
 
 func (d *decoderImpl) applyChromaLoopFilter(pic *Picture, fhdr *header.FrameHeader, fs *tile.FrameState) {
 	lut := loopfilter.NewFilterLUT(int(fhdr.LoopFilter.Sharpness))
-	w, h := pic.ChromaWidth(), pic.ChromaHeight()
+	w, h := pic.codedChromaSize()
 	for planeNum, plane := range [][]byte{pic.U, pic.V} {
 		if len(plane) == 0 {
 			continue
@@ -552,15 +560,18 @@ func (d *decoderImpl) applyChromaLoopFilter(pic *Picture, fhdr *header.FrameHead
 
 func (d *decoderImpl) applyLumaLoopFilter(pic *Picture, fhdr *header.FrameHeader, fs *tile.FrameState) {
 	lut := loopfilter.NewFilterLUT(int(fhdr.LoopFilter.Sharpness))
+	w, h := pic.codedSize()
+	visibleW4 := (pic.Width + 3) >> 2
+	visibleH4 := (pic.Height + 3) >> 2
 	// AV1 applies vertical edges before horizontal edges.
-	for x4 := 1; x4 < fs.W4; x4++ {
+	for x4 := 1; x4 < visibleW4; x4++ {
 		x := x4 * 4
-		for y4 := 0; y4 < fs.H4 && y4*4+4 <= pic.Height; y4++ {
+		for y4 := 0; y4 < visibleH4 && y4*4+4 <= h; y4++ {
 			width, ok := fs.LumaFilterEdge(x4, y4, true)
 			if !ok {
 				continue
 			}
-			width = safeLoopFilterWidth(width, x, pic.Width-x)
+			width = safeLoopFilterWidth(width, x, w-x)
 			if width == 0 {
 				continue
 			}
@@ -572,14 +583,14 @@ func (d *decoderImpl) applyLumaLoopFilter(pic *Picture, fhdr *header.FrameHeader
 			loopfilter.FilterEdgeV(pic.Y, y4*4*pic.StrideY+x, pic.StrideY, level, width, &lut)
 		}
 	}
-	for y4 := 1; y4 < fs.H4; y4++ {
+	for y4 := 1; y4 < visibleH4; y4++ {
 		y := y4 * 4
-		for x4 := 0; x4 < fs.W4 && x4*4+4 <= pic.Width; x4++ {
+		for x4 := 0; x4 < visibleW4 && x4*4+4 <= w; x4++ {
 			width, ok := fs.LumaFilterEdge(x4, y4, false)
 			if !ok {
 				continue
 			}
-			width = safeLoopFilterWidth(width, y, pic.Height-y)
+			width = safeLoopFilterWidth(width, y, h-y)
 			if width == 0 {
 				continue
 			}
@@ -752,15 +763,15 @@ func (d *decoderImpl) applyCDEF(pic *Picture, fhdr *header.FrameHeader) {
 
 func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader, fs *tile.FrameState) {
 	damping := int(fhdr.CDEF.Damping)
-	dirW := (pic.Width + 7) / 8
-	dirH := (pic.Height + 7) / 8
+	w, h := pic.codedSize()
+	dirW := w / 8
+	dirH := h / 8
 	dirs := make([]uint8, dirW*dirH)
 	variances := make([]uint, dirW*dirH)
 
-	applyCDEFPlane(pic.Y, pic.StrideY, pic.Width, pic.Height, 8, 0, damping, fs, fhdr, dirs, variances, dirW)
+	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, dirs, variances, dirW)
 	if pic.Chroma != ChromaMonochrome && len(pic.U) > 0 {
-		cw := pic.ChromaWidth()
-		ch := pic.ChromaHeight()
+		cw, ch := pic.codedChromaSize()
 		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, dirs, variances, dirW)
 		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, dirs, variances, dirW)
 	}

@@ -1110,6 +1110,7 @@ func decodeInterPlaneResidual(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
+	planeW, planeH = fb.codedPlaneSize(plane)
 	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
 		return transform.DCT_DCT
 	}
@@ -1619,8 +1620,7 @@ func decodeIntraPlaneCFL(
 		planeBuf = fb.V
 	}
 	stride = fb.StrideUV
-	planeW = fb.ChromaW
-	planeH = fb.ChromaH
+	planeW, planeH = fb.codedChromaSize()
 
 	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
 		return
@@ -1743,22 +1743,24 @@ func decodePalettePlane(
 ) {
 	var planeBuf []byte
 	var stride, planeW, planeH int
+	codedW, codedH := fb.codedLumaSize()
+	codedCW, codedCH := fb.codedChromaSize()
 	switch plane {
 	case 0:
 		planeBuf = fb.Y
 		stride = fb.StrideY
-		planeW = fb.Width
-		planeH = fb.Height
+		planeW = codedW
+		planeH = codedH
 	case 1:
 		planeBuf = fb.U
 		stride = fb.StrideUV
-		planeW = fb.ChromaW
-		planeH = fb.ChromaH
+		planeW = codedCW
+		planeH = codedCH
 	default:
 		planeBuf = fb.V
 		stride = fb.StrideUV
-		planeW = fb.ChromaW
-		planeH = fb.ChromaH
+		planeW = codedCW
+		planeH = codedCH
 	}
 	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
 		return
@@ -1854,6 +1856,7 @@ func decodePalettePlaneVarTx(
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
+	planeW, planeH = fb.codedPlaneSize(plane)
 	palStride := ctxBW
 	if palStride <= 0 {
 		palStride = bw
@@ -2038,6 +2041,7 @@ func decodeInterPlaneResidualVarTxImpl(m *bitstream.MSAC, ctx *TileCtx, fs *Fram
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
+	planeW, planeH = fb.codedPlaneSize(plane)
 
 	txtpOut := interYTxtp
 	txtpSet := false
@@ -2196,6 +2200,7 @@ func decodeIntraPlaneVarTx(
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
+	planeW, planeH = fb.codedPlaneSize(plane)
 
 	maxDim := bw
 	if bh > maxDim {
@@ -2310,6 +2315,7 @@ func decodeIntraPlane(
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
+	planeW, planeH = fb.codedPlaneSize(plane)
 
 	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
 		return
@@ -3627,13 +3633,15 @@ func copyInterRefBlock(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh 
 	}
 	mv := refmvs.MV{}
 	_ = refSlot
-	copyInterPredictPlane(fb.Y, fb.StrideY, fb.Width, fb.Height, ref.Y, ref.StrideY, ref.Width, ref.Height, bx, by, bw, bh, mv, header.FilterMode8TapRegular, header.FilterMode8TapRegular)
+	codedW, codedH := fb.codedLumaSize()
+	copyInterPredictPlane(fb.Y, fb.StrideY, codedW, codedH, ref.Y, ref.StrideY, ref.Width, ref.Height, bx, by, bw, bh, mv, header.FilterMode8TapRegular, header.FilterMode8TapRegular)
 	if fb.Monochrome || ref.Monochrome {
 		return true
 	}
 	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
-	copyInterPredictPlane(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.U, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, mv, header.FilterMode8TapRegular, header.FilterMode8TapRegular)
-	copyInterPredictPlane(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH, ref.V, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, mv, header.FilterMode8TapRegular, header.FilterMode8TapRegular)
+	codedCW, codedCH := fb.codedChromaSize()
+	copyInterPredictPlane(fb.U, fb.StrideUV, codedCW, codedCH, ref.U, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, mv, header.FilterMode8TapRegular, header.FilterMode8TapRegular)
+	copyInterPredictPlane(fb.V, fb.StrideUV, codedCW, codedCH, ref.V, ref.StrideUV, ref.ChromaW, ref.ChromaH, cbx, cby, cbw, cbh, mv, header.FilterMode8TapRegular, header.FilterMode8TapRegular)
 	return true
 }
 
@@ -3642,13 +3650,15 @@ func copySelectedInterRefBlock(fb *FrameBuf, seq *header.SequenceHeader, bx, by,
 		return false
 	}
 	mv := refmvs.MV{}
-	copyInterPredictPlane(fb.Y, fb.StrideY, fb.Width, fb.Height, st.ref.Y, st.ref.StrideY, st.ref.Width, st.ref.Height, bx, by, bw, bh, mv, st.filterMode, st.filterModeV)
+	codedW, codedH := fb.codedLumaSize()
+	copyInterPredictPlane(fb.Y, fb.StrideY, codedW, codedH, st.ref.Y, st.ref.StrideY, st.ref.Width, st.ref.Height, bx, by, bw, bh, mv, st.filterMode, st.filterModeV)
 	if fb.Monochrome || st.ref.Monochrome {
 		return true
 	}
 	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
-	copyInterPredictPlane(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH, st.ref.U, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH, cbx, cby, cbw, cbh, mv, st.filterMode, st.filterModeV)
-	copyInterPredictPlane(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH, st.ref.V, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH, cbx, cby, cbw, cbh, mv, st.filterMode, st.filterModeV)
+	codedCW, codedCH := fb.codedChromaSize()
+	copyInterPredictPlane(fb.U, fb.StrideUV, codedCW, codedCH, st.ref.U, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH, cbx, cby, cbw, cbh, mv, st.filterMode, st.filterModeV)
+	copyInterPredictPlane(fb.V, fb.StrideUV, codedCW, codedCH, st.ref.V, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH, cbx, cby, cbw, cbh, mv, st.filterMode, st.filterModeV)
 	return true
 }
 
@@ -3708,7 +3718,9 @@ func slotRefFrame(fhdr *header.FrameHeader, refSlot int) (int, bool) {
 
 func decodeInterBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, fhdr *header.FrameHeader, seq *header.SequenceHeader,
 	fb *FrameBuf, st blockSyntaxState, bx, by, bw, bh int) {
-	syntax := decodeSingleRefInterSyntax(m, ctx, fs, fhdr, fb, st.segID, st.skip, bx, by, bw, bh)
+	// Syntax and reference-MV search use the nominal coded block dimensions.
+	// Only reconstruction is clipped at the visible frame edge.
+	syntax := decodeSingleRefInterSyntax(m, ctx, fs, fhdr, fb, st.segID, st.skip, bx, by, st.ctxBW, st.ctxBH)
 	_ = decodeSingleRefInterBlockWithSyntax(m, ctx, fs, fhdr, seq, fb, st, bx, by, bw, bh, syntax)
 }
 
@@ -4731,7 +4743,7 @@ func decodeSingleRefInterBlockWithSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *Fr
 		fs.tracef("sym inter_motion x=%d y=%d mode=%d base_y=%d base_x=%d delta_y=%d delta_x=%d mv_y=%d mv_x=%d candidates=%d rng=%d",
 			bx, by, st.interMode, st.baseMV.Y, st.baseMV.X, st.deltaMV.Y, st.deltaMV.X,
 			st.mv.Y, st.mv.X, st.candCnt, ms.Range)
-		cnt, stack := singleRefInterCandidates(fs, fhdr, fb, st.refSlot, st.refFrame, bx, by, bw, bh)
+		cnt, stack := singleRefInterCandidates(fs, fhdr, fb, st.refSlot, st.refFrame, bx, by, ctxBW, ctxBH)
 		for i := 0; i < cnt; i++ {
 			fs.tracef("sym inter_candidate x=%d y=%d idx=%d ref=%d mv_y=%d mv_x=%d weight=%d",
 				bx, by, i, stack[i].refSlot, stack[i].mv.Y, stack[i].mv.X, stack[i].weight)
@@ -4801,7 +4813,8 @@ func applyGlobalCompoundState(fb *FrameBuf, fhdr *header.FrameHeader, seq *heade
 		return false
 	}
 	mv2 := fallbackGlobalMV(fhdr, syntax.refSlot2)
-	compoundPredictPlane(fb.Y, fb.StrideY, fb.Width, fb.Height,
+	codedW, codedH := fb.codedLumaSize()
+	compoundPredictPlane(fb.Y, fb.StrideY, codedW, codedH,
 		first.ref.Y, first.ref.StrideY, first.ref.Width, first.ref.Height,
 		second.Y, second.StrideY, second.Width, second.Height,
 		bx, by, bw, bh, first.mv, mv2, first.filterMode, first.filterModeV)
@@ -4812,11 +4825,12 @@ func applyGlobalCompoundState(fb *FrameBuf, fhdr *header.FrameHeader, seq *heade
 	cmv1 := refmvs.MV{X: int16(floorDivPow2(int(first.mv.X), ssHor)), Y: int16(floorDivPow2(int(first.mv.Y), ssVer))}
 	cmv2 := refmvs.MV{X: int16(floorDivPow2(int(mv2.X), ssHor)), Y: int16(floorDivPow2(int(mv2.Y), ssVer))}
 	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
-	compoundPredictPlane(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH,
+	codedCW, codedCH := fb.codedChromaSize()
+	compoundPredictPlane(fb.U, fb.StrideUV, codedCW, codedCH,
 		first.ref.U, first.ref.StrideUV, first.ref.ChromaW, first.ref.ChromaH,
 		second.U, second.StrideUV, second.ChromaW, second.ChromaH,
 		cbx, cby, cbw, cbh, cmv1, cmv2, first.filterMode, first.filterModeV)
-	compoundPredictPlane(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH,
+	compoundPredictPlane(fb.V, fb.StrideUV, codedCW, codedCH,
 		first.ref.V, first.ref.StrideUV, first.ref.ChromaW, first.ref.ChromaH,
 		second.V, second.StrideUV, second.ChromaW, second.ChromaH,
 		cbx, cby, cbw, cbh, cmv1, cmv2, first.filterMode, first.filterModeV)
@@ -5283,7 +5297,8 @@ func applyInterState(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh in
 	if st.ref == nil {
 		return false
 	}
-	copyInterPredictPlane(fb.Y, fb.StrideY, fb.Width, fb.Height, st.ref.Y, st.ref.StrideY, st.ref.Width, st.ref.Height, bx, by, bw, bh, st.mv, st.filterMode, st.filterModeV)
+	codedW, codedH := fb.codedLumaSize()
+	copyInterPredictPlane(fb.Y, fb.StrideY, codedW, codedH, st.ref.Y, st.ref.StrideY, st.ref.Width, st.ref.Height, bx, by, bw, bh, st.mv, st.filterMode, st.filterModeV)
 	if fb.Monochrome || st.ref.Monochrome || len(fb.U) == 0 || len(st.ref.U) == 0 {
 		return true
 	}
@@ -5295,8 +5310,9 @@ func applyInterState(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh in
 		Y: int16(floorDivPow2(int(st.mv.Y), ssVer)),
 	}
 	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
-	copyInterPredictPlane(fb.U, fb.StrideUV, fb.ChromaW, fb.ChromaH, st.ref.U, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH, cbx, cby, cbw, cbh, cmv, st.filterMode, st.filterModeV)
-	copyInterPredictPlane(fb.V, fb.StrideUV, fb.ChromaW, fb.ChromaH, st.ref.V, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH, cbx, cby, cbw, cbh, cmv, st.filterMode, st.filterModeV)
+	codedCW, codedCH := fb.codedChromaSize()
+	copyInterPredictPlane(fb.U, fb.StrideUV, codedCW, codedCH, st.ref.U, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH, cbx, cby, cbw, cbh, cmv, st.filterMode, st.filterModeV)
+	copyInterPredictPlane(fb.V, fb.StrideUV, codedCW, codedCH, st.ref.V, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH, cbx, cby, cbw, cbh, cmv, st.filterMode, st.filterModeV)
 	return true
 }
 

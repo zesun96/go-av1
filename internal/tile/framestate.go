@@ -117,8 +117,10 @@ func (fs *FrameState) tracef(format string, args ...any) {
 
 // NewFrameState allocates a FrameState for a frame of size (w×h) luma pixels.
 func NewFrameState(w, h int) *FrameState {
-	w4 := (w + 3) / 4
-	h4 := (h + 3) / 4
+	// Block syntax and coefficient neighbour state cover the complete
+	// 8x8-aligned coding grid, including its final padding 4x4 row/column.
+	w4 := ((w + 7) / 8) * 2
+	h4 := ((h + 7) / 8) * 2
 	w8 := (w + 7) / 8
 	h8 := (h + 7) / 8
 	w64 := (w + 63) / 64
