@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/binary"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +57,54 @@ func TestFrontendUsesDirectICECandidates(t *testing.T) {
 	}
 	if !strings.Contains(page, "timeoutMs = 2000") {
 		t.Fatal("frontend ICE gathering fallback is not bounded to two seconds")
+	}
+	for _, want := range []string{"sender.getStats()", "framesEncoded", "framesSent", "qualityLimitationReason"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("frontend does not report sender statistic %q", want)
+		}
+	}
+}
+
+func TestTemporalUnitQueueDrainsInOrder(t *testing.T) {
+	q := newTemporalUnitQueue()
+	for i := 0; i < 3; i++ {
+		depth, peak, ok := q.Push(temporalUnit{payload: []byte{byte(i)}, pts: uint64(i * 3000)})
+		if !ok || depth != i+1 || peak != i+1 {
+			t.Fatalf("push %d = depth %d peak %d ok %v", i, depth, peak, ok)
+		}
+	}
+	if pending, peak := q.Close(); pending != 3 || peak != 3 {
+		t.Fatalf("close = pending %d peak %d, want 3 and 3", pending, peak)
+	}
+	for i := 0; i < 3; i++ {
+		tu, ok := q.Pop()
+		if !ok || tu.pts != uint64(i*3000) || len(tu.payload) != 1 || tu.payload[0] != byte(i) {
+			t.Fatalf("pop %d = %+v, ok %v", i, tu, ok)
+		}
+	}
+	if _, ok := q.Pop(); ok {
+		t.Fatal("closed queue returned an item after draining")
+	}
+	if _, _, ok := q.Push(temporalUnit{}); ok {
+		t.Fatal("closed queue accepted an item")
+	}
+}
+
+func TestBrowserStatsEndpoint(t *testing.T) {
+	s := &server{}
+	req := httptest.NewRequest(http.MethodPost, "/stats", strings.NewReader(
+		`{"captureFPS":30,"encodeFPS":12.5,"sendFPS":12,"width":2560,"height":1440,"limitation":"cpu"}`))
+	rec := httptest.NewRecorder()
+	s.handleBrowserStats(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("stats status = %d, want %d: %s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/stats", nil)
+	rec = httptest.NewRecorder()
+	s.handleBrowserStats(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET stats status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
 }
 

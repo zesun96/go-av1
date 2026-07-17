@@ -202,6 +202,8 @@
     const sourceBadge = document.getElementById('sourceBadge');
     let pc = null;
     let localStream = null;
+    let statsTimer = null;
+    let previousSenderStats = null;
 
     function timestamp() {
         const d = new Date();
@@ -366,6 +368,70 @@
             timer = setTimeout(() => finish(true), timeoutMs);
         });
     }
+    function statRate(current, previous, field) {
+        if (!previous || !Number.isFinite(current[field]) || !Number.isFinite(previous[field])) return null;
+        const seconds = (current.timestamp - previous.timestamp) / 1000;
+        return seconds > 0 ? (current[field] - previous[field]) / seconds : null;
+    }
+    function formatFPS(value) {
+        return Number.isFinite(value) ? value.toFixed(1) : 'n/a';
+    }
+    function reportSenderStats(capturedFPS, encodedFPS, sentFPS, outbound, limitation) {
+        fetch('/stats', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                captureFPS: Number.isFinite(capturedFPS) ? capturedFPS : null,
+                encodeFPS: Number.isFinite(encodedFPS) ? encodedFPS : null,
+                sendFPS: Number.isFinite(sentFPS) ? sentFPS : null,
+                width: outbound.frameWidth || 0,
+                height: outbound.frameHeight || 0,
+                limitation,
+            }),
+        }).catch(error => console.warn('Unable to report sender stats:', error));
+    }
+    async function collectSenderStats(sender) {
+        try {
+            const report = await sender.getStats();
+            let outbound = null;
+            let source = null;
+            report.forEach(stat => {
+                if (stat.type === 'outbound-rtp' && stat.kind === 'video' && !stat.isRemote) outbound = stat;
+                if (stat.type === 'media-source' && stat.kind === 'video') source = stat;
+            });
+            if (!outbound) return;
+            const current = {
+                timestamp: outbound.timestamp,
+                framesEncoded: outbound.framesEncoded,
+                framesSent: outbound.framesSent,
+                framesCaptured: source && source.frames,
+            };
+            const capturedFPS = source && Number.isFinite(source.framesPerSecond)
+                ? source.framesPerSecond : statRate(current, previousSenderStats, 'framesCaptured');
+            const encodedFPS = Number.isFinite(outbound.framesPerSecond)
+                ? outbound.framesPerSecond : statRate(current, previousSenderStats, 'framesEncoded');
+            const sentFPS = statRate(current, previousSenderStats, 'framesSent');
+            const size = outbound.frameWidth && outbound.frameHeight
+                ? `${outbound.frameWidth}x${outbound.frameHeight}` : 'unknown';
+            const limitation = outbound.qualityLimitationReason || 'none';
+            log(`WebRTC stats: capture=${formatFPS(capturedFPS)} fps, encode=${formatFPS(encodedFPS)} fps, send=${formatFPS(sentFPS)} fps, output=${size}, limitation=${limitation}`,
+                limitation === 'none' ? 'info' : 'warn');
+            reportSenderStats(capturedFPS, encodedFPS, sentFPS, outbound, limitation);
+            previousSenderStats = current;
+        } catch (error) {
+            if (pc) log('Unable to read WebRTC sender stats: ' + error.message, 'warn');
+        }
+    }
+    function startSenderStats(sender) {
+        stopSenderStats();
+        collectSenderStats(sender);
+        statsTimer = setInterval(() => collectSenderStats(sender), 2000);
+    }
+    function stopSenderStats() {
+        if (statsTimer !== null) clearInterval(statsTimer);
+        statsTimer = null;
+        previousSenderStats = null;
+    }
     async function startStream() {
         btnStart.disabled = true;
         sourceType.disabled = true;
@@ -419,6 +485,7 @@
             btnStop.disabled = false;
             setStatus('Connected', 'connected');
             log('WebRTC connected; AV1 streaming started');
+            startSenderStats(sender);
         } catch (error) {
             log('Unable to start stream: ' + error.message, 'error');
             stopStream();
@@ -436,6 +503,7 @@
     }
     function stopStream() {
         if (pc || localStream) log('Stopping stream');
+        stopSenderStats();
         if (pc) pc.close();
         pc = null;
         stopTracks(localStream);

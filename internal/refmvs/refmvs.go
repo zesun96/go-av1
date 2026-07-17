@@ -172,14 +172,14 @@ func MVPairEqual(a, b MVPair) bool { return a[0] == b[0] && a[1] == b[1] }
 // AddCandidate adds cand to the stack if its MVPair is not already present.
 // Returns the updated count.
 func AddCandidate(stack []Candidate, cnt int, mv MVPair, weight int) int {
-	if cnt >= len(stack) {
-		return cnt
-	}
 	for i := 0; i < cnt; i++ {
 		if MVPairEqual(stack[i].MV, mv) {
 			stack[i].Weight += weight
 			return cnt
 		}
+	}
+	if cnt >= len(stack) {
+		return cnt
 	}
 	stack[cnt] = Candidate{MV: mv, Weight: weight}
 	return cnt + 1

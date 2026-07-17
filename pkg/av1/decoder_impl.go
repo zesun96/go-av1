@@ -398,6 +398,7 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 // updateRefs stores pic into every reference slot set in RefreshFrameFlags.
 func (d *decoderImpl) updateRefs(pic *Picture, fhdr *header.FrameHeader, cdf *tile.TileCtx, mv *refmvs.Frame) {
 	fhdrCopy := *fhdr
+	cdf = d.cdfForReferenceUpdate(fhdr, cdf)
 	if fhdr.FrameType.IsIntra() {
 		mv = nil
 	}
@@ -413,6 +414,23 @@ func (d *decoderImpl) updateRefs(pic *Picture, fhdr *header.FrameHeader, cdf *ti
 		d.refs[i].cdf = cdf.Clone()
 		d.refs[i].mv = mv
 	}
+}
+
+// cdfForReferenceUpdate mirrors dav1d's reference refresh rule. When frame-end
+// CDF refresh is disabled, refreshed slots inherit the frame input context,
+// not the context adapted while decoding the context-update tile.
+func (d *decoderImpl) cdfForReferenceUpdate(fhdr *header.FrameHeader, decoded *tile.TileCtx) *tile.TileCtx {
+	if fhdr != nil && fhdr.RefreshContext != 0 && decoded != nil {
+		return decoded
+	}
+	if inherited := d.initialFrameCDF(fhdr); inherited != nil {
+		return inherited
+	}
+	qidx := 0
+	if fhdr != nil {
+		qidx = int(fhdr.Quant.YAC)
+	}
+	return tile.NewTileCtxForQIdx(qidx)
 }
 
 func (d *decoderImpl) initialFrameCDF(fhdr *header.FrameHeader) *tile.TileCtx {

@@ -47,6 +47,7 @@ var (
 	flagPort = flag.Int("port", 8080, "HTTP listen port")
 	flagOut  = flag.String("out", "output.ivf", "output IVF file path")
 	flagYUV  = flag.String("yuv", "output.y4m", "path to save decoded frames; *.y4m emits YUV4MPEG2 (playable directly with `ffplay`), any other suffix emits raw planar YUV420 (needs `ffplay -f rawvideo -pixel_format yuv420p -framerate 30 -video_size WxH`); empty disables")
+	flagRTP  = flag.Bool("rtp-log", false, "log every RTP AV1 aggregation header (very verbose)")
 )
 
 // ─── main ────────────────────────────────────────────────────────────────────
@@ -83,6 +84,7 @@ func main() {
 
 	http.HandleFunc("/", srv.handleIndex)
 	http.HandleFunc("/offer", srv.handleOffer)
+	http.HandleFunc("/stats", srv.handleBrowserStats)
 
 	addr := fmt.Sprintf(":%d", *flagPort)
 	log.Printf("listening on http://localhost%s", addr)
@@ -111,9 +113,10 @@ func main() {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			log.Printf("http shutdown: %v", err)
 		}
-		if !srv.waitForTracks(10 * time.Second) {
-			log.Printf("track shutdown timed out; output finalization may be incomplete")
-		}
+		// Decoding is intentionally asynchronous from RTP reception. Wait for
+		// queued reference frames before touching the shared output writers; a
+		// second Ctrl+C still uses the restored default handler to force exit.
+		srv.waitForTracks(0)
 		srv.closeTrackOutputs()
 		log.Printf("shutdown complete")
 	}
@@ -186,7 +189,10 @@ func (s *server) trackFinished() {
 }
 
 func (s *server) waitForTracks(timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
 	for {
 		s.trackMu.Lock()
 		active := s.activeTracks
@@ -194,7 +200,7 @@ func (s *server) waitForTracks(timeout time.Duration) bool {
 		if active == 0 {
 			return true
 		}
-		if time.Now().After(deadline) {
+		if !deadline.IsZero() && time.Now().After(deadline) {
 			return false
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -246,6 +252,41 @@ func candidateStaticDirs() []string {
 type sdpMessage struct {
 	SDP  string `json:"sdp"`
 	Type string `json:"type"`
+}
+
+type browserStats struct {
+	CaptureFPS *float64 `json:"captureFPS"`
+	EncodeFPS  *float64 `json:"encodeFPS"`
+	SendFPS    *float64 `json:"sendFPS"`
+	Width      int      `json:"width"`
+	Height     int      `json:"height"`
+	Limitation string   `json:"limitation"`
+}
+
+func (s *server) handleBrowserStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var stats browserStats
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&stats); err != nil {
+		http.Error(w, "bad JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if stats.Limitation == "" {
+		stats.Limitation = "none"
+	}
+	log.Printf("browser stats: capture=%s fps encode=%s fps send=%s fps output=%dx%d limitation=%s",
+		formatOptionalFPS(stats.CaptureFPS), formatOptionalFPS(stats.EncodeFPS),
+		formatOptionalFPS(stats.SendFPS), stats.Width, stats.Height, stats.Limitation)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func formatOptionalFPS(value *float64) string {
+	if value == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f", *value)
 }
 
 // handleOffer processes a WebRTC offer and returns an answer.
@@ -362,7 +403,29 @@ func (s *server) handleOffer(w http.ResponseWriter, r *http.Request) {
 // OBUs per RFC 9321, ensures every OBU carries a size field, writes the
 // resulting temporal units to the IVF file, and feeds them to the decoder.
 func (s *server) consumeAV1Track(track *webrtc.TrackRemote) {
-	defer s.closeTrackOutputs()
+	decodeQueue := newTemporalUnitQueue()
+	decodeDone := make(chan struct{})
+	decodeStart := time.Now()
+	go func() {
+		defer close(decodeDone)
+		for {
+			tu, ok := decodeQueue.Pop()
+			if !ok {
+				return
+			}
+			s.decodeTemporalUnit(tu.payload, tu.pts)
+		}
+	}()
+	defer func() {
+		pending, peak := decodeQueue.Close()
+		if pending > 0 {
+			log.Printf("RTP track ended; draining %d queued temporal units", pending)
+		}
+		<-decodeDone
+		log.Printf("track ended, total frames decoded: %d", atomic.LoadInt64(&s.frameCount))
+		log.Printf("decode queue drained: peak=%d elapsed=%s", peak, time.Since(decodeStart).Round(time.Millisecond))
+		s.closeTrackOutputs()
+	}()
 
 	var (
 		tuBuf      []byte // complete OBUs for the current temporal unit
@@ -402,12 +465,14 @@ func (s *server) consumeAV1Track(track *webrtc.TrackRemote) {
 
 		// New temporal unit: flush previous TU.
 		if nBit && len(tuBuf) > 0 {
-			s.processTemporalUnit(tuBuf, pts)
+			s.recordTemporalUnit(decodeQueue, tuBuf, pts)
 			tuBuf = tuBuf[:0]
 		}
 
-		log.Printf("rtp aggHdr=0x%02x Z=%v Y=%v N=%v W=%d marker=%v len=%d",
-			aggHdr, zBit, yBit, nBit, w, pkt.Marker, len(payload))
+		if *flagRTP {
+			log.Printf("rtp aggHdr=0x%02x Z=%v Y=%v N=%v W=%d marker=%v len=%d",
+				aggHdr, zBit, yBit, nBit, w, pkt.Marker, len(payload))
+		}
 
 		// Parse each OBU element in the packet.
 		// When w==0 (legacy mode) we loop until the payload is exhausted,
@@ -499,7 +564,7 @@ func (s *server) consumeAV1Track(track *webrtc.TrackRemote) {
 			}
 			if len(tuBuf) > 0 {
 				log.Printf("flushing TU: %d bytes, pts=%d", len(tuBuf), pts)
-				s.processTemporalUnit(tuBuf, pts)
+				s.recordTemporalUnit(decodeQueue, tuBuf, pts)
 				tuBuf = tuBuf[:0]
 			}
 		}
@@ -510,10 +575,68 @@ func (s *server) consumeAV1Track(track *webrtc.TrackRemote) {
 		tuBuf = append(tuBuf, ensureOBUSizeField(fragBuf)...)
 	}
 	if len(tuBuf) > 0 {
-		s.processTemporalUnit(tuBuf, pts)
+		s.recordTemporalUnit(decodeQueue, tuBuf, pts)
 	}
+}
 
-	log.Printf("track ended, total frames decoded: %d", atomic.LoadInt64(&s.frameCount))
+type temporalUnit struct {
+	payload []byte
+	pts     uint64
+}
+
+// temporalUnitQueue keeps RTP reception independent from sequential AV1
+// decoding. Compressed temporal units are small compared with decoded frames,
+// so an unbounded queue preserves every reference frame without backpressuring
+// TrackRemote while a high-resolution frame is being reconstructed.
+type temporalUnitQueue struct {
+	mu     sync.Mutex
+	ready  *sync.Cond
+	items  []temporalUnit
+	closed bool
+	peak   int
+}
+
+func newTemporalUnitQueue() *temporalUnitQueue {
+	q := &temporalUnitQueue{}
+	q.ready = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *temporalUnitQueue) Push(tu temporalUnit) (depth int, peak int, ok bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return len(q.items), q.peak, false
+	}
+	q.items = append(q.items, tu)
+	if len(q.items) > q.peak {
+		q.peak = len(q.items)
+	}
+	q.ready.Signal()
+	return len(q.items), q.peak, true
+}
+
+func (q *temporalUnitQueue) Pop() (temporalUnit, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for len(q.items) == 0 && !q.closed {
+		q.ready.Wait()
+	}
+	if len(q.items) == 0 {
+		return temporalUnit{}, false
+	}
+	tu := q.items[0]
+	q.items[0] = temporalUnit{}
+	q.items = q.items[1:]
+	return tu, true
+}
+
+func (q *temporalUnitQueue) Close() (pending int, peak int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.closed = true
+	q.ready.Broadcast()
+	return len(q.items), q.peak
 }
 
 func (s *server) closeTrackOutputs() {
@@ -533,15 +656,25 @@ func (s *server) closeTrackOutputs() {
 	}
 }
 
-// processTemporalUnit writes one temporal unit to the IVF file and feeds it
-// to the go-av1 decoder.
-func (s *server) processTemporalUnit(payload []byte, pts uint64) {
-	// Write to IVF.
+// recordTemporalUnit persists the compressed data before handing an owned copy
+// to the asynchronous decoder. IVF recording therefore remains complete even
+// when reconstruction is slower than the incoming stream.
+func (s *server) recordTemporalUnit(q *temporalUnitQueue, payload []byte, pts uint64) {
 	if err := s.ivfw.WriteFrame(payload, pts); err != nil {
 		log.Printf("ivf write: %v", err)
 	}
+	owned := append([]byte(nil), payload...)
+	depth, _, ok := q.Push(temporalUnit{payload: owned, pts: pts})
+	if !ok {
+		log.Printf("decode queue closed before pts=%d could be queued", pts)
+	} else if depth >= 30 && depth%30 == 0 {
+		log.Printf("decoder is behind RTP reception: %d temporal units queued", depth)
+	}
+}
 
-	// Feed to decoder.
+// decodeTemporalUnit runs only on the per-track decode worker. AV1 reference
+// frames and decoded YUV output therefore retain bitstream order.
+func (s *server) decodeTemporalUnit(payload []byte, pts uint64) {
 	if err := s.dec.SendData(payload); err != nil {
 		log.Printf("decoder send: %v", err)
 		return

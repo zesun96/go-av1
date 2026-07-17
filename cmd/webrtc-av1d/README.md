@@ -2,7 +2,7 @@
 
 A WebRTC server that receives AV1 video from a browser camera or shared
 desktop, writes the raw bitstream to IVF, and decodes each frame through the
-go-av1 pipeline in real time.
+go-av1 pipeline asynchronously.
 
 ## Module isolation
 
@@ -46,6 +46,7 @@ go build -o webrtc-av1d .
 | `-port` | `8080` | HTTP listen port |
 | `-out` | `output.ivf` | Output IVF file path |
 | `-yuv` | `output.y4m` | Decoded Y4M or raw YUV output path |
+| `-rtp-log` | `false` | Log every RTP aggregation header for debugging |
 
 ## Capture workflow
 
@@ -56,7 +57,7 @@ go build -o webrtc-av1d .
    or tab picker.
 4. The browser AV1-encodes the selected source and sends it over WebRTC.
 5. The server reassembles RTP packets into AV1 temporal units (RFC 9321), writes
-   IVF, and feeds the units to the go-av1 decoder.
+   IVF, and queues the units for the go-av1 decoder.
 6. Click **Stop stream**, or use the browser's stop-sharing control, to end the
    session.
 
@@ -66,6 +67,12 @@ Pressing `Ctrl+C` also closes active WebRTC connections, waits for recording
 finalization, and then shuts down the HTTP server. Output close does not force a
 full disk-cache sync, avoiding a long pause for large Y4M files while still
 writing the final container headers before the files are closed.
+
+At resolutions where decoding is slower than capture, IVF reception continues
+without waiting for YUV reconstruction. Stopping then waits for the decode
+queue to drain; press `Ctrl+C` a second time only when an immediate forced exit
+is preferable to a complete Y4M file. Per-packet RTP logging is disabled by
+default because terminal output can itself throttle high-bitrate reception.
 
 The source controls are locked while streaming because Y4M has fixed dimensions
 for the complete file. Stop the current stream before selecting another camera
@@ -103,6 +110,7 @@ ffmpeg -i output.y4m -c:v libaom-av1 -b:v 2M -cpu-used 4 \
 |---|---|---|
 | `GET` | `/` | Browser capture frontend |
 | `POST` | `/offer` | WebRTC SDP signaling with a JSON offer |
+| `POST` | `/stats` | Browser capture/encoder diagnostics |
 
 ## IVF and RTP notes
 
@@ -113,3 +121,11 @@ ffmpeg -i output.y4m -c:v libaom-av1 -b:v 2M -cpu-used 4 \
   from the first and last RTP timestamps to preserve the recording duration
 - RFC 9321 aggregation and fragmented OBU reassembly are supported
 - OBU size fields are restored before units are written to IVF
+- Compressed temporal units are written to IVF on the RTP reader and queued for
+  sequential decoding, so slow high-resolution reconstruction does not block
+  packet reception. When decoding falls behind, shutdown waits for the queue to
+  drain before finalizing Y4M.
+- The browser log reports capture, encode, and send frame rates every two
+  seconds together with the encoded resolution and WebRTC
+  `qualityLimitationReason`. This separates capture/encoder throttling from
+  receiver-side decode throughput.

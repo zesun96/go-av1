@@ -216,6 +216,10 @@ func TestAddCandidate_FullStack(t *testing.T) {
 	if cnt != 2 {
 		t.Fatalf("full stack cnt=%d want 2", cnt)
 	}
+	cnt = AddCandidate(stack, cnt, MVPair{MV{Y: 1}, MV{}}, 5)
+	if cnt != 2 || stack[0].Weight != 6 {
+		t.Fatalf("full stack merge cnt=%d weight=%d want 2/6", cnt, stack[0].Weight)
+	}
 }
 
 func TestSortCandidates(t *testing.T) {

@@ -46,6 +46,42 @@ func TestIntraReferenceDoesNotRetainMotionField(t *testing.T) {
 	pic.Release()
 }
 
+func TestReferenceRefreshKeepsInputCDFWhenContextRefreshDisabled(t *testing.T) {
+	d := &decoderImpl{}
+	inherited := tile.NewTileCtxForQIdx(0)
+	inherited.Partition64CDF[0][0] = 1234
+	inherited.Partition64CDF[0][9] = 17
+	d.refs[2].cdf = inherited
+
+	decoded := tile.NewTileCtxForQIdx(0)
+	decoded.Partition64CDF[0][0] = 5678
+	fhdr := &header.FrameHeader{
+		PrimaryRefFrame:   0,
+		Refidx:            [header.RefsPerFrame]int8{2},
+		RefreshContext:    0,
+		RefreshFrameFlags: 1,
+	}
+
+	got := d.cdfForReferenceUpdate(fhdr, decoded)
+	if got.Partition64CDF[0][0] != 1234 {
+		t.Fatalf("refreshed CDF probability = %d, want inherited 1234", got.Partition64CDF[0][0])
+	}
+	if got.Partition64CDF[0][9] != 0 {
+		t.Fatalf("refreshed CDF counter = %d, want reset 0", got.Partition64CDF[0][9])
+	}
+}
+
+func TestReferenceRefreshKeepsDecodedCDFWhenEnabled(t *testing.T) {
+	d := &decoderImpl{}
+	decoded := tile.NewTileCtxForQIdx(0)
+	decoded.Partition64CDF[0][0] = 5678
+	fhdr := &header.FrameHeader{RefreshContext: 1}
+
+	if got := d.cdfForReferenceUpdate(fhdr, decoded); got != decoded {
+		t.Fatal("enabled context refresh did not retain the decoded tile CDF")
+	}
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 // buildSequenceHeaderOBU returns a minimal, well-formed AV1 Sequence Header OBU
