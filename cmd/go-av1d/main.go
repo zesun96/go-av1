@@ -6,6 +6,7 @@
 package main
 
 import (
+	"crypto/md5"
 	"flag"
 	"fmt"
 	"io"
@@ -19,9 +20,12 @@ import (
 func main() {
 	in := flag.String("i", "", "input AV1 file (IVF)")
 	out := flag.String("o", "", "output Y4M file (- for stdout, empty = discard)")
+	outputFrame := flag.Int("output-frame", -1, "only write this zero-based output frame (-1 = all)")
+	frameMD5 := flag.String("framemd5", "", "write visible-plane frame MD5 checksums")
 	threads := flag.Int("threads", 0, "worker threads (0 = NumCPU)")
 	filters := flag.String("filters", "all", "in-loop filters: all, none, or comma-separated deblock,cdef,restoration")
 	traceSymbols := flag.Bool("trace-symbols", false, "log tile syntax symbols and MSAC state")
+	traceFrames := flag.Bool("trace-frames", false, "log frame headers and reference CDF updates")
 	traceFrame := flag.Int("trace-frame", -1, "only trace this zero-based IVF frame (-1 = all)")
 	limit := flag.Int("limit", 0, "stop after decoding this many frames (0 = all)")
 	flag.Parse()
@@ -56,10 +60,19 @@ func main() {
 	}
 
 	var logger av1.Logger
+	if *traceSymbols || *traceFrames {
+		if *traceFrames {
+			_ = os.Setenv("GOAV1_TRACE_FRAMES", "1")
+			defer os.Unsetenv("GOAV1_TRACE_FRAMES") //nolint:errcheck
+		}
+	}
 	if *traceSymbols {
 		if *traceFrame < 0 {
 			_ = os.Setenv("GOAV1_TRACE_SYMBOLS", "1")
 		}
+		logger = stderrLogger{}
+	}
+	if *traceFrames {
 		logger = stderrLogger{}
 	}
 	dec, err := av1.NewDecoder(av1.DecoderOptions{
@@ -87,9 +100,20 @@ func main() {
 		defer wf.Close()
 		w = wf
 	}
+	var md5w io.Writer
+	if *frameMD5 != "" {
+		mf, err := os.Create(*frameMD5)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create framemd5: %v\n", err)
+			os.Exit(1)
+		}
+		defer mf.Close()
+		md5w = mf
+	}
 
 	frameCount := 0
 	inputFrame := 0
+	outputStarted := false
 	for {
 		if *limit > 0 && frameCount >= *limit {
 			break
@@ -122,8 +146,12 @@ func main() {
 				break // ErrAgain or other
 			}
 			frameCount++
-			if w != nil {
-				writeY4MFrame(w, pic, frameCount == 1, hdr)
+			if w != nil && (*outputFrame < 0 || frameCount-1 == *outputFrame) {
+				writeY4MFrame(w, pic, !outputStarted, hdr)
+				outputStarted = true
+			}
+			if md5w != nil {
+				writeFrameMD5(md5w, pic, frameCount-1)
 			}
 			pic.Release()
 		}
@@ -137,6 +165,21 @@ func main() {
 	_ = dec.Flush()
 
 	fmt.Fprintf(os.Stderr, "decoded %d frames\n", frameCount)
+}
+
+func writeFrameMD5(w io.Writer, pic *av1.Picture, frame int) {
+	h := md5.New()
+	for row := 0; row < pic.Height; row++ {
+		_, _ = h.Write(pic.Y[row*pic.StrideY : row*pic.StrideY+pic.Width])
+	}
+	cw, ch := pic.ChromaWidth(), pic.ChromaHeight()
+	for row := 0; row < ch; row++ {
+		_, _ = h.Write(pic.U[row*pic.StrideUV : row*pic.StrideUV+cw])
+	}
+	for row := 0; row < ch; row++ {
+		_, _ = h.Write(pic.V[row*pic.StrideUV : row*pic.StrideUV+cw])
+	}
+	fmt.Fprintf(w, "%d,%dx%d,%x\n", frame, pic.Width, pic.Height, h.Sum(nil))
 }
 
 type stderrLogger struct{}

@@ -88,6 +88,24 @@ func TestSingleRefModeContextsIncludesSecondaryLeftMatch(t *testing.T) {
 	}
 }
 
+func TestSingleRefModeContextsIncludesRightPaddingRowMatch(t *testing.T) {
+	fs := NewFrameState(1276, 1136)
+	fs.MVFrame = refmvs.NewFrame(1276, 1136)
+	fhdr := &header.FrameHeader{}
+	fhdr.Refidx[0] = 0
+
+	// The direct top and left blocks are intra. The only matching reference is
+	// in x4=319, the padding cell beyond the 1276-pixel visible edge.
+	fs.MVFrame.PutGridBlock(316, 232, 4, 4, refmvs.Block{Ref: refmvs.RefPair{0, -1}, BS: BS16x16})
+	fs.MVFrame.PutGridBlock(316, 236, 2, 2, refmvs.Block{Ref: refmvs.RefPair{0, -1}, BS: BS8x8})
+	fs.MVFrame.PutGridBlock(316, 228, 4, 4, refmvs.Block{Ref: refmvs.RefPair{1, -1}, BS: BS16x16})
+
+	newCtx, globalCtx, refCtx := singleRefModeContexts(fs, fhdr, nil, 0, 1, 1272, 944, 8, 8)
+	if newCtx != 1 || globalCtx != 0 || refCtx != 1 {
+		t.Fatalf("right-edge mode contexts = %d/%d/%d, want 1/0/1", newCtx, globalCtx, refCtx)
+	}
+}
+
 func TestSingleRefModeContextsCombinesDirectAndSecondaryDirections(t *testing.T) {
 	fs := NewFrameState(320, 64)
 	fs.MVFrame = refmvs.NewFrame(320, 64)

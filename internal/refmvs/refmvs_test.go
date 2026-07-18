@@ -256,11 +256,23 @@ func TestNewFrame_Basic(t *testing.T) {
 
 func TestNewFrame_OddSize(t *testing.T) {
 	f := NewFrame(65, 33)
-	if f.IW4 != 17 { // ceil(65/4)
-		t.Errorf("IW4 odd: got %d want 17", f.IW4)
+	if f.IW4 != 18 { // two 4x4 cells per coded 8x8 column
+		t.Errorf("IW4 odd: got %d want 18", f.IW4)
 	}
-	if f.IH4 != 9 { // ceil(33/4)
-		t.Errorf("IH4 odd: got %d want 9", f.IH4)
+	if f.IH4 != 10 { // two 4x4 cells per coded 8x8 row
+		t.Errorf("IH4 odd: got %d want 10", f.IH4)
+	}
+}
+
+func TestNewFrameStoresRightEdgePaddingCell(t *testing.T) {
+	f := NewFrame(1276, 1136)
+	if f.IW4 != 320 {
+		t.Fatalf("coded width = %d, want 320", f.IW4)
+	}
+	want := Block{Ref: RefPair{1, -1}, BS: 17}
+	f.PutGridBlock(318, 0, 2, 2, want)
+	if got, ok := f.GridBlock(319, 0); !ok || got.Ref != want.Ref {
+		t.Fatalf("right padding cell = %+v, %t; want ref %v", got, ok, want.Ref)
 	}
 }
 

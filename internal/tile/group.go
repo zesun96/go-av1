@@ -39,7 +39,7 @@ func DecodeTileGroupWithContext(
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
+	if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" || os.Getenv("GOAV1_TRACE_FRAMES") != "" {
 		logf("sym frame offset=%d type=%d show=%d refresh=%02x primary=%d refidx=%v comp_refs=%d cdf_update=%d refresh_cdf=%d tile_update=%d qidx=%d qm=%d qmy=%d qmu=%d qmv=%d",
 			fhdr.FrameOffset, fhdr.FrameType, fhdr.ShowFrame, fhdr.RefreshFrameFlags,
 			fhdr.PrimaryRefFrame, fhdr.Refidx, fhdr.SwitchableCompRefs, fhdr.DisableCDFUpdate, fhdr.RefreshContext, fhdr.Tiling.Update,
@@ -134,6 +134,9 @@ func DecodeTileGroupWithContext(
 			if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
 				logf("sym cdf_update_tile=%d comp_0=%v", absoluteTile, tileCtx.CompCDF[0])
 			}
+		}
+		if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
+			logf("sym tile_cdf tile=%d palette_size_y0=%v", absoluteTile, tileCtx.PaletteSizeCDF[0][0])
 		}
 	}
 	if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" && updateCtx != nil {

@@ -282,10 +282,12 @@ func RelativeDist(a, b int, bits uint8) int {
 
 // NewFrame allocates a Frame for a frame of iw×ih luma pixels.
 func NewFrame(iw, ih int) *Frame {
-	iw4 := (iw + 3) >> 2
-	ih4 := (ih + 3) >> 2
 	iw8 := (iw + 7) >> 3
 	ih8 := (ih + 7) >> 3
+	// The 4x4 view covers the complete 8x8-aligned coding grid, including
+	// padding cells beyond the visible right and bottom edges.
+	iw4 := iw8 << 1
+	ih4 := ih8 << 1
 	rStride := iw4 + 4 // 2-pixel border each side
 	return &Frame{
 		IW4:        iw4,

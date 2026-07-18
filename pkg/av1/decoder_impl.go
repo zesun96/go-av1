@@ -407,6 +407,9 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 func (d *decoderImpl) updateRefs(pic *Picture, fhdr *header.FrameHeader, cdf *tile.TileCtx, mv *refmvs.Frame) {
 	fhdrCopy := *fhdr
 	cdf = d.cdfForReferenceUpdate(fhdr, cdf)
+	if os.Getenv("GOAV1_TRACE_FRAMES") != "" {
+		d.logf("sym ref_cdf refresh=%02x palette_size_y0=%v", fhdr.RefreshFrameFlags, cdf.PaletteSizeCDF[0][0])
+	}
 	if fhdr.FrameType.IsIntra() {
 		mv = nil
 	}

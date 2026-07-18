@@ -711,12 +711,22 @@ func decodeIntraSyntaxState(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 			if row4 >= 0 && row4 < len(fs.LeftPalY) {
 				leftPal = fs.LeftPalY[row4]
 			}
+			beforePaletteCDF := ctx.PaletteYCDF[szCtx][palCtx]
+			beforePaletteMSAC := m.State()
 			usePalette := m.BoolAdapt(ctx.PaletteYCDF[szCtx][palCtx][:]) != 0
 			ms = m.State()
-			fs.tracef("sym palette_y x=%d y=%d ctx=%d above=%d left=%d use=%t rng=%d cnt=%d off=%d",
-				bx, by, palCtx, abovePal, leftPal, usePalette, ms.Range, ms.Count, ms.BufferPosition)
+			fs.tracef("sym palette_y_before x=%d y=%d ctx=%d cdf=%v dif=%016x rng=%d cnt=%d off=%d",
+				bx, by, palCtx, beforePaletteCDF, beforePaletteMSAC.Dif, beforePaletteMSAC.Range,
+				beforePaletteMSAC.Count, beforePaletteMSAC.BufferPosition)
+			fs.tracef("sym palette_y x=%d y=%d ctx=%d above=%d left=%d use=%t dif=%016x rng=%d cnt=%d off=%d",
+				bx, by, palCtx, abovePal, leftPal, usePalette, ms.Dif, ms.Range, ms.Count, ms.BufferPosition)
 			if usePalette {
+				beforeSizeCDF := ctx.PaletteSizeCDF[0][szCtx]
 				intraSt.palSzY = int(m.SymbolAdaptDav1d(ctx.PaletteSizeCDF[0][szCtx][:], 6)) + 2
+				ms = m.State()
+				fs.tracef("sym palette_y_size x=%d y=%d ctx=%d size=%d cdf=%v->%v dif=%016x rng=%d cnt=%d off=%d",
+					bx, by, szCtx, intraSt.palSzY, beforeSizeCDF, ctx.PaletteSizeCDF[0][szCtx],
+					ms.Dif, ms.Range, ms.Count, ms.BufferPosition)
 				intraSt.pal[0] = readPalettePlane(m, ctx, fs, seq, 0, szCtx, bx, by, intraSt.palSzY)
 				ms = m.State()
 				fs.tracef("sym palette_y_values x=%d y=%d size=%d values=%v rng=%d cnt=%d off=%d",
@@ -4282,6 +4292,9 @@ func singleRefModeContexts(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBu
 	if !ok {
 		return 0, 0, 0
 	}
+	fs.tracef("sym refmv_result x=%d y=%d row=%t col=%t secondary_row=%t secondary_col=%t newmv=%t count=%d nearest=%d",
+		bx, by, result.RowMatch, result.ColMatch, result.SecondaryRowMatch, result.SecondaryColMatch,
+		result.HaveNewMV, result.Count, result.NearestCount)
 	nearestMatch := boolInt(result.RowMatch) + boolInt(result.ColMatch)
 	refMatchCount := boolInt(result.RowMatch || result.SecondaryRowMatch) +
 		boolInt(result.ColMatch || result.SecondaryColMatch)
