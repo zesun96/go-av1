@@ -45,6 +45,11 @@ func applyResidualAdd(dst []uint8, stride int, coeff []int32,
 }
 
 func lastNonzeroColForRecon(tx uint8, txtp uint8, eob int) int {
+	// WHT has its own inverse-transform path and is intentionally outside the
+	// regular Tx1dTypes table.
+	if txtp == transform.WHT_WHT {
+		return -1
+	}
 	txtps := transform.Tx1dTypes[txtp]
 	switch {
 	case txtps[0] == transform.Tx1dIDENTITY && txtps[1] != transform.Tx1dIDENTITY:

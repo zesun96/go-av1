@@ -196,7 +196,7 @@ func GetFilters(f Filter2D, w, h, mx, my int) (fh, fv []int8) {
 	// Width ≤ 4 uses the small-filter variant on the horizontal axis.
 	if w <= 4 {
 		switch hType {
-		case FilterRegular:
+		case FilterRegular, FilterSharp:
 			hType = FilterRegularSmall
 		case FilterSmooth:
 			hType = FilterSmoothSmall
@@ -204,7 +204,7 @@ func GetFilters(f Filter2D, w, h, mx, my int) (fh, fv []int8) {
 	}
 	if h <= 4 {
 		switch vType {
-		case FilterRegular:
+		case FilterRegular, FilterSharp:
 			vType = FilterRegularSmall
 		case FilterSmooth:
 			vType = FilterSmoothSmall
@@ -212,12 +212,10 @@ func GetFilters(f Filter2D, w, h, mx, my int) (fh, fv []int8) {
 	}
 
 	if mx != 0 {
-		row := McSubpelFilters[hType][mx-1]
-		fh = row[:]
+		fh = McSubpelFilters[hType][mx-1][:]
 	}
 	if my != 0 {
-		row := McSubpelFilters[vType][my-1]
-		fv = row[:]
+		fv = McSubpelFilters[vType][my-1][:]
 	}
 	return
 }

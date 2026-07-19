@@ -27,6 +27,16 @@ func TestWarpedMotionParams_ABCD(t *testing.T) {
 	}
 }
 
+func TestWarpedMotionParamsDeriveShearIdentity(t *testing.T) {
+	w := WarpedMotionParams{Type: WMTypeRotZoom, Matrix: [6]int32{0, 0, 1 << 16, 0, 0, 1 << 16}}
+	if !w.DeriveShear() {
+		t.Fatal("identity affine matrix rejected")
+	}
+	if got := w.ABCD(); got != [4]int16{} {
+		t.Fatalf("identity shear = %v, want zeros", got)
+	}
+}
+
 // Compile-time sanity: spec constants line up with dav1d.
 func TestConstants(t *testing.T) {
 	cases := []struct {

@@ -45,6 +45,7 @@ func DecodeTileGroupWithContext(
 			fhdr.PrimaryRefFrame, fhdr.Refidx, fhdr.SwitchableCompRefs, fhdr.DisableCDFUpdate, fhdr.RefreshContext, fhdr.Tiling.Update,
 			fhdr.Quant.YAC, fhdr.Quant.QM,
 			fhdr.Quant.QMY, fhdr.Quant.QMU, fhdr.Quant.QMV)
+		logf("sym frame_mv force_integer=%d hp=%d gmv=%v", fhdr.ForceIntegerMV, fhdr.HP, fhdr.GMV)
 		if fhdr.Segmentation.Enabled != 0 {
 			logf("sym frame_segments=%v", fhdr.Segmentation.SegData.D)
 		}

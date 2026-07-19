@@ -37,6 +37,53 @@ type LooprestorationParams struct {
 	SGR    SGRParams
 }
 
+// SGR3x3Snapshot applies the normative single-radius SGR projection from an
+// immutable source plane. It is used for rows that do not touch restoration
+// stripe boundaries, where ordinary frame-edge replication applies.
+func SGR3x3Snapshot(dst, src []uint8, stride, planeW, planeH, x0, y0, w, h int, params *SGRParams) {
+	type ab struct {
+		a int
+		b int
+	}
+	calc := func(cx, cy int) ab {
+		sum, sumsq := 0, 0
+		for dy := -1; dy <= 1; dy++ {
+			sy := iclip(cy+dy, 0, planeH-1)
+			for dx := -1; dx <= 1; dx++ {
+				sx := iclip(cx+dx, 0, planeW-1)
+				v := int(src[sy*stride+sx])
+				sum += v
+				sumsq += v * v
+			}
+		}
+		p := sumsq*9 - sum*sum
+		if p < 0 {
+			p = 0
+		}
+		z := (uint(p)*uint(params.S1) + (1 << 19)) >> 20
+		x := int(sgrXbyX[umin(z, 255)])
+		return ab{a: (x*sum*455 + (1 << 11)) >> 12, b: x}
+	}
+	weights := [3][3]int{{3, 4, 3}, {4, 4, 4}, {3, 4, 3}}
+	for y := y0; y < y0+h; y++ {
+		for x := x0; x < x0+w; x++ {
+			a, b := 0, 0
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					v := calc(x+dx, y+dy)
+					weight := weights[dy+1][dx+1]
+					a += v.b * weight
+					b += v.a * weight
+				}
+			}
+			s := int(src[y*stride+x])
+			tmp := (b - a*s + (1 << 8)) >> 9
+			out := s + ((params.W1*tmp + (1 << 10)) >> 11)
+			dst[y*stride+x] = uint8(iclip(out, 0, 255))
+		}
+	}
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 func iclipPixel(v int) uint8 {
@@ -547,14 +594,14 @@ func SGR3x3(dst []uint8, dstBase, dstStride int,
 
 	finish1 := func(dstRow []uint8, dstRowOff int) {
 		for i := 0; i < w; i++ {
-			a := (int(BPtrs[1][i+1])*6 +
-				(int(BPtrs[1][i])+int(BPtrs[1][i+2]))*5 +
-				(int(BPtrs[0][i+1])+int(BPtrs[2][i+1]))*4 +
+			a := ((int(BPtrs[1][i+1])+
+				int(BPtrs[1][i])+int(BPtrs[1][i+2])+
+				int(BPtrs[0][i+1])+int(BPtrs[2][i+1]))*4 +
 				(int(BPtrs[0][i])+int(BPtrs[0][i+2])+
 					int(BPtrs[2][i])+int(BPtrs[2][i+2]))*3) // sum of B (8 neighbours)
-			b := (int(APtrs[1][i+1])*6 +
-				(int(APtrs[1][i])+int(APtrs[1][i+2]))*5 +
-				(int(APtrs[0][i+1])+int(APtrs[2][i+1]))*4 +
+			b := ((int(APtrs[1][i+1])+
+				int(APtrs[1][i])+int(APtrs[1][i+2])+
+				int(APtrs[0][i+1])+int(APtrs[2][i+1]))*4 +
 				(int(APtrs[0][i])+int(APtrs[0][i+2])+
 					int(APtrs[2][i])+int(APtrs[2][i+2]))*3)
 			tmp := (b - a*int(dstRow[dstRowOff+i]) + (1 << 8)) >> 9

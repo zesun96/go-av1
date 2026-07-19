@@ -96,6 +96,17 @@ func TestGetFilters_SmallHeightUsesVerticalSmallFilter(t *testing.T) {
 	}
 }
 
+func TestGetFilters_SmallAxisDowngradesSharpToRegularSmall(t *testing.T) {
+	fh, fv := GetFilters(Filter2D8TapSharp, 4, 4, 8, 8)
+	want := McSubpelFilters[FilterRegularSmall][7]
+	if !slices.Equal(fh, want[:]) {
+		t.Fatalf("small horizontal sharp filter=%v want regular-small %v", fh, want)
+	}
+	if !slices.Equal(fv, want[:]) {
+		t.Fatalf("small vertical sharp filter=%v want regular-small %v", fv, want)
+	}
+}
+
 func TestGetFilters_Bilinear(t *testing.T) {
 	fh, fv := GetFilters(Filter2DBilinear, 8, 8, 8, 8)
 	if fh != nil || fv != nil {
@@ -117,6 +128,21 @@ func TestPutCopy_Basic(t *testing.T) {
 		if dst[i] != v {
 			t.Fatalf("PutCopy dst[%d]=%d want %d", i, dst[i], v)
 		}
+	}
+}
+
+func TestPut8TapQuantizer01HorizontalPhase2(t *testing.T) {
+	row := []byte{81, 87, 96, 96, 97, 108, 110, 104, 101, 107, 111, 109, 104, 95, 89, 84}
+	stride := len(row)
+	src := make([]byte, stride*8)
+	for y := 0; y < 8; y++ {
+		copy(src[y*stride:], row)
+	}
+	dst := make([]byte, 8)
+	Put8Tap(dst, 8, src, 3*stride+3, stride, 8, 1, 2, 0, Filter2D8TapRegular)
+	want := []byte{96, 98, 109, 109, 103, 101, 108, 111}
+	if !slices.Equal(dst, want) {
+		t.Fatalf("horizontal phase-2 prediction=%v want %v", dst, want)
 	}
 }
 

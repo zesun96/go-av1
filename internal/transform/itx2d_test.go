@@ -2,6 +2,7 @@ package transform
 
 import (
 	"math/rand"
+	"sync"
 	"testing"
 )
 
@@ -297,6 +298,31 @@ func TestInvTxfmAdd_64x64_DCT_Full(t *testing.T) {
 			if v > 255 {
 				t.Fatalf("64x64 full: dst[%d,%d]=%d out of range", y, x, v)
 			}
+		}
+	}
+}
+
+func TestInvTxfmAddScratchReuseDoesNotLeakStaleCoefficients(t *testing.T) {
+	inverseTransformScratchPool = sync.Pool{New: func() any { return new([64 * 64]int32) }}
+	run := func(fill int32) []uint8 {
+		scratch := inverseTransformScratchPool.Get().(*[64 * 64]int32)
+		for i := range scratch {
+			scratch[i] = fill
+		}
+		inverseTransformScratchPool.Put(scratch)
+		coeff := make([]int32, 64*64)
+		for i := 0; i < 128; i++ {
+			coeff[i] = int32((i*19)%127 - 63)
+		}
+		dst := make([]uint8, 64*64)
+		InvTxfmAdd(dst, 64, coeff, 127, TX64x64, 2, DCT_DCT, 8)
+		return dst
+	}
+	first := run(12345)
+	second := run(-23456)
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("stale scratch changed pixel %d: %d != %d", i, first[i], second[i])
 		}
 	}
 }

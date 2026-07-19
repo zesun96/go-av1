@@ -61,7 +61,8 @@ type FrameState struct {
 
 	// CDEFIndex stores the decoded per-64x64 CDEF strength index. A value of
 	// -1 means no non-skip block has read the index for that CDEF unit yet.
-	CDEFIndex []int8
+	CDEFIndex        []int8
+	RestorationUnits []RestorationUnit
 
 	// AboveSegID[col4] / LeftSegID[row4] — segment_id of decoded neighbour
 	// blocks (0..MaxSegments-1). Used by SegIDFromNeighbours for predicting
@@ -80,15 +81,17 @@ type FrameState struct {
 	ChromaBlockGrid []Av1Block
 	// TxGrid stores the luma transform leaf covering each 4x4 unit. Unset
 	// entries are 0xff so TX4x4 (zero) remains distinguishable.
-	TxGrid     []uint8
-	TxOriginX4 []uint16
-	TxOriginY4 []uint16
-	SsHor      uint8
-	SsVer      uint8
-	TileX0     int
-	TileY0     int
-	TileX1     int
-	TileY1     int
+	TxGrid                 []uint8
+	TxOriginX4             []uint16
+	TxOriginY4             []uint16
+	SsHor                  uint8
+	SsVer                  uint8
+	TileX0                 int
+	TileY0                 int
+	TileX1                 int
+	TileY1                 int
+	RefMVTopRightKnown     bool
+	RefMVTopRightAvailable bool
 
 	// Frame dimensions in 4-px units.
 	Width  int
@@ -98,6 +101,17 @@ type FrameState struct {
 	CH4    int
 	W8, H8 int
 	W64    int
+}
+
+// RestorationUnit holds the tile-coded parameters for one plane unit.
+type RestorationUnit struct {
+	Plane      uint8
+	Type       header.RestorationType
+	X, Y, W, H int
+	FilterV    [3]int8
+	FilterH    [3]int8
+	SGRWeights [2]int8
+	SGRIndex   uint8
 }
 
 func (fs *FrameState) intraAvailability(plane, bx, by int) (haveTop, haveLeft bool) {
@@ -144,14 +158,16 @@ func NewFrameState(w, h int) *FrameState {
 		LeftPartition:  make([]uint8, h8),
 		AboveTx:        make([]uint8, w4),
 		LeftTx:         make([]uint8, h4),
-		AboveTxIntra:   make([]uint8, w4),
-		LeftTxIntra:    make([]uint8, h4),
-		AbovePalY:      make([]uint8, w4),
-		LeftPalY:       make([]uint8, h4),
-		AbovePalUV:     make([]uint8, w4),
-		LeftPalUV:      make([]uint8, h4),
-		AboveUVMode:    filledUint8(w4, DCPred),
-		LeftUVMode:     filledUint8(h4, DCPred),
+		// dav1d initializes tx_intra edges to -1. Keep the same sentinel in
+		// uint8 form so a missing edge is smaller than every transform log2.
+		AboveTxIntra: filledUint8(w4, 0xff),
+		LeftTxIntra:  filledUint8(h4, 0xff),
+		AbovePalY:    make([]uint8, w4),
+		LeftPalY:     make([]uint8, h4),
+		AbovePalUV:   make([]uint8, w4),
+		LeftPalUV:    make([]uint8, h4),
+		AboveUVMode:  filledUint8(w4, DCPred),
+		LeftUVMode:   filledUint8(h4, DCPred),
 		AbovePal: [3][][8]uint8{
 			make([][8]uint8, w4),
 			make([][8]uint8, w4),
@@ -550,6 +566,7 @@ func (fs *FrameState) MergeFilterState(src *FrameState) {
 			fs.CDEFIndex[i] = v
 		}
 	}
+	fs.RestorationUnits = append(fs.RestorationUnits, src.RestorationUnits...)
 }
 
 func (fs *FrameState) BlockState(bx, by int) (Av1Block, bool) {
@@ -617,8 +634,12 @@ func (fs *FrameState) IntraSmoothFlags(bx, by, stepX, stepY int, plane int) int 
 // SetBlockSeg; inter-specific neighbour state is tracked separately for future
 // reference/motion-vector syntax.
 func (fs *FrameState) SetInterBlock(bx, by, bw, bh int, skip bool, segID uint8, refSlot, refFrame int, filter, filterV uint8, interMode int, mv refmvs.MV) {
+	fs.setInterBlock(bx, by, bw, bh, skip, segID, refSlot, refFrame, filter, filterV, interMode, mv, true)
+}
+
+func (fs *FrameState) setInterBlock(bx, by, bw, bh int, skip bool, segID uint8, refSlot, refFrame int, filter, filterV uint8, interMode int, mv refmvs.MV, hasChroma bool) {
 	fs.SetBlockSeg(bx, by, bw, bh, skip, DCPred, segID)
-	if len(fs.AboveUVMode) > 0 && len(fs.LeftUVMode) > 0 {
+	if hasChroma && len(fs.AboveUVMode) > 0 && len(fs.LeftUVMode) > 0 {
 		cbx, cby, cbw, cbh := chromaRect(&header.SequenceHeader{SsHor: fs.SsHor, SsVer: fs.SsVer}, bx, by, bw, bh)
 		fs.SetUVModeState(cbx, cby, cbw, cbh, DCPred)
 	}
@@ -661,12 +682,13 @@ func (fs *FrameState) SetInterBlock(bx, by, bw, bh int, skip bool, segID uint8, 
 	fs.setCurrentMVBlock(bx, by, bw, bh, refFrame, interMode, mv)
 }
 
-func (fs *FrameState) CommitInterBlock(bx, by, bw, bh int, blk Av1Block, refFrame int) {
+func (fs *FrameState) CommitInterBlock(bx, by, bw, bh int, blk Av1Block, refFrame int, chroma ...bool) {
+	hasChroma := len(chroma) == 0 || chroma[0]
 	if blk.RefFrame > 0 {
 		refFrame = int(blk.RefFrame)
 	}
 	fs.SetBlockState(bx, by, bw, bh, blk)
-	fs.SetInterBlock(
+	fs.setInterBlock(
 		bx, by, bw, bh,
 		blk.Skip,
 		blk.SegID,
@@ -676,7 +698,15 @@ func (fs *FrameState) CommitInterBlock(bx, by, bw, bh int, blk Av1Block, refFram
 		blk.FilterV,
 		int(blk.InterMode),
 		refmvs.MV{Y: blk.MV[0], X: blk.MV[1]},
+		hasChroma,
 	)
+	if blk.InterIntra && !blk.Compound && fs.MVFrame != nil {
+		mvBlk, ok := fs.MVFrame.GridBlock(bx>>2, by>>2)
+		if ok {
+			mvBlk.Ref[1] = 0
+			fs.MVFrame.PutGridBlock(bx>>2, by>>2, (bw+3)>>2, (bh+3)>>2, mvBlk)
+		}
+	}
 	if blk.Compound {
 		fs.setCurrentCompoundMVBlock(bx, by, bw, bh, blk)
 	}
@@ -737,7 +767,9 @@ func (fs *FrameState) setCurrentMVBlock(bx, by, bw, bh int, refFrame, interMode 
 	bw4 := (bw + 3) >> 2
 	bh4 := (bh + 3) >> 2
 	mf := uint8(0)
-	if interMode == InterModeGlobalMV {
+	// dav1d only marks single-reference GLOBALMV blocks as affine-global
+	// candidates when both dimensions cover at least two 4x4 units.
+	if interMode == InterModeGlobalMV && bw4 >= 2 && bh4 >= 2 {
 		mf |= 1
 	}
 	if interMode == InterModeNewMV {
@@ -1055,10 +1087,10 @@ func (fs *FrameState) IntraTxCtx(bx, by int, maxTx uint8) int {
 	col4 := bx >> 2
 	row4 := by >> 2
 	ctx := 0
-	if col4 < len(fs.AboveTxIntra) && fs.AboveTxIntra[col4] >= td.Lw {
+	if col4 < len(fs.AboveTxIntra) && fs.AboveTxIntra[col4] != 0xff && fs.AboveTxIntra[col4] >= td.Lw {
 		ctx++
 	}
-	if row4 < len(fs.LeftTxIntra) && fs.LeftTxIntra[row4] >= td.Lh {
+	if row4 < len(fs.LeftTxIntra) && fs.LeftTxIntra[row4] != 0xff && fs.LeftTxIntra[row4] >= td.Lh {
 		ctx++
 	}
 	return ctx

@@ -6,6 +6,57 @@ import (
 	"github.com/zesun96/go-av1/internal/header"
 )
 
+func TestTPartitionBlocksMatchAV1Geometry(t *testing.T) {
+	tests := []struct {
+		part int
+		want [3]partitionBlock
+	}{
+		{PartitionTTopSplit, [3]partitionBlock{{8, 12, 8, 8}, {16, 12, 8, 8}, {8, 20, 16, 8}}},
+		{PartitionTBottomSplit, [3]partitionBlock{{8, 12, 16, 8}, {8, 20, 8, 8}, {16, 20, 8, 8}}},
+		{PartitionTLeftSplit, [3]partitionBlock{{8, 12, 8, 8}, {8, 20, 8, 8}, {16, 12, 8, 16}}},
+		{PartitionTRightSplit, [3]partitionBlock{{8, 12, 8, 16}, {16, 12, 8, 8}, {16, 20, 8, 8}}},
+	}
+	for _, test := range tests {
+		if got := tPartitionBlocks(test.part, 8, 12, 16); got != test.want {
+			t.Fatalf("partition %d blocks = %v, want %v", test.part, got, test.want)
+		}
+	}
+}
+
+func TestIntraEdgeFlagsMatchDav1dLayoutRules(t *testing.T) {
+	node := intraEdgeNode{topHasRight: true}
+	if got, want := node.hFlags(BL8X8, 1), edgeI420TopHasRight; got != want {
+		t.Fatalf("8x8 h[1] flags = %d, want %d", got, want)
+	}
+	if got, want := node.vFlags(BL8X8, 1), edgeAllTopHasRight; got != want {
+		t.Fatalf("8x8 v[1] flags = %d, want %d", got, want)
+	}
+	seq420 := &header.SequenceHeader{SsHor: 1, SsVer: 1}
+	if got, want := planeIntraEdgeFlags(edgeI420TopHasRight|edgeI420LeftHasBottom, 1, seq420), edgeTopHasRight|edgeLeftHasBottom; got != want {
+		t.Fatalf("4:2:0 plane flags = %d, want %d", got, want)
+	}
+}
+
+func TestTransformIntraEdgeFlagsUseDecodedTransformNeighbors(t *testing.T) {
+	if got, want := transformIntraEdgeFlags(8, 8, 0, 0, 4, 4, 0), edgeTopHasRight|edgeLeftHasBottom; got != want {
+		t.Fatalf("top-left transform flags = %d, want %d", got, want)
+	}
+	if got, want := transformIntraEdgeFlags(8, 8, 4, 4, 4, 4, edgeTopHasRight|edgeLeftHasBottom), intraEdgeFlags(0); got != want {
+		t.Fatalf("bottom-right transform flags = %d, want %d", got, want)
+	}
+	if got, want := transformIntraEdgeFlags(8, 8, 4, 0, 4, 4, edgeTopHasRight|edgeLeftHasBottom), edgeTopHasRight; got != want {
+		t.Fatalf("top-right transform flags = %d, want %d", got, want)
+	}
+}
+
+func TestCflLumaRectCoversSub8x8ChromaOwner(t *testing.T) {
+	seq := &header.SequenceHeader{SsHor: 1, SsVer: 1}
+	x, y, w, h := cflLumaRect(seq, 168, 0, 4, 4)
+	if x != 336 || y != 0 || w != 8 || h != 8 {
+		t.Fatalf("CFL luma rect = (%d,%d %dx%d), want (336,0 8x8)", x, y, w, h)
+	}
+}
+
 func TestKFYModeCDFsAreMonotonic(t *testing.T) {
 	for top := range KFYMCDFDefault {
 		for left := range KFYMCDFDefault[top] {
@@ -16,6 +67,30 @@ func TestKFYModeCDFsAreMonotonic(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestKFYModeCDFTop3RowsMatchDav1d(t *testing.T) {
+	wantLeft3 := [NIntraPredModes + 1]uint16{
+		25054, 23720, 23252, 16101, 15951, 15774, 15615, 14001,
+		6025, 2379, 1232, 240, 0, 0,
+	}
+	wantLeft4 := [NIntraPredModes + 1]uint16{
+		23925, 22488, 21272, 17451, 16116, 14825, 13660, 10050,
+		6999, 2815, 1785, 283, 0, 0,
+	}
+	if got := KFYMCDFDefault[3][3]; got != wantLeft3 {
+		t.Fatalf("KFY[3][3] = %v, want %v", got, wantLeft3)
+	}
+	if got := KFYMCDFDefault[3][4]; got != wantLeft4 {
+		t.Fatalf("KFY[3][4] = %v, want %v", got, wantLeft4)
+	}
+}
+
+func TestUVModeCDFKeepsDav1dYMode10Probability(t *testing.T) {
+	// dav1d CDF13(..., 22696, ...) is stored as an inverse CDF.
+	if got, want := UVModeCDFDefault[1][10][10], uint16(32768-22696); got != want {
+		t.Fatalf("UV mode CDF = %d, want %d", got, want)
 	}
 }
 
@@ -43,6 +118,122 @@ func TestCFLAllowedForBlock(t *testing.T) {
 	}
 	if cflAllowedForBlock(seq444, 8, 8, true) {
 		t.Fatal("lossless 4:4:4 8x8 block should not allow CFL")
+	}
+}
+
+func TestPrepareFilterIntraEdgesKeepsTopLeftRequirement(t *testing.T) {
+	plane := make([]byte, 8*8)
+	for y := 0; y < 8; y++ {
+		plane[y*8+3] = byte(40 + y)
+	}
+	topLeft, tl := newIntraEdgeBuffer(4, 4)
+	mode, _ := prepareIntraPrediction(
+		plane, 8, 8, 8, 4, 0, 4, 4,
+		topLeft, tl, DCPred, 0, 0, false, 0, false, true,
+	)
+	if mode != intraPredFilter {
+		t.Fatalf("dispatch mode = %d, want filter", mode)
+	}
+	if topLeft[tl] != 40 || topLeft[tl+1] != 40 || topLeft[tl-1] != 40 {
+		t.Fatalf("filter edges tl/top/left = %d/%d/%d, want 40/40/40", topLeft[tl], topLeft[tl+1], topLeft[tl-1])
+	}
+}
+
+func TestPrepareZone2EdgesIncludesBottomLeftExtension(t *testing.T) {
+	plane := make([]byte, 8*8)
+	for y := 0; y < 8; y++ {
+		plane[y*8+3] = byte(40 + y)
+	}
+	topLeft, tl := newIntraEdgeBuffer(4, 4)
+	mode, _ := prepareIntraPrediction(
+		plane, 8, 8, 8, 4, 0, 4, 4,
+		topLeft, tl, DiagDownRightPred, 0, -1, false, 0, false, true,
+	)
+	if mode != intraPredZ2 {
+		t.Fatalf("dispatch mode = %d, want Zone 2", mode)
+	}
+	for i := 0; i < 4; i++ {
+		if got, want := topLeft[tl-5-i], byte(44+i); got != want {
+			t.Fatalf("bottom-left edge %d = %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestPrepareZone2FiltersTopLeftForLargeTransform(t *testing.T) {
+	plane := make([]byte, 32*32)
+	plane[7*32+7] = 90
+	plane[8*32+7] = 94
+	plane[7*32+8] = 89
+	topLeft, tl := newIntraEdgeBuffer(16, 8)
+	mode, _ := prepareIntraPrediction(
+		plane, 32, 32, 32, 8, 8, 16, 8,
+		topLeft, tl, VertRightPred, -1, -1, true, 0, true, true,
+	)
+	if mode != intraPredZ2 {
+		t.Fatalf("dispatch mode = %d, want Zone 2", mode)
+	}
+	if got := topLeft[tl]; got != 91 {
+		t.Fatalf("filtered top-left = %d, want 91", got)
+	}
+}
+
+func TestRestorationUnitExtentMergesShortTail(t *testing.T) {
+	if got, want := restorationUnitExtent(0, 176, 128), 176; got != want {
+		t.Fatalf("single restoration unit extent = %d, want %d", got, want)
+	}
+	if got, want := restorationUnitExtent(0, 300, 128), 128; got != want {
+		t.Fatalf("first restoration unit extent = %d, want %d", got, want)
+	}
+	if got, want := restorationUnitExtent(128, 300, 128), 172; got != want {
+		t.Fatalf("last restoration unit extent = %d, want %d", got, want)
+	}
+}
+
+func TestRestorationUnitYExtentUsesStripeOffset(t *testing.T) {
+	tests := []struct {
+		pos, total, unitSize, ssV int
+		wantStart, wantExtent     int
+	}{
+		{pos: 0, total: 288, unitSize: 128, wantStart: 0, wantExtent: 120},
+		{pos: 128, total: 288, unitSize: 128, wantStart: 120, wantExtent: 168},
+		{pos: 0, total: 144, unitSize: 64, ssV: 1, wantStart: 0, wantExtent: 60},
+		{pos: 64, total: 144, unitSize: 64, ssV: 1, wantStart: 60, wantExtent: 84},
+		{pos: 0, total: 100, unitSize: 128, wantStart: 0, wantExtent: 100},
+	}
+	for _, tc := range tests {
+		gotStart, gotExtent := restorationUnitYExtent(tc.pos, tc.total, tc.unitSize, tc.ssV)
+		if gotStart != tc.wantStart || gotExtent != tc.wantExtent {
+			t.Fatalf("restorationUnitYExtent(%d, %d, %d, %d) = (%d, %d), want (%d, %d)",
+				tc.pos, tc.total, tc.unitSize, tc.ssV, gotStart, gotExtent, tc.wantStart, tc.wantExtent)
+		}
+	}
+}
+
+func TestRestorationCDFDefaultsMatchDav1d(t *testing.T) {
+	ctx := NewTileCtx()
+	if got, want := ctx.RestoreSwitchableCDF, [3]uint16{23355, 10187, 0}; got != want {
+		t.Fatalf("switchable restoration CDF = %v, want %v", got, want)
+	}
+	if got, want := ctx.RestoreWienerCDF, [2]uint16{21198, 0}; got != want {
+		t.Fatalf("Wiener restoration CDF = %v, want %v", got, want)
+	}
+	if got, want := ctx.RestoreSGRProjCDF, [2]uint16{15913, 0}; got != want {
+		t.Fatalf("SGR restoration CDF = %v, want %v", got, want)
+	}
+}
+
+func TestClampPreparedBottomLeftReplicatesLastAvailableSample(t *testing.T) {
+	edge := make([]byte, 24)
+	tl := 12
+	edge[tl-4] = 73
+	for i := 0; i < 4; i++ {
+		edge[tl-5-i] = byte(100 + i)
+	}
+	clampPreparedBottomLeft(edge, tl, 4)
+	for i := 0; i < 4; i++ {
+		if got := edge[tl-5-i]; got != 73 {
+			t.Fatalf("bottom-left edge %d = %d, want 73", i, got)
+		}
 	}
 }
 
@@ -241,4 +432,29 @@ func testBoolInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func TestMotionModeNeighboursExcludesInterIntraFromWarpSamples(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.SetBlockState(0, 0, 8, 8, Av1Block{Intra: true})
+	fs.SetBlockState(8, 0, 8, 8, Av1Block{Intra: true})
+	fs.CommitInterBlock(0, 8, 8, 8, Av1Block{
+		RefSlot:    0,
+		RefFrame:   1,
+		InterIntra: true,
+	}, 1)
+
+	overlap, matchingRef := motionModeNeighbours(fs, 8, 8, 8, 8, 0)
+	if !overlap {
+		t.Fatal("inter-intra neighbour should remain eligible for OBMC overlap")
+	}
+	if matchingRef {
+		t.Fatal("inter-intra neighbour must not enable local warped motion")
+	}
+
+	fs.CommitInterBlock(0, 8, 8, 8, Av1Block{RefSlot: 0, RefFrame: 1}, 1)
+	_, matchingRef = motionModeNeighbours(fs, 8, 8, 8, 8, 0)
+	if !matchingRef {
+		t.Fatal("ordinary inter neighbour should enable matching-reference warp")
+	}
 }

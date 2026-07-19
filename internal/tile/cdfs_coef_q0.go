@@ -1,6 +1,43 @@
 package tile
 
-// BaseTokFullDefaultQ0 mirrors dav1d default_coef_cdf[0].base_tok.
+var EobBin16FullDefaultQ0 = [2][2][8]uint16{
+	{{31928, 31729, 30788, 27873, 0}, {32398, 32097, 30885, 28297, 0}},
+	{{29521, 27818, 23080, 18205, 0}, {30864, 29414, 25005, 18121, 0}},
+}
+
+var EobBin32FullDefaultQ0 = [2][2][8]uint16{
+	{{32368, 32248, 31791, 30666, 26226, 0}, {32558, 32363, 31453, 29442, 25231, 0}},
+	{{30132, 28495, 25180, 20974, 12367, 0}, {30982, 29589, 25866, 21411, 13714, 0}},
+}
+
+var EobBin64FullDefaultQ0 = [2][2][8]uint16{
+	{{32439, 32270, 31667, 30984, 29503, 25010, 0}, {32433, 32038, 31309, 27274, 24013, 19771, 0}},
+	{{29263, 27464, 22682, 18954, 15084, 9398, 0}, {31205, 30068, 27892, 21857, 18062, 10288, 0}},
+}
+
+var EobBin128FullDefaultQ0 = [2][2][8]uint16{
+	{{32549, 32286, 31628, 30677, 29088, 26740, 20182, 0}, {32397, 32069, 31514, 27938, 23289, 20206, 15271, 0}},
+	{{27523, 25312, 19888, 16916, 12735, 8836, 5160, 0}, {30714, 29296, 26899, 18536, 14526, 12178, 6016, 0}},
+}
+
+var EobBin256FullDefaultQ0 = [2][2][16]uint16{
+	{{32458, 32184, 30881, 29179, 26600, 24157, 21416, 17116, 0}, {31770, 30918, 29770, 27164, 15427, 12880, 9869, 7185, 0}},
+	{{30248, 29528, 26816, 23898, 20191, 15210, 12814, 8600, 0}, {30565, 28638, 25333, 22029, 12116, 9087, 7159, 5507, 0}},
+}
+
+var EobBin512FullDefaultQ0 = [2][16]uint16{
+	{32127, 31785, 29061, 27338, 22534, 17810, 13980, 9356, 6707, 0},
+	{27673, 26322, 22772, 19414, 16751, 14782, 11849, 6639, 3628, 0},
+}
+
+var EobBin1024FullDefaultQ0 = [2][16]uint16{
+	{32375, 32347, 32017, 31145, 29608, 26416, 19423, 14721, 10197, 6938, 0},
+	{30903, 30780, 29838, 28526, 22235, 16230, 11414, 5513, 4222, 984, 0},
+}
+
+// BaseTokFullDefaultQ0 holds dav1d's source-order CDF values for
+// default_coef_cdf[0].base_tok. q0 initialization converts them to the native
+// inverse-CDF representation used by MSAC, matching the generated q1-q3 data.
 // Shape: [tx_ctx=5][plane=2][ctx=41][5], laid out as
 // {cdf0, cdf1, cdf2, sentinel, counter}.
 var BaseTokFullDefaultQ0 = [N_TX_SIZES][2][41][5]uint16{
@@ -176,7 +213,8 @@ var BaseTokFullDefaultQ0 = [N_TX_SIZES][2][41][5]uint16{
 	},
 }
 
-// BrTokFullDefaultQ0 mirrors dav1d default_coef_cdf[0].br_tok.
+// BrTokFullDefaultQ0 holds dav1d's source-order CDF values for
+// default_coef_cdf[0].br_tok. q0 initialization converts them to inverse CDFs.
 // Shape: [tx_class=4][plane=2][ctx=21][5], laid out as
 // {cdf0, cdf1, cdf2, sentinel, counter}.
 var BrTokFullDefaultQ0 = [4][2][21][5]uint16{

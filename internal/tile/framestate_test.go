@@ -153,6 +153,26 @@ func TestFrameStateSetInterBlock(t *testing.T) {
 	}
 }
 
+func TestCommitInterBlockWithoutChromaPreservesUVModeEdges(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.SsHor, fs.SsVer = 1, 1
+	fs.SetUVModeState(4, 4, 4, 4, SmoothPred)
+	blk := Av1Block{RefSlot: 0, RefFrame: 1, InterMode: InterModeNearestMV}
+
+	fs.CommitInterBlock(8, 8, 8, 4, blk, 1, false)
+	if got := fs.AboveUVMode[1]; got != SmoothPred {
+		t.Fatalf("AboveUVMode=%d want preserved smooth mode %d", got, SmoothPred)
+	}
+	if got := fs.LeftUVMode[1]; got != SmoothPred {
+		t.Fatalf("LeftUVMode=%d want preserved smooth mode %d", got, SmoothPred)
+	}
+
+	fs.CommitInterBlock(8, 8, 8, 8, blk, 1, true)
+	if got := fs.AboveUVMode[1]; got != DCPred {
+		t.Fatalf("AboveUVMode=%d want inter chroma mode %d", got, DCPred)
+	}
+}
+
 func TestFrameStateIntraBlockClearsInterEdges(t *testing.T) {
 	fs := NewFrameState(64, 64)
 	fs.SetInterBlock(0, 0, 16, 16, false, 0, 2, 1, 2, 1, InterModeNearestMV, refmvs.MV{Y: 4, X: -2})
@@ -196,6 +216,31 @@ func TestFrameStateCommitInterBlockSetsNewMVFlag(t *testing.T) {
 	}
 	if got.InterMode != InterModeNewMV || got.BaseMV != [2]int16{8, -4} || got.DeltaMV != [2]int16{2, 6} || got.MV != [2]int16{10, 2} {
 		t.Fatalf("block state=%+v", got)
+	}
+}
+
+func TestFrameStateGlobalMVFlagRequiresEightPixelsInBothDimensions(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
+
+	fs.setCurrentMVBlock(0, 0, 8, 4, 1, InterModeGlobalMV, refmvs.MV{X: -7})
+	if got, _ := fs.MVFrame.GridBlock(0, 0); got.MF != 0 {
+		t.Fatalf("8x4 GLOBALMV flag=%d want 0", got.MF)
+	}
+	fs.setCurrentMVBlock(8, 0, 8, 8, 1, InterModeGlobalMV, refmvs.MV{X: -7})
+	if got, _ := fs.MVFrame.GridBlock(2, 0); got.MF != 1 {
+		t.Fatalf("8x8 GLOBALMV flag=%d want 1", got.MF)
+	}
+}
+
+func TestFrameStateInterIntraStoresIntraSecondReference(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fs.MVFrame = refmvs.NewFrame(64, 64)
+	blk := Av1Block{InterMode: InterModeRefMV, RefFrame: 1, RefSlot: 0, InterIntra: true}
+	fs.CommitInterBlock(8, 8, 8, 16, blk, 1)
+	got, ok := fs.MVFrame.GridBlock(2, 2)
+	if !ok || got.Ref != (refmvs.RefPair{1, 0}) {
+		t.Fatalf("inter-intra MV reference=%v ok=%t want {1,0}", got.Ref, ok)
 	}
 }
 

@@ -116,7 +116,7 @@ func TestFindAppendsTemporalCandidate(t *testing.T) {
 	source.RP[source.RPStride+1] = TemporalBlock{MV: MV{Y: 6, X: -4}, Ref: 3}
 	projectTestSource(current, source, 3)
 
-	r := Find(SearchConfig{Frame: current, TemporalSource: source, Ref: 4, TargetSlot: 3, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2, BlockDims: testBlockDims()})
+	r := Find(SearchConfig{Frame: current, TemporalSource: source, UseRefFrameMVs: true, Ref: 4, TargetSlot: 3, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2, BlockDims: testBlockDims()})
 	if r.Count != 1 || r.NearestCount != 0 || r.Candidates[0].MV[0] != (MV{Y: 3, X: -2}) {
 		t.Fatalf("Find temporal result = %+v", r)
 	}
@@ -198,7 +198,7 @@ func TestFindMergesMatchingSpatialAndTemporal(t *testing.T) {
 	source.RP[source.RPStride+1] = TemporalBlock{MV: MV{Y: 6, X: -4}, Ref: 3}
 	projectTestSource(current, source, 3)
 
-	r := Find(SearchConfig{Frame: current, TemporalSource: source, Ref: 4, TargetSlot: 3, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2, BlockDims: testBlockDims()})
+	r := Find(SearchConfig{Frame: current, TemporalSource: source, UseRefFrameMVs: true, Ref: 4, TargetSlot: 3, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2, BlockDims: testBlockDims()})
 	if r.Count != 1 || r.NearestCount != 1 || r.Candidates[0].Weight <= 640 {
 		t.Fatalf("Find merged result = %+v", r)
 	}
@@ -216,7 +216,7 @@ func TestFindScansTemporalBlockArea(t *testing.T) {
 	source.RP[2*source.RPStride+3] = TemporalBlock{MV: MV{X: 8}, Ref: 3}
 	projectTestSource(current, source, 3)
 
-	r := Find(SearchConfig{Frame: current, TemporalSource: source, Ref: 4, TargetSlot: 3, Bx4: 4, By4: 4, Bw4: 4, Bh4: 4, TileX1: 16, TileY1: 16, BlockDims: testBlockDims()})
+	r := Find(SearchConfig{Frame: current, TemporalSource: source, UseRefFrameMVs: true, Ref: 4, TargetSlot: 3, Bx4: 4, By4: 4, Bw4: 4, Bh4: 4, TileX1: 16, TileY1: 16, BlockDims: testBlockDims()})
 	if r.Count != 2 {
 		t.Fatalf("temporal area candidate count=%d want 2", r.Count)
 	}
@@ -232,7 +232,7 @@ func TestFindTemporalGlobalMVContext(t *testing.T) {
 	source := NewFrame(32, 32)
 	source.OrderHint, source.OrderBits = 8, 5
 	source.RefFrameOrderHints[2] = 6
-	cfg := SearchConfig{Frame: current, TemporalSource: source, Ref: 4, TargetSlot: 3, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2, BlockDims: testBlockDims()}
+	cfg := SearchConfig{Frame: current, TemporalSource: source, UseRefFrameMVs: true, Ref: 4, TargetSlot: 3, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2, BlockDims: testBlockDims()}
 
 	if got := Find(cfg).GlobalMVContext; got != 1 {
 		t.Fatalf("missing temporal global context=%d want 1", got)
@@ -249,11 +249,30 @@ func TestFindTemporalGlobalMVContext(t *testing.T) {
 	}
 }
 
+func TestFindTemporalGlobalMVContextIgnoresLaterSamples(t *testing.T) {
+	current := NewFrame(32, 32)
+	current.OrderHint, current.OrderBits, current.HighPrecision = 9, 5, true
+	current.RefOrderHints[3] = 8
+	source := NewFrame(32, 32)
+	source.OrderHint, source.OrderBits = 8, 5
+	// The top-left sample is invalid. A valid sample later in the block may be
+	// added to the MV stack, but must not replace the initial global context.
+	current.RPProj[1] = TemporalBlock{MV: MV{X: 8}, Ref: 1}
+	got := Find(SearchConfig{
+		Frame: current, TemporalSource: source, UseRefFrameMVs: true, Ref: 4, TargetSlot: 3,
+		Bx4: 0, By4: 0, Bw4: 4, Bh4: 2, TileX1: 8, TileY1: 8,
+		GlobalMV: MV{X: 8}, BlockDims: testBlockDims(),
+	})
+	if got.GlobalMVContext != 1 {
+		t.Fatalf("later temporal sample changed global context to %d, want 1", got.GlobalMVContext)
+	}
+}
+
 func TestFindWithoutOrderHintsKeepsGlobalMVContextZero(t *testing.T) {
 	current := NewFrame(32, 32)
 	source := NewFrame(32, 32)
 	got := Find(SearchConfig{
-		Frame: current, TemporalSource: source, Ref: 1, TargetSlot: 0,
+		Frame: current, TemporalSource: source, UseRefFrameMVs: true, Ref: 1, TargetSlot: 0,
 		Bx4: 0, By4: 0, Bw4: 8, Bh4: 8, TileX1: 8, TileY1: 8,
 		BlockDims: testBlockDims(),
 	})

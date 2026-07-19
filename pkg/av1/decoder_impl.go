@@ -15,6 +15,7 @@ import (
 	"github.com/zesun96/go-av1/internal/cdef"
 	"github.com/zesun96/go-av1/internal/header"
 	"github.com/zesun96/go-av1/internal/loopfilter"
+	"github.com/zesun96/go-av1/internal/looprestoration"
 	"github.com/zesun96/go-av1/internal/obu"
 	"github.com/zesun96/go-av1/internal/refmvs"
 	"github.com/zesun96/go-av1/internal/tile"
@@ -178,6 +179,9 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 		if err := obu.ParseSequenceHeader(o.Payload, &seq, obu.ParseOptions{}); err != nil {
 			return err
 		}
+		if err := validateSequenceSupport(&seq); err != nil {
+			return err
+		}
 		d.seq = &seq
 
 	case header.OBUFrameHeader:
@@ -276,6 +280,17 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 
 	default:
 		// All other OBU types (metadata, redundant frame header, etc.) silently ignored.
+	}
+	return nil
+}
+
+func validateSequenceSupport(seq *header.SequenceHeader) error {
+	if seq.HBD != 0 {
+		bitDepth := 10
+		if seq.HBD == 2 {
+			bitDepth = 12
+		}
+		return fmt.Errorf("%w: %d-bit sequences", ErrUnsupported, bitDepth)
 	}
 	return nil
 }
@@ -473,11 +488,17 @@ func (d *decoderImpl) postFilter(pic *Picture, fhdr *header.FrameHeader, filterS
 	if d.opts.InloopFilters&InloopFilterDeblock != 0 {
 		run("deblock", func() { d.applyLoopFilterWithState(pic, fhdr, filterState) })
 	}
+	var restorationBoundary [3][]byte
+	if d.opts.InloopFilters&InloopFilterRestoration != 0 {
+		restorationBoundary[0] = append([]byte(nil), pic.Y...)
+		restorationBoundary[1] = append([]byte(nil), pic.U...)
+		restorationBoundary[2] = append([]byte(nil), pic.V...)
+	}
 	if d.opts.InloopFilters&InloopFilterCDEF != 0 {
 		run("cdef", func() { d.applyCDEFWithState(pic, fhdr, filterState) })
 	}
 	if d.opts.InloopFilters&InloopFilterRestoration != 0 {
-		run("restoration", func() { d.applyRestoration(pic, fhdr) })
+		run("restoration", func() { d.applyRestoration(pic, fhdr, filterState, restorationBoundary) })
 	}
 }
 
@@ -813,7 +834,8 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			if secStrength == 3 {
 				secStrength = 4
 			}
-			if priStrength == 0 && secStrength == 0 {
+			needsChromaDirection := planeID == 0 && int(fhdr.CDEF.UVStrength[preset])>>2 != 0
+			if priStrength == 0 && secStrength == 0 && !needsChromaDirection {
 				continue
 			}
 			bw := blockSz
@@ -881,8 +903,8 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			if planeID == 0 {
 				rawPriStrength := priStrength
 				uvPriStrength := int(fhdr.CDEF.UVStrength[preset]) >> 2
+				var variance uint
 				if rawPriStrength != 0 || uvPriStrength != 0 {
-					var variance uint
 					dir, variance = cdef.FindDir(src, by*stride+bx, stride)
 					if dirIdx >= 0 && dirIdx < len(dirs) {
 						dirs[dirIdx] = uint8(dir)
@@ -959,9 +981,253 @@ func adjustCDEFStrength(strength int, variance uint) int {
 	return (strength*(4+i) + 8) >> 4
 }
 
-// applyRestoration is a stub.
-// TODO M8: call looprestoration.WienerFilter / SGR per restoration unit.
-func (d *decoderImpl) applyRestoration(_ *Picture, _ *header.FrameHeader) {}
+func (d *decoderImpl) applyRestoration(pic *Picture, _ *header.FrameHeader, fs *tile.FrameState, boundary [3][]byte) {
+	if pic == nil || fs == nil || len(fs.RestorationUnits) == 0 {
+		return
+	}
+	planes := [3][]byte{pic.Y, pic.U, pic.V}
+	strides := [3]int{pic.StrideY, pic.StrideUV, pic.StrideUV}
+	chromaW, chromaH := pic.ChromaWidth(), pic.ChromaHeight()
+	widths := [3]int{pic.Width, chromaW, chromaW}
+	heights := [3]int{pic.Height, chromaH, chromaH}
+	sources := [3][]byte{}
+	for p, plane := range planes {
+		sources[p] = append([]byte(nil), plane...)
+	}
+	for _, unit := range fs.RestorationUnits {
+		plane := int(unit.Plane)
+		if plane < 0 || plane >= len(planes) || unit.Type == header.RestorationNone {
+			continue
+		}
+		ssV := 0
+		if plane > 0 && pic.Chroma == Chroma420 {
+			ssV = 1
+		}
+		applyRestorationUnit(planes[plane], sources[plane], boundary[plane], strides[plane], widths[plane], heights[plane], ssV, unit)
+	}
+}
+
+func applyRestorationUnit(dst, src, boundary []byte, stride, planeW, planeH, ssV int, unit tile.RestorationUnit) {
+	if unit.W <= 0 || unit.H <= 0 || unit.X < 0 || unit.Y < 0 ||
+		unit.X+unit.W > planeW || unit.Y+unit.H > planeH {
+		return
+	}
+	regularStripe := 64 >> ssV
+	firstStripeEnd := 56 >> ssV
+	for sy := unit.Y; sy < unit.Y+unit.H; {
+		nextStripe := firstStripeEnd
+		if sy >= firstStripeEnd {
+			nextStripe += ((sy-firstStripeEnd)/regularStripe + 1) * regularStripe
+		}
+		h := min(nextStripe-sy, unit.Y+unit.H-sy)
+		edges := looprestoration.LrEdgeFlags(0)
+		if unit.X > 0 {
+			edges |= looprestoration.LrHaveLeft
+		}
+		if unit.X+unit.W < planeW {
+			edges |= looprestoration.LrHaveRight
+		}
+		if sy > 0 {
+			edges |= looprestoration.LrHaveTop
+		}
+		if sy+h < planeH {
+			edges |= looprestoration.LrHaveBottom
+		}
+		left := restorationLeft(src, stride, unit.X, sy, h)
+		if len(boundary) == 0 {
+			boundary = src
+		}
+		lpf, lpfBase, lpfStride := restorationLPF(boundary, stride, planeW, planeH, unit.X, sy, unit.W, h)
+		base := sy*stride + unit.X
+		switch unit.Type {
+		case header.RestorationWiener:
+			// Wiener is applied below from the immutable CDEF snapshot. Keep the
+			// stripe loop here to share boundary construction with SGR.
+		case header.RestorationSGRProj:
+			params := restorationSGRParams(unit)
+			s0, s1 := restorationSGRStrengths(unit.SGRIndex)
+			switch {
+			case s0 == 0:
+				looprestoration.SGR3x3(dst, base, stride, left, lpf, lpfBase, lpfStride, unit.W, h, &params, edges)
+			case s1 == 0:
+				looprestoration.SGR5x5(dst, base, stride, left, lpf, lpfBase, lpfStride, unit.W, h, &params, edges)
+			}
+		}
+		sy += h
+	}
+	if unit.Type == header.RestorationWiener {
+		params := restorationWienerParams(unit)
+		applyWienerSnapshot(dst, src, stride, planeW, planeH, unit, &params)
+		regularStripe, firstStripeEnd := 64>>ssV, 56>>ssV
+		unitEnd := unit.Y + unit.H
+		for boundaryY := firstStripeEnd; boundaryY < planeH; boundaryY += regularStripe {
+			if boundaryY > unit.Y && boundaryY <= unitEnd {
+				aboveSrc := append([]byte(nil), src...)
+				copyRestorationRows(aboveSrc, boundary, stride, boundaryY, 2, planeH)
+				copyRestorationRow(aboveSrc, boundary, stride, boundaryY+2, boundaryY+1, planeH)
+				aboveY := max(unit.Y, boundaryY-3)
+				if aboveY < boundaryY {
+					aboveUnit := unit
+					aboveUnit.Y, aboveUnit.H = aboveY, boundaryY-aboveY
+					applyWienerSnapshot(dst, aboveSrc, stride, planeW, planeH, aboveUnit, &params)
+				}
+			}
+			if boundaryY >= unit.Y && boundaryY < unitEnd {
+				belowSrc := append([]byte(nil), src...)
+				copyRestorationRows(belowSrc, boundary, stride, boundaryY-2, 2, planeH)
+				copyRestorationRow(belowSrc, boundary, stride, boundaryY-3, boundaryY-2, planeH)
+				belowUnit := unit
+				belowUnit.Y = boundaryY
+				belowUnit.H = min(3, unitEnd-boundaryY)
+				applyWienerSnapshot(dst, belowSrc, stride, planeW, planeH, belowUnit, &params)
+			}
+		}
+	}
+	if unit.Type == header.RestorationSGRProj {
+		s0, _ := restorationSGRStrengths(unit.SGRIndex)
+		if s0 == 0 {
+			params := restorationSGRParams(unit)
+			looprestoration.SGR3x3Snapshot(dst, src, stride, planeW, planeH,
+				unit.X, unit.Y, unit.W, unit.H, &params)
+			regularStripe, firstStripeEnd := 64>>ssV, 56>>ssV
+			unitEnd := unit.Y + unit.H
+			for boundaryY := firstStripeEnd; boundaryY < planeH; boundaryY += regularStripe {
+				if boundaryY > unit.Y && boundaryY <= unitEnd {
+					aboveSrc := append([]byte(nil), src...)
+					copyRestorationRows(aboveSrc, boundary, stride, boundaryY, 2, planeH)
+					aboveY := max(unit.Y, boundaryY-2)
+					if aboveY < boundaryY {
+						looprestoration.SGR3x3Snapshot(dst, aboveSrc, stride, planeW, planeH,
+							unit.X, aboveY, unit.W, boundaryY-aboveY, &params)
+					}
+				}
+				if boundaryY >= unit.Y && boundaryY < unitEnd {
+					belowSrc := append([]byte(nil), src...)
+					copyRestorationRows(belowSrc, boundary, stride, boundaryY-2, 2, planeH)
+					belowH := min(2, unitEnd-boundaryY)
+					looprestoration.SGR3x3Snapshot(dst, belowSrc, stride, planeW, planeH,
+						unit.X, boundaryY, unit.W, belowH, &params)
+				}
+			}
+		}
+	}
+}
+
+func copyRestorationRows(dst, src []byte, stride, first, count, planeH int) {
+	if len(src) == 0 {
+		return
+	}
+	for y := max(0, first); y < min(planeH, first+count); y++ {
+		copy(dst[y*stride:(y+1)*stride], src[y*stride:(y+1)*stride])
+	}
+}
+
+func copyRestorationRow(dst, src []byte, stride, dstY, srcY, planeH int) {
+	if len(src) == 0 || dstY < 0 || dstY >= planeH || srcY < 0 || srcY >= planeH {
+		return
+	}
+	copy(dst[dstY*stride:(dstY+1)*stride], src[srcY*stride:(srcY+1)*stride])
+}
+
+func applyWienerSnapshot(dst, src []byte, stride, planeW, planeH int,
+	unit tile.RestorationUnit, params *looprestoration.WienerParams,
+) {
+	// Horizontal intermediates include three source rows on either side so
+	// the vertical seven-tap pass always reads the unmodified CDEF snapshot.
+	hRows := unit.H + 6
+	hor := make([]uint16, hRows*unit.W)
+	fh := params.Filter[0]
+	for hy := 0; hy < hRows; hy++ {
+		sy := min(planeH-1, max(0, unit.Y+hy-3))
+		for ux := 0; ux < unit.W; ux++ {
+			sx := unit.X + ux
+			sum := (1 << 14) + int(src[sy*stride+sx])*128
+			for k := 0; k < 7; k++ {
+				px := min(planeW-1, max(0, sx+k-3))
+				sum += int(src[sy*stride+px]) * int(fh[k])
+			}
+			hor[hy*unit.W+ux] = uint16(min(8191, max(0, (sum+4)>>3)))
+		}
+	}
+	fv := params.Filter[1]
+	for uy := 0; uy < unit.H; uy++ {
+		for ux := 0; ux < unit.W; ux++ {
+			sum := -(1 << 18)
+			for k := 0; k < 7; k++ {
+				sum += int(hor[(uy+k)*unit.W+ux]) * int(fv[k])
+			}
+			v := min(255, max(0, (sum+1024)>>11))
+			dst[(unit.Y+uy)*stride+unit.X+ux] = byte(v)
+		}
+	}
+}
+
+func restorationLeft(src []byte, stride, x, y, h int) [][4]byte {
+	if x == 0 {
+		return nil
+	}
+	left := make([][4]byte, h)
+	for row := 0; row < h; row++ {
+		for i := 0; i < 4; i++ {
+			sx := max(0, x-4+i)
+			left[row][i] = src[(y+row)*stride+sx]
+		}
+	}
+	return left
+}
+
+func restorationLPF(src []byte, stride, planeW, planeH, x, y, w, h int) ([]byte, int, int) {
+	// The restoration kernels address top rows at 0..3 and bottom rows at
+	// 6..9, matching dav1d's loop-filter boundary buffer layout.
+	const pad = 3
+	lpfStride := w + 2*pad
+	lpf := make([]byte, 10*lpfStride)
+	for row := 0; row < 4; row++ {
+		topY := max(0, y-2+row)
+		bottomY := min(planeH-1, y+h+row)
+		for px := -pad; px < w+pad; px++ {
+			sx := min(planeW-1, max(0, x+px))
+			lpf[row*lpfStride+px+pad] = src[topY*stride+sx]
+			lpf[(6+row)*lpfStride+px+pad] = src[bottomY*stride+sx]
+		}
+	}
+	return lpf, pad, lpfStride
+}
+
+func restorationWienerParams(unit tile.RestorationUnit) looprestoration.WienerParams {
+	var params looprestoration.WienerParams
+	for pass, taps := range [2][3]int8{unit.FilterH, unit.FilterV} {
+		for i := 0; i < 3; i++ {
+			params.Filter[pass][i] = int16(taps[i])
+			params.Filter[pass][6-i] = int16(taps[i])
+		}
+		sum := int16(taps[0]+taps[1]+taps[2]) * 2
+		params.Filter[pass][3] = -sum
+		if pass == 1 {
+			params.Filter[pass][3] += 128
+		}
+	}
+	return params
+}
+
+func restorationSGRParams(unit tile.RestorationUnit) looprestoration.SGRParams {
+	s0, s1 := restorationSGRStrengths(unit.SGRIndex)
+	return looprestoration.SGRParams{
+		S0: s0, S1: s1,
+		W0: int(unit.SGRWeights[0]),
+		W1: 128 - int(unit.SGRWeights[0]) - int(unit.SGRWeights[1]),
+	}
+}
+
+func restorationSGRStrengths(idx uint8) (uint16, uint16) {
+	table := [16][2]uint16{
+		{140, 3236}, {112, 2158}, {93, 1618}, {80, 1438},
+		{70, 1295}, {58, 1177}, {47, 1079}, {37, 996},
+		{30, 925}, {25, 863}, {0, 2589}, {0, 1618},
+		{0, 1177}, {0, 925}, {56, 0}, {22, 0},
+	}
+	return table[idx][0], table[idx][1]
+}
 
 func (d *decoderImpl) copyReferenceFallback(dst *Picture, fhdr *header.FrameHeader) bool {
 	src := d.firstHeaderReference(fhdr)

@@ -134,20 +134,21 @@ type Av1Block struct {
 	CflAlpha [2]int8 // CFL signed scale factors [U, V]
 
 	// Inter fields (populated when Intra == false; future milestone)
-	InterMode uint8
-	RefSlot   int8
-	RefFrame  int8
-	RefOrder  int8
-	RefSlot2  int8
-	RefFrame2 int8
-	RefOrder2 int8
-	Compound  bool
-	Filter    uint8
-	FilterV   uint8
-	BaseMV    [2]int16 // [Y, X] in 1/8-pel
-	DeltaMV   [2]int16 // [Y, X] in 1/8-pel
-	MV        [2]int16 // [Y, X] in 1/8-pel
-	MV2       [2]int16 // second compound MV [Y, X] in 1/8-pel
+	InterMode  uint8
+	RefSlot    int8
+	RefFrame   int8
+	RefOrder   int8
+	RefSlot2   int8
+	RefFrame2  int8
+	RefOrder2  int8
+	Compound   bool
+	InterIntra bool
+	Filter     uint8
+	FilterV    uint8
+	BaseMV     [2]int16 // [Y, X] in 1/8-pel
+	DeltaMV    [2]int16 // [Y, X] in 1/8-pel
+	MV         [2]int16 // [Y, X] in 1/8-pel
+	MV2        [2]int16 // second compound MV [Y, X] in 1/8-pel
 }
 
 // bsizeFromDim maps a (bw, bh) pair in luma pixel units to the BlockSize

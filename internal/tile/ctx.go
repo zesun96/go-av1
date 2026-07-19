@@ -69,6 +69,11 @@ type TileCtx struct {
 	TxTypeInter2CDF [TxTypeInter2Symbols + 1]uint16
 	TxTypeInter3CDF [4][2]uint16
 
+	// Loop-restoration unit type CDFs.
+	RestoreSwitchableCDF [3]uint16
+	RestoreWienerCDF     [2]uint16
+	RestoreSGRProjCDF    [2]uint16
+
 	// -----------------------------------------------------------------------
 	// EOB point CDFs — [2 plane][2 ctx][symbols+counter]
 	// Plane 0=luma, 1=chroma. ctx ∈ {0,1}.
@@ -192,10 +197,16 @@ type TileCtx struct {
 	//   RefMVModeCDF[6][2]
 	//   DRLBitCDF[3][2]
 	// -----------------------------------------------------------------------
-	NewMVModeCDF    [6][2]uint16
-	GlobalMVModeCDF [2][2]uint16
-	RefMVModeCDF    [6][2]uint16
-	DRLBitCDF       [3][2]uint16
+	NewMVModeCDF       [6][2]uint16
+	GlobalMVModeCDF    [2][2]uint16
+	RefMVModeCDF       [6][2]uint16
+	DRLBitCDF          [3][2]uint16
+	InterIntraCDF      [4][2]uint16
+	InterIntraModeCDF  [4][5]uint16
+	InterIntraWedgeCDF [7][2]uint16
+	WedgeIdxCDF        [9][17]uint16
+	MotionModeCDF      [NBlockSizes][4]uint16
+	OBMCCDF            [NBlockSizes][2]uint16
 
 	// -----------------------------------------------------------------------
 	// Minimal motion-vector residual CDFs.
@@ -373,6 +384,15 @@ func (ctx *TileCtx) resetCDFCounts() {
 			ctx.FilterCDF[d][c][2] = 0
 		}
 	}
+	for bs := range ctx.MotionModeCDF {
+		ctx.MotionModeCDF[bs][2] = 0
+	}
+	for i := range ctx.InterIntraModeCDF {
+		ctx.InterIntraModeCDF[i][3] = 0
+	}
+	for i := range ctx.WedgeIdxCDF {
+		ctx.WedgeIdxCDF[i][15] = 0
+	}
 }
 
 // NewTileCtx allocates a TileCtx and copies the default CDF values into it.
@@ -413,6 +433,9 @@ func NewTileCtxForQIdx(qidx int) *TileCtx {
 	ctx.TxTypeInter1CDF = DefaultTxTypeInter1CDF
 	ctx.TxTypeInter2CDF = DefaultTxTypeInter2CDF
 	ctx.TxTypeInter3CDF = DefaultTxTypeInter3CDF
+	ctx.RestoreSwitchableCDF = [3]uint16{32768 - 9413, 32768 - 22581, 0}
+	ctx.RestoreWienerCDF = [2]uint16{32768 - 11570, 0}
+	ctx.RestoreSGRProjCDF = [2]uint16{32768 - 16855, 0}
 
 	// EOB bin
 	ctx.EobBin16CDF = EobBin16Default
@@ -465,6 +488,12 @@ func NewTileCtxForQIdx(qidx int) *TileCtx {
 	ctx.GlobalMVModeCDF = GlobalMVModeCDFDefault
 	ctx.RefMVModeCDF = RefMVModeCDFDefault
 	ctx.DRLBitCDF = DRLBitCDFDefault
+	ctx.InterIntraCDF = InterIntraCDFDefault
+	ctx.InterIntraModeCDF = InterIntraModeCDFDefault
+	ctx.InterIntraWedgeCDF = InterIntraWedgeCDFDefault
+	ctx.WedgeIdxCDF = WedgeIdxCDFDefault
+	ctx.MotionModeCDF = MotionModeCDFDefault
+	ctx.OBMCCDF = OBMCCDFDefault
 	ctx.MVJointCDF = MVJointCDFDefault
 	ctx.MVSignCDF = MVSignCDFDefault
 	ctx.MVClassesCDF = MVClassesCDFDefault
@@ -635,11 +664,21 @@ func initCoefFullDefaults(ctx *TileCtx) {
 // experiments showed that switching only a subset of these tables regresses the
 // current stream sharply, so the live path should only move over as one cut.
 func initCoefFullDefaultsQ0(ctx *TileCtx) {
-	initCoefEOBBinDefaults(ctx)
+	for p := 0; p < 2; p++ {
+		for i := 0; i < 2; i++ {
+			copy(ctx.EobBin16Full[p][i][:], EobBin16FullDefaultQ0[p][i][:])
+			copy(ctx.EobBin32Full[p][i][:], EobBin32FullDefaultQ0[p][i][:])
+			copy(ctx.EobBin64Full[p][i][:], EobBin64FullDefaultQ0[p][i][:])
+			copy(ctx.EobBin128Full[p][i][:], EobBin128FullDefaultQ0[p][i][:])
+			copy(ctx.EobBin256Full[p][i][:], EobBin256FullDefaultQ0[p][i][:])
+		}
+		copy(ctx.EobBin512Full[p][:], EobBin512FullDefaultQ0[p][:])
+		copy(ctx.EobBin1024Full[p][:], EobBin1024FullDefaultQ0[p][:])
+	}
 	for t := 0; t < N_TX_SIZES; t++ {
 		for p := 0; p < 2; p++ {
 			for c := 0; c < 41; c++ {
-				copy(ctx.BaseTokFull[t][p][c][:], BaseTokFullDefaultQ0[t][p][c][:])
+				copyForwardCDF3(ctx.BaseTokFull[t][p][c][:], BaseTokFullDefaultQ0[t][p][c][:])
 			}
 			for c := 0; c < 4; c++ {
 				copy(ctx.EobBaseTokFull[t][p][c][:], EobBaseTokFullDefaultQ0[t][p][c][:])
@@ -655,10 +694,18 @@ func initCoefFullDefaultsQ0(ctx *TileCtx) {
 	for s := 0; s < 4; s++ {
 		for p := 0; p < 2; p++ {
 			for c := 0; c < 21; c++ {
-				copy(ctx.BrTokFull[s][p][c][:], BrTokFullDefaultQ0[s][p][c][:])
+				copyForwardCDF3(ctx.BrTokFull[s][p][c][:], BrTokFullDefaultQ0[s][p][c][:])
 			}
 		}
 	}
+}
+
+func copyForwardCDF3(dst, src []uint16) {
+	for i := 0; i < 3; i++ {
+		dst[i] = 32768 - src[i]
+	}
+	dst[3] = 0
+	dst[4] = 0
 }
 
 func initCoefFullDefaultsQ3(ctx *TileCtx) {

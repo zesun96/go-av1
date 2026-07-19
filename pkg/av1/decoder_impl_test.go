@@ -3,6 +3,7 @@ package av1
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/zesun96/go-av1/internal/cdef"
@@ -126,6 +127,24 @@ func newTestDecoder(t *testing.T) *decoderImpl {
 		t.Fatalf("newDecoderImpl: %v", err)
 	}
 	return dec.(*decoderImpl)
+}
+
+func TestValidateSequenceSupportRejectsHighBitDepth(t *testing.T) {
+	for _, tc := range []struct {
+		hbd      uint8
+		bitDepth string
+	}{
+		{hbd: 1, bitDepth: "10-bit"},
+		{hbd: 2, bitDepth: "12-bit"},
+	} {
+		err := validateSequenceSupport(&header.SequenceHeader{HBD: tc.hbd})
+		if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), tc.bitDepth) {
+			t.Fatalf("HBD %d: error = %v, want ErrUnsupported containing %q", tc.hbd, err, tc.bitDepth)
+		}
+	}
+	if err := validateSequenceSupport(&header.SequenceHeader{}); err != nil {
+		t.Fatalf("8-bit sequence rejected: %v", err)
+	}
 }
 
 // ─── tests ─────────────────────────────────────────────────────────────────────
@@ -358,6 +377,39 @@ func TestCDEFSecondaryOnlyLumaUsesDirectionZero(t *testing.T) {
 	}
 }
 
+func TestCDEFComputesDirectionForChromaWhenLumaStrengthIsZero(t *testing.T) {
+	pic := &Picture{
+		Width: 8, Height: 8, StrideY: 8, StrideUV: 4, Chroma: Chroma420,
+		Y: make([]byte, 64), U: make([]byte, 16), V: make([]byte, 16),
+	}
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			pic.Y[y*8+x] = byte(32 + x*20 + y)
+		}
+	}
+	copy(pic.U, []byte{
+		117, 116, 116, 116,
+		117, 116, 116, 116,
+		117, 117, 116, 116,
+		117, 117, 117, 117,
+	})
+	dir, _ := cdef.FindDir(pic.Y, 0, pic.StrideY)
+	if dir == 0 {
+		t.Fatal("test luma pattern must produce a non-zero CDEF direction")
+	}
+	wantU := append([]byte(nil), pic.U...)
+	cdef.FilterBlock(wantU, 0, 4, make([][2]byte, 4), make([]byte, 4), 0, 4,
+		make([]byte, 4), 0, 4, 2, 0, dir, 3, 4, 4, 0)
+
+	fhdr := &header.FrameHeader{CDEF: header.FrameHeaderCDEF{
+		Damping: 4, UVStrength: [header.MaxCDEFStrengths]uint8{8},
+	}}
+	(&decoderImpl{}).applyCDEF(pic, fhdr)
+	if !bytes.Equal(pic.U, wantU) {
+		t.Fatalf("chroma CDEF did not inherit luma direction %d: got %v want %v", dir, pic.U, wantU)
+	}
+}
+
 func TestCDEFZeroIndexBitsStillUsesPresetZero(t *testing.T) {
 	pic := &Picture{Width: 8, Height: 8, StrideY: 8, Chroma: ChromaMonochrome}
 	pic.Y = make([]byte, 64)
@@ -432,4 +484,24 @@ func TestDecodeReader_GarbageBytes(t *testing.T) {
 	garbage := []byte{0xFF, 0xFE, 0xFD, 0x00, 0x01, 0x02, 0x03}
 	r := bytes.NewReader(garbage)
 	_ = DecodeReader(r, func(_ *Picture, _ error) bool { return true })
+}
+
+func TestRestorationLPFKeepsHorizontalUnitContext(t *testing.T) {
+	const width, height = 12, 10
+	src := make([]byte, width*height)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			src[y*width+x] = byte(y*16 + x)
+		}
+	}
+	lpf, base, lpfStride := restorationLPF(src, width, width, height, 4, 4, 4, 2)
+	for px := -3; px < 7; px++ {
+		want := src[2*width+4+px]
+		if got := lpf[base+px]; got != want {
+			t.Fatalf("top LPF x offset %d = %d, want %d", px, got, want)
+		}
+	}
+	if got, want := lpf[6*lpfStride+base-3], src[6*width+1]; got != want {
+		t.Fatalf("bottom LPF left context = %d, want %d", got, want)
+	}
 }

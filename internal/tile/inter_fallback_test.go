@@ -130,6 +130,34 @@ func TestSplitMV8(t *testing.T) {
 	}
 }
 
+func TestSplitMVPlanePreservesSubsampledChromaPhase(t *testing.T) {
+	tests := []struct {
+		mv       int
+		wantPix  int
+		wantFrac int
+	}{
+		{5, 0, 5},
+		{-3, -1, 13},
+		{-8, -1, 8},
+		{-16, -1, 0},
+	}
+	for _, tc := range tests {
+		pix, frac := splitMVPlane(tc.mv, 1)
+		if pix != tc.wantPix || frac != tc.wantFrac {
+			t.Fatalf("splitMVPlane(%d, 1)=(%d,%d) want (%d,%d)", tc.mv, pix, frac, tc.wantPix, tc.wantFrac)
+		}
+	}
+}
+
+func TestInterFilter2DDirectionOrder(t *testing.T) {
+	if got := interFilter2D(header.FilterMode8TapRegular, header.FilterMode8TapSmooth); got != predinter.Filter2D8TapSmoothRegular {
+		t.Fatalf("filter2d dir0=regular dir1=smooth is %d, want horizontal smooth/vertical regular", got)
+	}
+	if got := interFilter2D(header.FilterMode8TapSmooth, header.FilterMode8TapRegular); got != predinter.Filter2D8TapRegularSmooth {
+		t.Fatalf("filter2d dir0=smooth dir1=regular is %d, want horizontal regular/vertical smooth", got)
+	}
+}
+
 func TestInterFilter2D(t *testing.T) {
 	tests := []struct {
 		modeH header.FilterMode
@@ -137,9 +165,9 @@ func TestInterFilter2D(t *testing.T) {
 		want  predinter.Filter2D
 	}{
 		{header.FilterMode8TapRegular, header.FilterMode8TapRegular, predinter.Filter2D8TapRegular},
-		{header.FilterMode8TapRegular, header.FilterMode8TapSmooth, predinter.Filter2D8TapRegularSmooth},
-		{header.FilterMode8TapSharp, header.FilterMode8TapRegular, predinter.Filter2D8TapSharpRegular},
-		{header.FilterMode8TapSmooth, header.FilterMode8TapSharp, predinter.Filter2D8TapSmoothSharp},
+		{header.FilterMode8TapRegular, header.FilterMode8TapSmooth, predinter.Filter2D8TapSmoothRegular},
+		{header.FilterMode8TapSharp, header.FilterMode8TapRegular, predinter.Filter2D8TapRegularSharp},
+		{header.FilterMode8TapSmooth, header.FilterMode8TapSharp, predinter.Filter2D8TapSharpSmooth},
 		{header.FilterModeBilinear, header.FilterMode8TapRegular, predinter.Filter2DBilinear},
 		{header.FilterModeSwitchable, header.FilterModeSwitchable, predinter.Filter2D8TapRegular},
 	}
@@ -836,6 +864,22 @@ func TestGlobalSyntaxIdentityUsesZeroMV(t *testing.T) {
 	}
 }
 
+func TestGlobalSyntaxRotZoomKeepsGlobalMode(t *testing.T) {
+	fhdr := &header.FrameHeader{HP: 1, Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}}
+	fhdr.GMV[0] = header.WarpedMotionParams{
+		Type:   header.WMTypeRotZoom,
+		Matrix: [6]int32{-57344, -3072, 65526, 2, -2, 65526},
+	}
+	fb := &FrameBuf{}
+	fb.Refs[0] = &PlaneBuf{Y: make([]byte, 64*64), StrideY: 64, Width: 64, Height: 64}
+	st := singleRefInterStateFromSyntax(NewFrameState(64, 64), fb, fhdr, 0, false, 32, 0, singleRefInterSyntax{
+		motionSource: interMotionSourceGlobal, refSlot: 0, hasRef: true, bw: 16, bh: 16,
+	})
+	if st.interMode != InterModeGlobalMV || st.mv != (refmvs.MV{X: -7}) {
+		t.Fatalf("rotzoom global state mode=%d mv=%+v, want global/(0,-7)", st.interMode, st.mv)
+	}
+}
+
 func TestNewMVDRL0PrefersTopDirectCandidate(t *testing.T) {
 	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}}
 	fb := &FrameBuf{}
@@ -850,6 +894,40 @@ func TestNewMVDRL0PrefersTopDirectCandidate(t *testing.T) {
 	})
 	if st.baseMV != (refmvs.MV{}) || st.mv != (refmvs.MV{X: -2}) {
 		t.Fatalf("NEWMV top candidate base=%+v mv=%+v", st.baseMV, st.mv)
+	}
+}
+
+func TestNewMVEmptyStackUsesTranslationGlobalMV(t *testing.T) {
+	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}, HP: 1}
+	fhdr.GMV[0].Type = header.WMTypeTranslation
+	fhdr.GMV[0].Matrix[1] = -7 << 13
+	fb := &FrameBuf{}
+	fb.Refs[0] = &PlaneBuf{Y: make([]byte, 16), Width: 4, Height: 4}
+
+	st := singleRefInterStateFromSyntax(NewFrameState(32, 32), fb, fhdr, 0, false, 0, 0, singleRefInterSyntax{
+		modeHint: interModeHintNew, motionSource: interMotionSourceCandidate,
+		refSlot: 0, hasRef: true, drlIdx: 0, deltaMV: refmvs.MV{X: -1},
+	})
+	if st.baseMV != (refmvs.MV{X: -7}) || st.mv != (refmvs.MV{X: -8}) {
+		t.Fatalf("NEWMV empty-stack base=%+v mv=%+v, want -7 plus -1", st.baseMV, st.mv)
+	}
+}
+
+func TestNearestMVEmptyStackUsesAffineGlobalMV(t *testing.T) {
+	fhdr := &header.FrameHeader{Refidx: [header.RefsPerFrame]int8{0, 1, 2, 3, 4, 5, 6}, HP: 1}
+	fhdr.GMV[0] = header.WarpedMotionParams{
+		Type:   header.WMTypeRotZoom,
+		Matrix: [6]int32{-57344, -3072, 65526, 2, -2, 65526},
+	}
+	fb := &FrameBuf{}
+	fb.Refs[0] = &PlaneBuf{Y: make([]byte, 352*288), StrideY: 352, Width: 352, Height: 288}
+
+	st := singleRefInterStateFromSyntax(NewFrameState(352, 288), fb, fhdr, 0, false, 348, 136, singleRefInterSyntax{
+		modeHint: interModeHintNearest, motionSource: interMotionSourceCandidate,
+		refSlot: 0, hasRef: true, drlIdx: 0, bw: 4, bh: 8,
+	})
+	if st.candCnt != 0 || st.interMode != InterModeNearestMV || st.mv != (refmvs.MV{Y: -1, X: -7}) {
+		t.Fatalf("nearest empty-stack state=%+v, want implicit affine global MV (-1,-7)", st)
 	}
 }
 

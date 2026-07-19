@@ -184,6 +184,20 @@ func TestPredFilter_ConstantEdge(t *testing.T) {
 	}
 }
 
+func TestPredFilter_Mode0FirstTapMatchesDav1d(t *testing.T) {
+	buf, tl := makeEdge(4, 4, 10,
+		func(i int) uint8 { return []uint8{100, 20, 30, 40}[i] },
+		func(i int) uint8 { return []uint8{200, 50, 60, 70}[i] },
+	)
+	dst := make([]uint8, 4*4)
+	PredFilter(dst, 4, buf, tl, 4, 4, 0)
+	// dav1d mode-0 tap 0 is {-6, 10, 0, 0, 0, 12, 0}.
+	want := clip8((-6*10 + 10*100 + 12*200 + 8) >> 4)
+	if dst[0] != want {
+		t.Fatalf("FILTER mode 0 first sample = %d, want %d", dst[0], want)
+	}
+}
+
 func TestPredFilter_Oracle4x4(t *testing.T) {
 	buf, tl := makeEdge(4, 4, 23,
 		func(i int) uint8 { return []uint8{31, 37, 41, 43}[i] },

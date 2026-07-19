@@ -516,6 +516,7 @@ func (p *frameParser) parseGlobalMV() error {
 		}
 		mat[0] = gb.BitsSubexp(ref[0]>>shift, uint32(bits)) * (1 << shift)
 		mat[1] = gb.BitsSubexp(ref[1]>>shift, uint32(bits)) * (1 << shift)
+		hdr.GMV[i].DeriveShear()
 	}
 	return nil
 }

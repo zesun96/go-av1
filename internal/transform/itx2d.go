@@ -1,5 +1,11 @@
 package transform
 
+import "sync"
+
+var inverseTransformScratchPool = sync.Pool{
+	New: func() any { return new([64 * 64]int32) },
+}
+
 // 2D inverse transform (row-then-column) with pixel-domain output,
 // faithfully ported from dav1d/src/itx_tmpl.c inv_txfm_add_c (lines 43-119)
 // and the WHT 4×4 path (lines 184-203).
@@ -125,7 +131,9 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 	}
 
 	// Temporary buffer: 64×64 max
-	var tmp [64 * 64]int32
+	tmpBuffer := inverseTransformScratchPool.Get().(*[64 * 64]int32)
+	tmp := tmpBuffer[:]
+	clear(tmp[:w*h])
 
 	isRect2 := w*2 == h || h*2 == w
 
@@ -147,7 +155,7 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 	}
 
 	// Row-first 1D transform
-	c := tmp[:]
+	c := tmp
 	for y := 0; y <= lastNonzeroCol; y++ {
 		row := c[y*w : (y+1)*w]
 		if isRect2 {
@@ -191,7 +199,7 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 	}
 
 	// Final pixel add with rounding (+8 >> 4)
-	c = tmp[:]
+	c = tmp
 	for y := 0; y < h; y++ {
 		rowOff := y * stride
 		for x := 0; x < w; x++ {
@@ -199,6 +207,7 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 			c = c[1:]
 		}
 	}
+	inverseTransformScratchPool.Put(tmpBuffer)
 }
 
 // InvWHT4x4 applies the 4×4 Walsh-Hadamard inverse transform (lossless),

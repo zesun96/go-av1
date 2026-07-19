@@ -27,6 +27,33 @@ func TestFrameStateCoefSkipCtxUsesMergedResidualLowBits(t *testing.T) {
 	}
 }
 
+func TestQ0EOBDefaultsKeepEveryDav1dProbability(t *testing.T) {
+	ctx := NewTileCtxForQIdx(0)
+	if got, want := ctx.EobBin16Full[0][0], EobBin16FullDefaultQ0[0][0]; got != want {
+		t.Fatalf("q0 eob_bin_16 = %v, want %v", got, want)
+	}
+	if ctx.EobBin16Full[0][0][3] == 0 {
+		t.Fatal("q0 eob_bin_16 dropped the fourth CDF probability")
+	}
+	if got, want := ctx.EobBin1024Full[1], EobBin1024FullDefaultQ0[1]; got != want {
+		t.Fatalf("q0 eob_bin_1024 = %v, want %v", got, want)
+	}
+}
+
+func TestQ0TokenDefaultsConvertSourceCDFsToInverse(t *testing.T) {
+	ctx := NewTileCtxForQIdx(0)
+	for i, source := range BaseTokFullDefaultQ0[0][0][22][:3] {
+		if got, want := ctx.BaseTokFull[0][0][22][i], uint16(32768-source); got != want {
+			t.Errorf("base_tok[22][%d] = %d, want %d", i, got, want)
+		}
+	}
+	for i, source := range BrTokFullDefaultQ0[0][0][0][:3] {
+		if got, want := ctx.BrTokFull[0][0][0][i], uint16(32768-source); got != want {
+			t.Errorf("br_tok[0][%d] = %d, want %d", i, got, want)
+		}
+	}
+}
+
 func TestFrameStateCoefSkipCtxSingleTransformBlockIsZero(t *testing.T) {
 	fs := NewFrameState(64, 64)
 	got := fs.CoefSkipCtx(0, 0, 0, 16, 16, transform.TX16x16)
@@ -155,6 +182,9 @@ func TestSingleRefModeContextsDoNotCrossTileBoundary(t *testing.T) {
 
 func TestFrameStateIntraTxCtxUsesSeparateBlockEdges(t *testing.T) {
 	fs := NewFrameState(64, 64)
+	if got := fs.IntraTxCtx(0, 0, transform.RTX8x4); got != 0 {
+		t.Fatalf("initial rectangular IntraTxCtx = %d, want 0", got)
+	}
 	fs.SetIntraTxCtx(16, 0, 16, 16, transform.TX16x16)
 	fs.SetInterTxIntraCtx(0, 16, 16, 16)
 	if got := fs.IntraTxCtx(16, 16, transform.TX16x16); got != 2 {

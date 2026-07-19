@@ -336,6 +336,9 @@ func TestReconBlock_UsesExactLastNonzeroColPath(t *testing.T) {
 }
 
 func TestLastNonzeroColForReconFollowsDav1d1DRules(t *testing.T) {
+	if got := lastNonzeroColForRecon(transform.TX4x4, transform.WHT_WHT, 15); got != -1 {
+		t.Fatalf("WHT_WHT lastNonzeroCol = %d, want -1", got)
+	}
 	if got := lastNonzeroColForRecon(transform.RTX16x8, transform.H_DCT, 19); got != 7 {
 		t.Fatalf("H_DCT lastNonzeroCol = %d, want 7", got)
 	}

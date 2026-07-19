@@ -163,6 +163,21 @@ func TestSGR3x3_ZeroStrength(t *testing.T) {
 	SGR3x3(dst, base, stride, left, lpf, lpfBase, lpfStride, w, h, params, allLrEdges())
 }
 
+func TestSGR3x3SnapshotKeepsFlatPlane(t *testing.T) {
+	const w, h = 12, 10
+	src := make([]uint8, w*h)
+	for i := range src {
+		src[i] = 137
+	}
+	dst := append([]uint8(nil), src...)
+	SGR3x3Snapshot(dst, src, w, w, h, 0, 0, w, h, &SGRParams{S1: 2589, W1: 36})
+	for i, got := range dst {
+		if got != 137 {
+			t.Fatalf("flat SGR output[%d] = %d, want 137", i, got)
+		}
+	}
+}
+
 // TestSGR3x3_NoTop: no top edge.
 func TestSGR3x3_NoTop(t *testing.T) {
 	w, h := 16, 4

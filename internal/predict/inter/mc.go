@@ -18,9 +18,31 @@
 //	This means src[srcBase - 3*srcStride - 3] must be a valid address.
 package inter
 
+import "sync"
+
 // intermediateBits is the number of extra precision bits kept in the
 // horizontal-pass intermediate buffer (8-bit path = 4, matching dav1d).
 const intermediateBits = 4
+
+const maxMCScratchSamples = 128 * (128 + 7)
+
+var mcScratchPool = sync.Pool{
+	New: func() any { return new([maxMCScratchSamples]int16) },
+}
+
+func getMCScratch(samples int) ([]int16, *[maxMCScratchSamples]int16) {
+	if samples > maxMCScratchSamples {
+		return make([]int16, samples), nil
+	}
+	buffer := mcScratchPool.Get().(*[maxMCScratchSamples]int16)
+	return buffer[:samples], buffer
+}
+
+func putMCScratch(buffer *[maxMCScratchSamples]int16) {
+	if buffer != nil {
+		mcScratchPool.Put(buffer)
+	}
+}
 
 // clampPixel clamps v to [0, 255].
 func clampPixel(v int) uint8 {
@@ -98,7 +120,7 @@ func Put8Tap(dst []uint8, dstStride int,
 		// Two-pass: H then V through an int16 intermediate buffer.
 		tmpH := h + 7 // 3 extra rows above + 4 below for the V tap range
 		midStride := 128
-		mid := make([]int16, midStride*tmpH)
+		mid, scratch := getMCScratch(midStride * tmpH)
 
 		// H pass: start 3 rows above the block.
 		rowBase := srcBase - 3*srcStride
@@ -120,6 +142,7 @@ func Put8Tap(dst []uint8, dstStride int,
 			}
 			dstOff += dstStride
 		}
+		putMCScratch(scratch)
 
 	case fh != nil:
 		// Horizontal-only.
@@ -186,7 +209,7 @@ func Prep8Tap(tmp []int16,
 	case fh != nil && fv != nil:
 		tmpH := h + 7
 		midStride := 128
-		mid := make([]int16, midStride*tmpH)
+		mid, scratch := getMCScratch(midStride * tmpH)
 
 		rowBase := srcBase - 3*srcStride
 		for row := 0; row < tmpH; row++ {
@@ -206,6 +229,7 @@ func Prep8Tap(tmp []int16,
 			}
 			tmpOff += w
 		}
+		putMCScratch(scratch)
 
 	case fh != nil:
 		rowBase := srcBase
@@ -253,7 +277,7 @@ func PutBilin(dst []uint8, dstStride int,
 	switch {
 	case mx != 0 && my != 0:
 		tmpStride := w
-		tmp := make([]int16, w*(h+1))
+		tmp, scratch := getMCScratch(w * (h + 1))
 
 		rowBase := srcBase
 		for row := 0; row <= h; row++ {
@@ -272,6 +296,7 @@ func PutBilin(dst []uint8, dstStride int,
 			}
 			dstOff += dstStride
 		}
+		putMCScratch(scratch)
 
 	case mx != 0:
 		rowBase := srcBase
@@ -310,7 +335,7 @@ func PrepBilin(tmp []int16,
 	switch {
 	case mx != 0 && my != 0:
 		tmpStride := w
-		mid := make([]int16, w*(h+1))
+		mid, scratch := getMCScratch(w * (h + 1))
 
 		rowBase := srcBase
 		for row := 0; row <= h; row++ {
@@ -329,6 +354,7 @@ func PrepBilin(tmp []int16,
 			}
 			tmpOff += w
 		}
+		putMCScratch(scratch)
 
 	case mx != 0:
 		rowBase := srcBase

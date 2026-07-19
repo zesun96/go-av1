@@ -5,6 +5,7 @@ package refmvs
 type SearchConfig struct {
 	Frame              *Frame
 	TemporalSource     *Frame
+	UseRefFrameMVs     bool
 	Ref                int8
 	Ref2               int8
 	TargetSlot         int
@@ -12,6 +13,8 @@ type SearchConfig struct {
 	Bx4, By4, Bw4, Bh4 int
 	TileX0, TileY0     int
 	TileX1, TileY1     int
+	TopRightKnown      bool
+	TopRightAvailable  bool
 	BlockDims          [][2]uint8
 }
 
@@ -35,14 +38,17 @@ func Find(cfg SearchConfig) SearchResult {
 	// dav1d initializes globalmv_ctx from use_ref_frame_mvs. Without order
 	// hints temporal projection is disabled, so the context remains zero even
 	// when a decoded reference picture is available.
-	if cfg.TemporalSource != nil && cfg.TargetSlot >= 0 && cfg.Frame != nil && cfg.Frame.OrderBits != 0 {
+	if cfg.UseRefFrameMVs && cfg.TargetSlot >= 0 && cfg.Frame != nil && cfg.Frame.OrderBits != 0 {
 		out.GlobalMVContext = 1
-		temporal := temporalCandidates(cfg)
-		if len(temporal) > 0 {
-			dx := absSearch(int(temporal[0].X) - int(cfg.GlobalMV.X))
-			dy := absSearch(int(temporal[0].Y) - int(cfg.GlobalMV.Y))
+		// Only the temporal sample at the block's top-left 8x8 position
+		// updates globalmv_ctx. Later samples may extend the candidate stack,
+		// but dav1d passes a nil context pointer for all of them.
+		if mv, ok := projectTemporalAt(cfg.Frame, cfg.TargetSlot, cfg.Bx4>>1, cfg.By4>>1); ok {
+			dx := absSearch(int(mv.X) - int(cfg.GlobalMV.X))
+			dy := absSearch(int(mv.Y) - int(cfg.GlobalMV.Y))
 			out.GlobalMVContext = boolSearch(dx|dy >= 16)
 		}
+		temporal := temporalCandidates(cfg)
 		for _, mv := range temporal {
 			out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, 2)
 		}
@@ -140,7 +146,7 @@ func referenceSignBias(frame *Frame, ref int8) bool {
 func temporalCandidates(cfg SearchConfig) []MV {
 	var out []MV
 	add := func(x8, y8 int) {
-		mv, ok := projectTemporalAt(cfg.Frame, cfg.TemporalSource, cfg.TargetSlot, x8, y8)
+		mv, ok := projectTemporalAt(cfg.Frame, cfg.TargetSlot, x8, y8)
 		if ok {
 			out = append(out, mv)
 		}
@@ -193,11 +199,14 @@ func temporalCandidates(cfg SearchConfig) []MV {
 // FindTemporal projects one motion-field sample from a saved reference frame
 // to targetSlot in the current frame.
 func FindTemporal(current, source *Frame, targetSlot, bx4, by4 int) (MV, bool) {
-	return projectTemporalAt(current, source, targetSlot, bx4>>1, by4>>1)
+	if source == nil {
+		return MV{}, false
+	}
+	return projectTemporalAt(current, targetSlot, bx4>>1, by4>>1)
 }
 
-func projectTemporalAt(current, source *Frame, targetSlot, x8, y8 int) (MV, bool) {
-	if current == nil || source == nil || targetSlot < 0 || targetSlot >= len(current.RefOrderHints) || current.RPStride <= 0 {
+func projectTemporalAt(current *Frame, targetSlot, x8, y8 int) (MV, bool) {
+	if current == nil || targetSlot < 0 || targetSlot >= len(current.RefOrderHints) || current.RPStride <= 0 {
 		return MV{}, false
 	}
 	if x8 < 0 || y8 < 0 || x8 >= current.IW8 || y8 >= current.IH8 {
@@ -275,6 +284,9 @@ func addSpatialCandidate(out *SearchResult, cfg SearchConfig, blk Block, weight 
 		for i := 0; i < 2; i++ {
 			if blk.Ref[i] == cfg.Ref {
 				mvp[0] = blk.MV[i]
+				if blk.MF&1 != 0 && !cfg.GlobalMV.IsInvalid() {
+					mvp[0] = cfg.GlobalMV
+				}
 				break
 			}
 		}
@@ -374,6 +386,9 @@ func scanSpatialCol(out *SearchResult, cfg SearchConfig, x4, y4, bh4, h4, maxCol
 func appendTopRight(out *SearchResult, cfg SearchConfig) {
 	if out == nil || cfg.Frame == nil || cfg.By4 <= cfg.TileY0 ||
 		cfg.Bx4+cfg.Bw4 >= cfg.Frame.IW4 || maxSearch(cfg.Bw4, cfg.Bh4) > 16 {
+		return
+	}
+	if cfg.TopRightKnown && !cfg.TopRightAvailable {
 		return
 	}
 	blk, ok := cfg.Frame.GridBlock(cfg.Bx4+cfg.Bw4, cfg.By4-1)

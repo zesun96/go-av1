@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "corpus": "go-av1 WebRTC regressions",
+  "vectors": [
+    {
+      "name": "dynamic-desktop-resize-996",
+      "path": "../../cmd/webrtc-av1d/output.ivf",
+      "sha256": "29be066919442a2a9b247938634917df44eb7cc28cf92d3aaf8819e612c2a794",
+      "frames": 996,
+      "profile": 0,
+      "bit_depth": 8,
+      "chroma": "4:2:0",
+      "tags": [
+        "webrtc",
+        "desktop",
+        "dynamic-resolution",
+        "rapid-resize",
+        "reference-refresh"
+      ],
+      "limit": 0,
+      "expected_status": "pass",
+      "expected_frame_md5": [
+        {
+          "index": 0,
+          "width": 1276,
+          "height": 1136,
+          "frame_md5": "1d7eaa1effd62e952fec1ff69a9e1e8f"
+        },
+        {
+          "index": 1,
+          "width": 1276,
+          "height": 1136,
+          "frame_md5": "0a39f77f397818f3b21e2b0524056f60"
+        }
+      ]
+    }
+  ]
+}
