@@ -178,6 +178,29 @@ func TestSGR3x3SnapshotKeepsFlatPlane(t *testing.T) {
 	}
 }
 
+func TestSGR5x5SnapshotKeepsFlatPlane(t *testing.T) {
+	const w, h = 12, 10
+	src := make([]uint8, w*h)
+	for i := range src {
+		src[i] = 91
+	}
+	dst := append([]uint8(nil), src...)
+	SGR5x5Snapshot(dst, src, w, w, h, 0, 0, w, h, &SGRParams{S0: 22, W0: 11})
+	for i, got := range dst {
+		if got != 91 {
+			t.Fatalf("flat SGR5 output[%d] = %d, want 91", i, got)
+		}
+	}
+}
+
+func TestSGRXByXTransitionIndices(t *testing.T) {
+	for index, want := range map[int]uint8{100: 3, 101: 3, 102: 2, 169: 2, 170: 1, 255: 0} {
+		if got := sgrXbyX[index]; got != want {
+			t.Fatalf("sgrXbyX[%d] = %d, want %d", index, got, want)
+		}
+	}
+}
+
 // TestSGR3x3_NoTop: no top edge.
 func TestSGR3x3_NoTop(t *testing.T) {
 	w, h := 16, 4

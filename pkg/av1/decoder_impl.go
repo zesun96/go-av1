@@ -334,8 +334,7 @@ func (d *decoderImpl) obuRefs() *[header.NumRefFrames]obu.FrameReference {
 // picToFrameBuf wraps a *Picture as a tile.FrameBuf so the tile package does
 // not need to import pkg/av1 (which would create an import cycle).
 func (d *decoderImpl) picToFrameBuf(p *Picture) *tile.FrameBuf {
-	codedW := (p.Width + 7) &^ 7
-	codedH := (p.Height + 7) &^ 7
+	codedW, codedH := d.reconstructionSize(p.Width, p.Height)
 	fb := &tile.FrameBuf{
 		Y:            p.Y,
 		StrideY:      p.StrideY,
@@ -384,11 +383,10 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 	if h <= 0 {
 		h = 1
 	}
-	codedW := (w + 7) &^ 7
-	codedH := (h + 7) &^ 7
+	codedW, codedH := d.reconstructionSize(w, h)
 	strideY := (codedW + 15) &^ 15
-	cw := (w + 1) >> 1
-	strideUV := (cw + 15) &^ 15
+	codedCW := (codedW + 1) >> 1
+	strideUV := (codedCW + 15) &^ 15
 	codedCh := (codedH + 1) >> 1
 
 	pic := &Picture{
@@ -416,6 +414,14 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 	}
 	pic.Retain() // initial reference
 	return pic
+}
+
+func (d *decoderImpl) reconstructionSize(w, h int) (int, int) {
+	sbSize := 64
+	if d != nil && d.seq != nil && d.seq.SB128 {
+		sbSize = 128
+	}
+	return (w + 7) &^ 7, (h + sbSize - 1) &^ (sbSize - 1)
 }
 
 // updateRefs stores pic into every reference slot set in RefreshFrameFlags.
@@ -1084,7 +1090,7 @@ func applyRestorationUnit(dst, src, boundary []byte, stride, planeW, planeH, ssV
 		}
 	}
 	if unit.Type == header.RestorationSGRProj {
-		s0, _ := restorationSGRStrengths(unit.SGRIndex)
+		s0, s1 := restorationSGRStrengths(unit.SGRIndex)
 		if s0 == 0 {
 			params := restorationSGRParams(unit)
 			looprestoration.SGR3x3Snapshot(dst, src, stride, planeW, planeH,
@@ -1107,6 +1113,27 @@ func applyRestorationUnit(dst, src, boundary []byte, stride, planeW, planeH, ssV
 					belowH := min(2, unitEnd-boundaryY)
 					looprestoration.SGR3x3Snapshot(dst, belowSrc, stride, planeW, planeH,
 						unit.X, boundaryY, unit.W, belowH, &params)
+				}
+			}
+		} else if s1 == 0 {
+			params := restorationSGRParams(unit)
+			looprestoration.SGR5x5Snapshot(dst, src, stride, planeW, planeH,
+				unit.X, unit.Y, unit.W, unit.H, &params)
+			regularStripe, firstStripeEnd := 64>>ssV, 56>>ssV
+			unitEnd := unit.Y + unit.H
+			for boundaryY := firstStripeEnd; boundaryY < planeH; boundaryY += regularStripe {
+				if boundaryY > unit.Y && boundaryY <= unitEnd {
+					aboveSrc := append([]byte(nil), src...)
+					copyRestorationRows(aboveSrc, boundary, stride, boundaryY, 2, planeH)
+					aboveY := max(unit.Y, boundaryY-2)
+					if aboveY < boundaryY {
+						looprestoration.SGR5x5Snapshot(dst, aboveSrc, stride, planeW, planeH,
+							unit.X, aboveY, unit.W, boundaryY-aboveY, &params)
+					}
+				}
+				if boundaryY >= unit.Y && boundaryY < unitEnd {
+					looprestoration.SGR5x5SnapshotStripeStart(dst, src, boundary, stride,
+						planeW, planeH, unit.X, boundaryY, unit.W, min(3, unitEnd-boundaryY), &params)
 				}
 			}
 		}

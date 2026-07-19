@@ -84,6 +84,137 @@ func SGR3x3Snapshot(dst, src []uint8, stride, planeW, planeH, x0, y0, w, h int, 
 	}
 }
 
+// SGR5x5Snapshot applies the normative radius-2 SGR projection from an
+// immutable source plane. AV1 evaluates the 5x5 statistics on alternating
+// rows: even output rows blend the current and next statistic rows, while
+// odd rows use only the intervening statistic row.
+func SGR5x5Snapshot(dst, src []uint8, stride, planeW, planeH, x0, y0, w, h int, params *SGRParams) {
+	type ab struct {
+		a int
+		b int
+	}
+	calc := func(cx, cy int) ab {
+		sum, sumsq := 0, 0
+		for dy := -2; dy <= 2; dy++ {
+			sy := iclip(cy+dy, 0, planeH-1)
+			for dx := -2; dx <= 2; dx++ {
+				sx := iclip(cx+dx, 0, planeW-1)
+				v := int(src[sy*stride+sx])
+				sum += v
+				sumsq += v * v
+			}
+		}
+		p := sumsq*25 - sum*sum
+		if p < 0 {
+			p = 0
+		}
+		z := (uint(p)*uint(params.S0) + (1 << 19)) >> 20
+		x := int(sgrXbyX[umin(z, 255)])
+		return ab{a: (x*sum*164 + (1 << 11)) >> 12, b: x}
+	}
+	rowValue := func(x, cy int) (a, b int) {
+		for dx, weight := range [3]int{5, 6, 5} {
+			v := calc(x+dx-1, cy)
+			a += v.b * weight
+			b += v.a * weight
+		}
+		return a, b
+	}
+	for y := y0; y < y0+h; y++ {
+		for x := x0; x < x0+w; x++ {
+			a, b := rowValue(x, y)
+			shift, rounding := 8, 1<<7
+			if y&1 == 0 {
+				a, b = rowValue(x, y-1)
+				a1, b1 := rowValue(x, y+1)
+				a += a1
+				b += b1
+				shift, rounding = 9, 1<<8
+			}
+			s := int(src[y*stride+x])
+			tmp := (b - a*s + rounding) >> shift
+			out := s + ((params.W0*tmp + (1 << 10)) >> 11)
+			dst[y*stride+x] = uint8(iclip(out, 0, 255))
+		}
+	}
+}
+
+// SGR5x5SnapshotStripeStart overwrites the first row below a restoration
+// stripe boundary. The radius-2 filter duplicates the first saved LPF row,
+// so its first statistics window is not expressible by ordinary frame-edge
+// clamping.
+func SGR5x5SnapshotStripeStart(dst, src, boundary []uint8, stride, planeW, planeH, x0, boundaryY, w, h int, params *SGRParams) {
+	if boundaryY < 2 || boundaryY+5 >= planeH {
+		return
+	}
+	type sourceRow struct {
+		plane []uint8
+		y     int
+	}
+	type ab struct {
+		a int
+		b int
+	}
+	calc := func(cx int, rows [5]sourceRow) ab {
+		sum, sumsq := 0, 0
+		for _, row := range rows {
+			for dx := -2; dx <= 2; dx++ {
+				sx := iclip(cx+dx, 0, planeW-1)
+				v := int(row.plane[row.y*stride+sx])
+				sum += v
+				sumsq += v * v
+			}
+		}
+		p := sumsq*25 - sum*sum
+		if p < 0 {
+			p = 0
+		}
+		z := (uint(p)*uint(params.S0) + (1 << 19)) >> 20
+		x := int(sgrXbyX[umin(z, 255)])
+		return ab{a: (x*sum*164 + (1 << 11)) >> 12, b: x}
+	}
+	rowValue := func(x int, rows [5]sourceRow) (a, b int) {
+		for dx, weight := range [3]int{5, 6, 5} {
+			v := calc(x+dx-1, rows)
+			a += v.b * weight
+			b += v.a * weight
+		}
+		return a, b
+	}
+	b := boundaryY
+	firstRows := [5]sourceRow{
+		{boundary, b - 2}, {boundary, b - 2}, {boundary, b - 1},
+		{src, b}, {src, b + 1},
+	}
+	secondRows := [5]sourceRow{
+		{boundary, b - 1}, {src, b}, {src, b + 1}, {src, b + 2}, {src, b + 3},
+	}
+	thirdRows := [5]sourceRow{
+		{src, b + 1}, {src, b + 2}, {src, b + 3}, {src, b + 4}, {src, b + 5},
+	}
+	for x := x0; x < x0+w; x++ {
+		a0, b0 := rowValue(x, firstRows)
+		a1, b1 := rowValue(x, secondRows)
+		s := int(src[b*stride+x])
+		tmp := (b0 + b1 - (a0+a1)*s + (1 << 8)) >> 9
+		out := s + ((params.W0*tmp + (1 << 10)) >> 11)
+		dst[b*stride+x] = uint8(iclip(out, 0, 255))
+		if h > 1 {
+			s = int(src[(b+1)*stride+x])
+			tmp = (b1 - a1*s + (1 << 7)) >> 8
+			out = s + ((params.W0*tmp + (1 << 10)) >> 11)
+			dst[(b+1)*stride+x] = uint8(iclip(out, 0, 255))
+		}
+		if h > 2 {
+			a2, b2 := rowValue(x, thirdRows)
+			s = int(src[(b+2)*stride+x])
+			tmp = (b1 + b2 - (a1+a2)*s + (1 << 8)) >> 9
+			out = s + ((params.W0*tmp + (1 << 10)) >> 11)
+			dst[(b+2)*stride+x] = uint8(iclip(out, 0, 255))
+		}
+	}
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 func iclipPixel(v int) uint8 {
@@ -123,7 +254,7 @@ var sgrXbyX = [256]uint8{
 	6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4, 4,
 	4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3,
 	3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-	3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2,
+	3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2,
 	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
 	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
 	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,

@@ -1333,6 +1333,30 @@ func decodeIntraBlockPlanes(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	fhdr *header.FrameHeader, seq *header.SequenceHeader, fb *FrameBuf,
 	bx, by, bw, bh int, st blockSyntaxState, intraSt intraSyntaxState,
 ) {
+	// dav1d processes coefficient data in 64x64 luma regions, interleaving
+	// each region's luma and chroma before advancing to the next region.
+	// This ordering is observable in the arithmetic stream for blocks larger
+	// than 64 pixels even though all regions share the same block syntax.
+	walk64x64Regions(bw, bh, func(x, y, rw, rh int) {
+		decodeIntraBlockPlaneRegion(m, ctx, fs, fhdr, seq, fb,
+			bx+x, by+y, rw, rh, st, intraSt)
+	})
+	commitIntraBlockState(fs, bx, by, bw, bh, st, intraSt)
+}
+
+func walk64x64Regions(width, height int, visit func(x, y, width, height int)) {
+	for y := 0; y < height; y += 64 {
+		rh := minInt(64, height-y)
+		for x := 0; x < width; x += 64 {
+			visit(x, y, minInt(64, width-x), rh)
+		}
+	}
+}
+
+func decodeIntraBlockPlaneRegion(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
+	fhdr *header.FrameHeader, seq *header.SequenceHeader, fb *FrameBuf,
+	bx, by, bw, bh int, st blockSyntaxState, intraSt intraSyntaxState,
+) {
 	qidxIsZero := st.qidxIsZero
 	lossless := st.lossless
 	skip := st.skip
@@ -1376,7 +1400,6 @@ func decodeIntraBlockPlanes(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 			decodeIntraPlane(m, ctx, fs, fb, 2, cbx, cby, cbw, cbh, ctxCBW, ctxCBH, intraSt.txUV, intraSt.uvMode, intraSt.uvAngleDelta, -1, 0, reconSt.dqV, skip, intraSt.uvMode, reconSt.reducedTxtpSet, fhdr, seq, qidxIsZero, lossless, st.intraEdges)
 		}
 	}
-	commitIntraBlockState(fs, bx, by, bw, bh, st, intraSt)
 }
 
 func decodeInterPlaneResidual(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
@@ -1491,8 +1514,7 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	}
 	// Syntax and prediction operate on the 8x8-aligned coded grid. Plane
 	// writes are clipped to the visible dimensions by the reconstruction path.
-	codedW := (fb.Width + 7) &^ 7
-	codedH := (fb.Height + 7) &^ 7
+	codedW, codedH := fb.codedLumaSize()
 	if bx+bw > codedW {
 		bw = codedW - bx
 	}
@@ -2616,7 +2638,7 @@ func decodeIntraPlane(
 ) {
 	// Select plane buffer.
 	var planeBuf []byte
-	var stride, planeW, planeH int
+	var stride, planeW, planeH, visibleW, visibleH int
 	switch plane {
 	case 0:
 		planeBuf = fb.Y
@@ -2634,16 +2656,16 @@ func decodeIntraPlane(
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
-	planeW, planeH = fb.codedPlaneSize(plane)
+	visibleW, visibleH = planeW, planeH
 
-	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
+	if bx >= visibleW || by >= visibleH || len(planeBuf) == 0 {
 		return
 	}
-	if bx+bw > planeW {
-		bw = planeW - bx
+	if bx+bw > visibleW {
+		bw = visibleW - bx
 	}
-	if by+bh > planeH {
-		bh = planeH - by
+	if by+bh > visibleH {
+		bh = visibleH - by
 	}
 
 	// Transform dimensions. The prediction still covers the complete transform
@@ -2676,7 +2698,7 @@ func decodeIntraPlane(
 
 	for tby := 0; tby < bh; tby += th {
 		for tbx := 0; tbx < bw; tbx += tw {
-			visW, visH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, planeW, planeH)
+			visW, visH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, visibleW, visibleH)
 			if visW <= 0 || visH <= 0 {
 				continue
 			}
@@ -2689,7 +2711,7 @@ func decodeIntraPlane(
 			// 1. Intra prediction into predBuf.
 			haveTop, haveLeft := fs.intraAvailability(plane, bx+tbx, by+tby)
 			dispatchMode, packedAngle := prepareIntraPrediction(
-				planeBuf, stride, planeW, planeH,
+				planeBuf, stride, visibleW, visibleH,
 				bx+tbx, by+tby, tw, th,
 				tlBuf, tl,
 				mode, angleDelta, filterMode,
@@ -2705,7 +2727,7 @@ func decodeIntraPlane(
 				clampPreparedBottomLeft(tlBuf, tl, th)
 			}
 			callPreparedIntraPred(dispatchMode, packedAngle, filterMode, predBuf, tw, tlBuf, tl, tw, th,
-				planeW-(bx+tbx), planeH-(by+tby))
+				visibleW-(bx+tbx), visibleH-(by+tby))
 
 			// 2. Copy prediction to destination.
 			for row := 0; row < visH; row++ {
@@ -6262,6 +6284,11 @@ func deriveLocalWarp(fs *FrameState, bx, by, bw, bh int, st interState) (header.
 	}
 	col4, row4 := bx>>2, by>>2
 	bw4, bh4 := (bw+3)>>2, (bh+3)>>2
+	// The coded block may extend past the visible frame at the right or
+	// bottom edge. Keep its full size for affine fitting, but only inspect
+	// neighbour entries that exist in the visible 4x4 grid.
+	scanW4 := minInt(bw4, maxInt(0, fs.W4-col4))
+	scanH4 := minInt(bh4, maxInt(0, fs.H4-row4))
 	points := make([]header.WarpPoint, 0, 8)
 	matches := func(blk Av1Block) bool {
 		return !blk.Intra && !blk.Compound && !blk.InterIntra && int(blk.RefFrame) == st.refFrame
@@ -6297,7 +6324,7 @@ func deriveLocalWarp(fs *FrameState, bx, by, bw, bh int, st interState) (header.
 				haveTopRight = false
 			}
 		} else {
-			for off := 0; off < bw4 && len(points) < 8; {
+			for off := 0; off < scanW4 && len(points) < 8; {
 				blk = fs.BlockGrid[(row4-1)*fs.W4+col4+off]
 				add(off, 0, 1, -1, blk)
 				aw4 = maxInt(1, int(BlockDimensions[blk.Bs][0]))
@@ -6315,7 +6342,7 @@ func deriveLocalWarp(fs *FrameState, bx, by, bw, bh int, st interState) (header.
 				haveTopLeft = false
 			}
 		} else {
-			for off := 0; off < bh4 && len(points) < 8; {
+			for off := 0; off < scanH4 && len(points) < 8; {
 				blk = fs.BlockGrid[(row4+off)*fs.W4+col4-1]
 				add(0, off, -1, 1, blk)
 				lh4 = maxInt(1, int(BlockDimensions[blk.Bs][1]))

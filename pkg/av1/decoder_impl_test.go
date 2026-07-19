@@ -286,14 +286,14 @@ func TestAllocPictureIncludesCodedGridPadding(t *testing.T) {
 	pic := d.allocPicture(&header.FrameHeader{Width: [2]int{1510, 1510}, Height: 1012})
 	defer pic.Release()
 
-	if got, want := len(pic.Y), pic.StrideY*1016; got != want {
+	if got, want := len(pic.Y), pic.StrideY*1024; got != want {
 		t.Fatalf("luma allocation = %d, want %d", got, want)
 	}
-	if got, want := len(pic.U), pic.StrideUV*508; got != want {
+	if got, want := len(pic.U), pic.StrideUV*512; got != want {
 		t.Fatalf("chroma allocation = %d, want %d", got, want)
 	}
 	fb := d.picToFrameBuf(pic)
-	if fb.CodedWidth != 1512 || fb.CodedHeight != 1016 || fb.CodedChromaW != 756 || fb.CodedChromaH != 508 {
+	if fb.CodedWidth != 1512 || fb.CodedHeight != 1024 || fb.CodedChromaW != 756 || fb.CodedChromaH != 512 {
 		t.Fatalf("coded geometry = %dx%d chroma=%dx%d", fb.CodedWidth, fb.CodedHeight, fb.CodedChromaW, fb.CodedChromaH)
 	}
 }

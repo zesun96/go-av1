@@ -1,6 +1,7 @@
 package tile
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/zesun96/go-av1/internal/header"
@@ -206,6 +207,32 @@ func TestRestorationUnitYExtentUsesStripeOffset(t *testing.T) {
 			t.Fatalf("restorationUnitYExtent(%d, %d, %d, %d) = (%d, %d), want (%d, %d)",
 				tc.pos, tc.total, tc.unitSize, tc.ssV, gotStart, gotExtent, tc.wantStart, tc.wantExtent)
 		}
+	}
+}
+
+func TestDeriveLocalWarpClipsBottomEdgeNeighbourScan(t *testing.T) {
+	fs := NewFrameState(352, 288)
+	fs.TileX1 = 352
+	for i := range fs.BlockGrid {
+		fs.BlockGrid[i] = Av1Block{RefFrame: 0, Bs: uint8(BS4x4)}
+	}
+	if _, ok := deriveLocalWarp(fs, 128, 256, 128, 64, interState{refFrame: 0}); !ok {
+		t.Fatal("deriveLocalWarp found no matching edge samples")
+	}
+}
+
+func TestWalk64x64RegionsUsesDav1dRasterOrder(t *testing.T) {
+	type region struct{ x, y, w, h int }
+	var got []region
+	walk64x64Regions(130, 70, func(x, y, w, h int) {
+		got = append(got, region{x, y, w, h})
+	})
+	want := []region{
+		{0, 0, 64, 64}, {64, 0, 64, 64}, {128, 0, 2, 64},
+		{0, 64, 64, 6}, {64, 64, 64, 6}, {128, 64, 2, 6},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("64x64 regions = %v, want %v", got, want)
 	}
 }
 
