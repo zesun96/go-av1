@@ -532,8 +532,11 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	fhdr *header.FrameHeader, seq *header.SequenceHeader,
 	fb *FrameBuf, bx, by, bl int, edgeNode intraEdgeNode) {
 
-	// Clamp to frame.
-	if bx >= fb.Width || by >= fb.Height {
+	// Partition syntax covers the complete 8x8-aligned coded grid. Blocks
+	// outside the visible luma rectangle can still own edge chroma samples.
+	partitionW := (fb.Width + 7) &^ 7
+	partitionH := (fb.Height + 7) &^ 7
+	if bx >= partitionW || by >= partitionH {
 		return
 	}
 
@@ -568,8 +571,6 @@ func decodePartition(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	// is clipped to the actual plane dimensions later, but using the visible
 	// pixel bounds here would incorrectly turn the last 8x8 node of e.g. a
 	// 180-line frame into a one-sided partition decision.
-	partitionW := (fb.Width + 7) &^ 7
-	partitionH := (fb.Height + 7) &^ 7
 	haveHSplit := partitionW > bx+half
 	haveVSplit := partitionH > by+half
 	if !haveHSplit && !haveVSplit {
@@ -1113,6 +1114,14 @@ func readIntraTxSize(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, bx, by int
 		return maxTx
 	}
 	txCtx := fs.IntraTxCtx(bx, by, maxTx)
+	col4, row4 := bx>>2, by>>2
+	aboveTx, leftTx := uint8(0xff), uint8(0xff)
+	if col4 < len(fs.AboveTxIntra) {
+		aboveTx = fs.AboveTxIntra[col4]
+	}
+	if row4 < len(fs.LeftTxIntra) {
+		leftTx = fs.LeftTxIntra[row4]
+	}
 	maxIdx := int(td.Max) - 1
 	if maxIdx < 0 || maxIdx >= len(ctx.TxSzCDF) {
 		return maxTx
@@ -1121,8 +1130,8 @@ func readIntraTxSize(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, bx, by int
 	beforeCDF := ctx.TxSzCDF[maxIdx][txCtx]
 	depth := int(m.SymbolAdaptDav1d(ctx.TxSzCDF[maxIdx][txCtx][:], nSyms-1))
 	ms := m.State()
-	fs.tracef("sym tx_size x=%d y=%d max=%d ctx=%d depth=%d cdf=%v->%v rng=%d cnt=%d off=%d",
-		bx, by, maxTx, txCtx, depth, beforeCDF, ctx.TxSzCDF[maxIdx][txCtx],
+	fs.tracef("sym tx_size x=%d y=%d max=%d ctx=%d above=%d left=%d depth=%d cdf=%v->%v rng=%d cnt=%d off=%d",
+		bx, by, maxTx, txCtx, aboveTx, leftTx, depth, beforeCDF, ctx.TxSzCDF[maxIdx][txCtx],
 		ms.Range, ms.Count, ms.BufferPosition)
 	tx := maxTx
 	for depth > 0 {
@@ -1509,12 +1518,12 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	ctxBW := bw
 	ctxBH := bh
 
-	if bx >= fb.Width || by >= fb.Height {
-		return
-	}
 	// Syntax and prediction operate on the 8x8-aligned coded grid. Plane
 	// writes are clipped to the visible dimensions by the reconstruction path.
 	codedW, codedH := fb.codedLumaSize()
+	if bx >= codedW || by >= codedH {
+		return
+	}
 	if bx+bw > codedW {
 		bw = codedW - bx
 	}
@@ -1802,6 +1811,13 @@ func buildCflAc(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh, cbw, c
 	ssVer := int(seq.SsVer)
 	baseX := bx
 	baseY := by
+	codedW, codedH := fb.codedLumaSize()
+	if fb.Width&7 == 0 {
+		codedW = fb.Width
+	}
+	if fb.Height&7 == 0 {
+		codedH = fb.Height
+	}
 	if ssHor != 0 {
 		baseX &^= (1 << ssHor) - 1
 	}
@@ -1810,7 +1826,7 @@ func buildCflAc(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh, cbw, c
 	}
 	validW := cbw
 	validH := cbh
-	if remW := fb.Width - baseX; remW >= 0 {
+	if remW := codedW - baseX; remW >= 0 {
 		maxW := (remW + (1 << ssHor) - 1) >> ssHor
 		if validW > maxW {
 			validW = maxW
@@ -1818,7 +1834,7 @@ func buildCflAc(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh, cbw, c
 	} else {
 		validW = 0
 	}
-	if remH := fb.Height - baseY; remH >= 0 {
+	if remH := codedH - baseY; remH >= 0 {
 		maxH := (remH + (1 << ssVer) - 1) >> ssVer
 		if validH > maxH {
 			validH = maxH
@@ -1836,20 +1852,20 @@ func buildCflAc(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh, cbw, c
 	for cy := 0; cy < validH; cy++ {
 		rowOff := cy * cbw
 		srcY := baseY + (cy << ssVer)
-		if srcY >= fb.Height {
-			srcY = fb.Height - 1
+		if srcY >= codedH {
+			srcY = codedH - 1
 		}
 		srcY1 := srcY
-		if ssVer != 0 && srcY1+1 < fb.Height {
+		if ssVer != 0 && srcY1+1 < codedH {
 			srcY1++
 		}
 		for cx := 0; cx < validW; cx++ {
 			srcX := baseX + (cx << ssHor)
-			if srcX >= fb.Width {
-				srcX = fb.Width - 1
+			if srcX >= codedW {
+				srcX = codedW - 1
 			}
 			srcX1 := srcX
-			if ssHor != 0 && srcX1+1 < fb.Width {
+			if ssHor != 0 && srcX1+1 < codedW {
 				srcX1++
 			}
 			acSum := int(fb.Y[srcY*stride+srcX])
@@ -2657,15 +2673,22 @@ func decodeIntraPlane(
 		planeH = fb.ChromaH
 	}
 	visibleW, visibleH = planeW, planeH
+	planeW, planeH = fb.codedPlaneSize(plane)
+	if fb.Width&7 == 0 {
+		planeW = visibleW
+	}
+	if fb.Height&7 == 0 {
+		planeH = visibleH
+	}
 
-	if bx >= visibleW || by >= visibleH || len(planeBuf) == 0 {
+	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
 		return
 	}
-	if bx+bw > visibleW {
-		bw = visibleW - bx
+	if bx+bw > planeW {
+		bw = planeW - bx
 	}
-	if by+bh > visibleH {
-		bh = visibleH - by
+	if by+bh > planeH {
+		bh = planeH - by
 	}
 
 	// Transform dimensions. The prediction still covers the complete transform
@@ -2698,55 +2721,61 @@ func decodeIntraPlane(
 
 	for tby := 0; tby < bh; tby += th {
 		for tbx := 0; tbx < bw; tbx += tw {
-			visW, visH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, visibleW, visibleH)
-			if visW <= 0 || visH <= 0 {
-				continue
+			writeW, writeH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, planeW, planeH)
+			edgeW, edgeH := visibleW, visibleH
+			if bx+tbx+tw > visibleW {
+				edgeW = planeW
 			}
-			dstOff := (by+tby)*stride + (bx + tbx)
-			if dstOff >= len(planeBuf) {
-				continue
+			if by+tby+th > visibleH {
+				edgeH = planeH
 			}
-			dst := planeBuf[dstOff:]
+			var dst []byte
+			if writeW > 0 && writeH > 0 {
+				dstOff := (by+tby)*stride + (bx + tbx)
+				if dstOff < len(planeBuf) {
+					dst = planeBuf[dstOff:]
 
-			// 1. Intra prediction into predBuf.
-			haveTop, haveLeft := fs.intraAvailability(plane, bx+tbx, by+tby)
-			dispatchMode, packedAngle := prepareIntraPrediction(
-				planeBuf, stride, visibleW, visibleH,
-				bx+tbx, by+tby, tw, th,
-				tlBuf, tl,
-				mode, angleDelta, filterMode,
-				enableEdgeFilter, smoothFlags, haveTop, haveLeft,
-			)
-			fs.tracef("sym intra_pred x=%d y=%d plane=%d tx_x=%d tx_y=%d w=%d h=%d mode=%d dispatch=%d edges=%d",
-				bx, by, plane, tbx, tby, tw, th, mode, dispatchMode, intraEdges)
-			txEdges := transformIntraEdgeFlags(bw, bh, tbx, tby, tw, th, planeEdges)
-			if (dispatchMode == intraPredZ1 || dispatchMode == intraPredZ2) && txEdges&edgeTopHasRight == 0 {
-				clampPreparedTopRight(tlBuf, tl, tw)
-			}
-			if (dispatchMode == intraPredZ2 || dispatchMode == intraPredZ3) && txEdges&edgeLeftHasBottom == 0 {
-				clampPreparedBottomLeft(tlBuf, tl, th)
-			}
-			callPreparedIntraPred(dispatchMode, packedAngle, filterMode, predBuf, tw, tlBuf, tl, tw, th,
-				visibleW-(bx+tbx), visibleH-(by+tby))
+					// Reconstruct coded padding as well as visible samples. Later padded
+					// blocks use these values as intra edges; picture output remains cropped.
+					haveTop, haveLeft := fs.intraAvailability(plane, bx+tbx, by+tby)
+					dispatchMode, packedAngle := prepareIntraPrediction(
+						planeBuf, stride, edgeW, edgeH,
+						bx+tbx, by+tby, tw, th,
+						tlBuf, tl,
+						mode, angleDelta, filterMode,
+						enableEdgeFilter, smoothFlags, haveTop, haveLeft,
+					)
+					fs.tracef("sym intra_pred x=%d y=%d plane=%d tx_x=%d tx_y=%d w=%d h=%d mode=%d dispatch=%d edges=%d",
+						bx, by, plane, tbx, tby, tw, th, mode, dispatchMode, intraEdges)
+					txEdges := transformIntraEdgeFlags(bw, bh, tbx, tby, tw, th, planeEdges)
+					if (dispatchMode == intraPredZ1 || dispatchMode == intraPredZ2) && txEdges&edgeTopHasRight == 0 {
+						clampPreparedTopRight(tlBuf, tl, tw)
+					}
+					if (dispatchMode == intraPredZ2 || dispatchMode == intraPredZ3) && txEdges&edgeLeftHasBottom == 0 {
+						clampPreparedBottomLeft(tlBuf, tl, th)
+					}
+					callPreparedIntraPred(dispatchMode, packedAngle, filterMode, predBuf, tw, tlBuf, tl, tw, th,
+						edgeW-(bx+tbx), edgeH-(by+tby))
 
-			// 2. Copy prediction to destination.
-			for row := 0; row < visH; row++ {
-				dstRow := (by+tby+row)*stride + (bx + tbx)
-				if dstRow+visW > len(planeBuf) {
-					break
+					for row := 0; row < writeH; row++ {
+						dstRow := (by+tby+row)*stride + (bx + tbx)
+						if dstRow+writeW > len(planeBuf) {
+							break
+						}
+						copy(planeBuf[dstRow:dstRow+writeW], predBuf[row*tw:row*tw+writeW])
+					}
 				}
-				copy(planeBuf[dstRow:dstRow+visW], predBuf[row*tw:row*tw+visW])
 			}
 
-			// 3. Decode and apply residual (if not skipped).
+			// Decode every coded transform, including padding outside the visible frame.
 			if !skip {
 				coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, tx, plane, bx+tbx, by+tby, ctxBW, ctxBH, tw, th, coeffMode, true, transform.DCT_DCT, reducedTxtpSet, qidxIsZero, lossless, dq)
 				if plane > 0 {
 					recordChromaResidualDebug(plane, false, eob, -1, -1)
 				}
 				fs.SetCoefCtxBlock(plane, bx+tbx, by+tby, tw, th, resCtx)
-				if eob >= 0 && len(coeff) > 0 {
-					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, visW, visH)
+				if eob >= 0 && len(coeff) > 0 && len(dst) > 0 {
+					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, writeW, writeH)
 				}
 			} else {
 				if plane > 0 {
@@ -3526,8 +3555,10 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, tx uint
 		recordChromaResidualCtx(plane, skipCtx, int(td.Ctx))
 	}
 	if int(td.Ctx) < len(ctx.CoefSkipFull) {
+		beforeCDF := ctx.CoefSkipFull[td.Ctx][skipCtx]
+		beforeMSAC := m.State()
 		allSkip := m.BoolAdapt(ctx.CoefSkipFull[td.Ctx][skipCtx][:])
-		fs.tracef("sym coeff_stage x=%d y=%d plane=%d kind=nonzero skip_ctx=%d all_skip=%d rng=%d", bx, by, plane, skipCtx, allSkip, m.State().Range)
+		fs.tracef("sym coeff_stage x=%d y=%d plane=%d kind=nonzero skip_ctx=%d all_skip=%d cdf=%v->%v pre_rng=%d pre_dif=%016x pre_cnt=%d rng=%d", bx, by, plane, skipCtx, allSkip, beforeCDF, ctx.CoefSkipFull[td.Ctx][skipCtx], beforeMSAC.Range, beforeMSAC.Dif, beforeMSAC.Count, m.State().Range)
 		if allSkip != 0 {
 			txtp := uint8(transform.DCT_DCT)
 			if lossless {
@@ -3608,8 +3639,8 @@ func decodeCoefficients(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, tx uint
 
 	resCtx := decodeCoeffSignsAndResiduals(m, ctx, fs, tx, plane, bx, by, spanW, spanH, chroma, tokState, dcTok, dq)
 	ms = m.State()
-	fs.tracef("sym coeff_done x=%d y=%d plane=%d res_ctx=%d coeff0=%d dq=%v rng=%d cnt=%d off=%d",
-		bx, by, plane, resCtx, tokState.coeff[0], dq, ms.Range, ms.Count, ms.BufferPosition)
+	fs.tracef("sym coeff_done x=%d y=%d plane=%d res_ctx=%d coeff0=%d dq=%v rng=%d dif=%016x cnt=%d off=%d",
+		bx, by, plane, resCtx, tokState.coeff[0], dq, ms.Range, ms.Dif, ms.Count, ms.BufferPosition)
 	if fs.Tracef != nil {
 		for rc, value := range tokState.coeff {
 			if value != 0 {
