@@ -344,6 +344,26 @@ func TestBuildCflAc420PadsRightAndBottom(t *testing.T) {
 	}
 }
 
+func TestBuildCflAc420UsesReconstructedPlanePadding(t *testing.T) {
+	const stride, height = 16, 8
+	y := make([]byte, stride*height)
+	for row := 0; row < height; row++ {
+		for x := 0; x < stride; x++ {
+			y[row*stride+x] = byte(3*row + 5*x)
+		}
+	}
+	fb := &FrameBuf{Y: y, StrideY: stride, Width: 10, Height: height}
+	seq := &header.SequenceHeader{SsHor: 1, SsVer: 1}
+
+	got := buildCflAc(fb, seq, 8, 0, 8, 8, 4, 4)
+	want := buildCflAcRef(y, stride, stride, height, 8, 0, 8, 8, 4, 4, 1, 1)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("padding ac[%d]=%d want %d", i, got[i], want[i])
+		}
+	}
+}
+
 func TestBuildCflAc420AlignsOddOriginToChromaPhase(t *testing.T) {
 	seq := &header.SequenceHeader{SsHor: 1, SsVer: 1}
 	fb := &FrameBuf{

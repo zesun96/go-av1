@@ -149,6 +149,123 @@ func TestSplitMVPlanePreservesSubsampledChromaPhase(t *testing.T) {
 	}
 }
 
+func TestInterPredictionClipsWriteAfterNominalFiltering(t *testing.T) {
+	const srcW, srcH = 12, 12
+	src := make([]byte, srcW*srcH)
+	for y := 0; y < srcH; y++ {
+		for x := 0; x < srcW; x++ {
+			src[y*srcW+x] = byte((x*x + 7*y + 3*x*y) & 0xff)
+		}
+	}
+
+	full := make([]byte, 16*16)
+	clipped := make([]byte, 16*16)
+	mv := refmvs.MV{X: 4, Y: 6}
+	copyInterPredictPlane(full, 16, 16, 16, src, srcW, srcW, srcH, 4, 0, 8, 8, mv,
+		header.FilterMode8TapRegular, header.FilterMode8TapRegular)
+	copyInterPredictPlane(clipped, 16, 8, 8, src, srcW, srcW, srcH, 4, 0, 8, 8, mv,
+		header.FilterMode8TapRegular, header.FilterMode8TapRegular)
+
+	for y := 0; y < 8; y++ {
+		for x := 4; x < 8; x++ {
+			if got, want := clipped[y*16+x], full[y*16+x]; got != want {
+				t.Fatalf("clipped prediction (%d,%d)=%d, want nominal-filter result %d", x, y, got, want)
+			}
+		}
+	}
+}
+
+func TestOBMCBlendClipsDestinationWithoutChangingNominalGeometry(t *testing.T) {
+	t.Run("horizontal", func(t *testing.T) {
+		const stride, dstW, dstH = 16, 10, 8
+		dst := make([]byte, stride*dstH)
+		for i := range dst {
+			dst[i] = 17
+		}
+		pred := make([]byte, 8*8)
+		for i := range pred {
+			pred[i] = 201
+		}
+
+		blendOBMCH(dst, stride, dstW, dstH, 8, 4, pred, 8, 8)
+
+		if dst[4*stride+8] == 17 || dst[4*stride+9] == 17 {
+			t.Fatal("visible OBMC samples were not blended")
+		}
+		for y := 0; y < dstH; y++ {
+			for x := dstW; x < stride; x++ {
+				if dst[y*stride+x] != 17 {
+					t.Fatalf("horizontal OBMC wrote padding at (%d,%d)", x, y)
+				}
+			}
+		}
+	})
+
+	t.Run("vertical", func(t *testing.T) {
+		const stride, dstW, dstH = 16, 10, 8
+		dst := make([]byte, stride*dstH)
+		for i := range dst {
+			dst[i] = 23
+		}
+		pred := make([]byte, 8*8)
+		for i := range pred {
+			pred[i] = 199
+		}
+
+		blendOBMCV(dst, stride, dstW, dstH, 8, 6, pred, 8, 8)
+
+		if dst[6*stride+8] == 23 || dst[6*stride+9] == 23 {
+			t.Fatal("visible OBMC samples were not blended")
+		}
+		for y := 0; y < dstH; y++ {
+			for x := dstW; x < stride; x++ {
+				if dst[y*stride+x] != 23 {
+					t.Fatalf("vertical OBMC wrote padding at (%d,%d)", x, y)
+				}
+			}
+		}
+	})
+}
+
+func TestWarpPredictionClipsWriteAfterNominalPrediction(t *testing.T) {
+	const stride, size = 32, 32
+	src := make([]byte, stride*size)
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			src[y*stride+x] = byte((5*x + 9*y) & 0xff)
+		}
+	}
+	full := make([]byte, stride*size)
+	clipped := make([]byte, stride*size)
+	for i := range clipped {
+		clipped[i] = 37
+	}
+	wmp := header.WarpedMotionParams{
+		Type:   header.WMTypeRotZoom,
+		Matrix: [6]int32{0, 0, 1 << 16, 0, 0, 1 << 16},
+	}
+	if !putWarpAffineClipped(full, stride, size, size, src, stride, size, size,
+		16, 8, 16, 16, 0, 0, wmp) {
+		t.Fatal("full warp prediction was rejected")
+	}
+	if !putWarpAffineClipped(clipped, stride, 20, size, src, stride, size, size,
+		16, 8, 16, 16, 0, 0, wmp) {
+		t.Fatal("clipped warp prediction was rejected")
+	}
+	for y := 8; y < 24; y++ {
+		for x := 16; x < 20; x++ {
+			if got, want := clipped[y*stride+x], full[y*stride+x]; got != want {
+				t.Fatalf("clipped warp (%d,%d)=%d, want nominal result %d", x, y, got, want)
+			}
+		}
+		for x := 20; x < stride; x++ {
+			if clipped[y*stride+x] != 37 {
+				t.Fatalf("clipped warp wrote padding at (%d,%d)", x, y)
+			}
+		}
+	}
+}
+
 func TestInterFilter2DDirectionOrder(t *testing.T) {
 	if got := interFilter2D(header.FilterMode8TapRegular, header.FilterMode8TapSmooth); got != predinter.Filter2D8TapSmoothRegular {
 		t.Fatalf("filter2d dir0=regular dir1=smooth is %d, want horizontal smooth/vertical regular", got)

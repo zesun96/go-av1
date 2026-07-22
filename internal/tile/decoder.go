@@ -1444,7 +1444,7 @@ func decodeInterPlaneResidual(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
-	planeW, planeH = fb.codedPlaneSize(plane)
+	planeW, planeH = syntaxPlaneSize(fb, seq, plane)
 	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
 		return transform.DCT_DCT
 	}
@@ -1518,17 +1518,14 @@ func decodeBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	ctxBW := bw
 	ctxBH := bh
 
-	// Syntax and prediction operate on the 8x8-aligned coded grid. Plane
-	// writes are clipped to the visible dimensions by the reconstruction path.
-	codedW, codedH := fb.codedLumaSize()
+	// A block origin must lie on the 8x8-aligned syntax grid, but its nominal
+	// dimensions are preserved across the frame edge. In particular, motion
+	// compensation selects filters from the nominal block size; individual
+	// reconstruction paths clip writes and coefficient contexts as required.
+	codedW := (fb.Width + 7) &^ 7
+	codedH := (fb.Height + 7) &^ 7
 	if bx >= codedW || by >= codedH {
 		return
-	}
-	if bx+bw > codedW {
-		bw = codedW - bx
-	}
-	if by+bh > codedH {
-		bh = codedH - by
 	}
 	defer func() {
 		ms := m.State()
@@ -1571,6 +1568,16 @@ func blockHasChroma(seq *header.SequenceHeader, fb *FrameBuf, bx, by, bw, bh int
 	ssHor := int(seq.SsHor)
 	ssVer := int(seq.SsVer)
 	return (bw4 > ssHor || (bx4&1) != 0) && (bh4 > ssVer || (by4&1) != 0)
+}
+
+func syntaxPlaneSize(fb *FrameBuf, seq *header.SequenceHeader, plane int) (int, int) {
+	w := (fb.Width + 7) &^ 7
+	h := (fb.Height + 7) &^ 7
+	if plane > 0 && seq != nil {
+		w >>= seq.SsHor
+		h >>= seq.SsVer
+	}
+	return w, h
 }
 
 func chromaRect(seq *header.SequenceHeader, bx, by, bw, bh int) (cbx, cby, cbw, cbh int) {
@@ -1811,13 +1818,10 @@ func buildCflAc(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh, cbw, c
 	ssVer := int(seq.SsVer)
 	baseX := bx
 	baseY := by
-	codedW, codedH := fb.codedLumaSize()
-	if fb.Width&7 == 0 {
-		codedW = fb.Width
-	}
-	if fb.Height&7 == 0 {
-		codedH = fb.Height
-	}
+	// Intra reconstruction writes the complete edge transform into the plane
+	// padding. CfL consumes that nominal reconstruction, not a copy of the last
+	// sample inside the 8x8-aligned syntax grid.
+	codedW, codedH := stride, len(fb.Y)/stride
 	if ssHor != 0 {
 		baseX &^= (1 << ssHor) - 1
 	}
@@ -1963,17 +1967,13 @@ func decodeIntraPlaneCFL(
 		planeBuf = fb.V
 	}
 	stride = fb.StrideUV
-	planeW, planeH = fb.codedChromaSize()
+	planeW, planeH = syntaxPlaneSize(fb, seq, plane)
 
 	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
 		return
 	}
-	if bx+bw > planeW {
-		bw = planeW - bx
-	}
-	if by+bh > planeH {
-		bh = planeH - by
-	}
+	syntaxBW, syntaxBH := minInt(bw, planeW-bx), minInt(bh, planeH-by)
+	storageW, storageH := stride, len(planeBuf)/stride
 
 	maxDim := bw
 	if bh > maxDim {
@@ -1999,8 +1999,8 @@ func decodeIntraPlaneCFL(
 	}
 	smoothFlags := fs.IntraSmoothFlags(bx, by, stepX, stepY, plane)
 
-	for tby := 0; tby < bh; tby += th {
-		for tbx := 0; tbx < bw; tbx += tw {
+	for tby := 0; tby < syntaxBH; tby += th {
+		for tbx := 0; tbx < syntaxBW; tbx += tw {
 			dstOff := (by+tby)*stride + (bx + tbx)
 			if dstOff >= len(planeBuf) {
 				continue
@@ -2023,12 +2023,13 @@ func decodeIntraPlaneCFL(
 					planeW-(bx+tbx), planeH-(by+tby))
 			}
 
-			for row := 0; row < th; row++ {
+			writeW, writeH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, storageW, storageH)
+			for row := 0; row < writeH; row++ {
 				dstRow := (by+tby+row)*stride + (bx + tbx)
-				if dstRow+tw > len(planeBuf) {
+				if dstRow+writeW > len(planeBuf) {
 					break
 				}
-				copy(planeBuf[dstRow:dstRow+tw], predBuf[row*tw:(row+1)*tw])
+				copy(planeBuf[dstRow:dstRow+writeW], predBuf[row*tw:row*tw+writeW])
 			}
 
 			if !skip {
@@ -2039,7 +2040,7 @@ func decodeIntraPlaneCFL(
 				coeff, eob, txtp, resCtx := decodeCoefficients(m, ctx, fs, tx, plane, bx+tbx, by+tby, ctxBW, ctxBH, tw, th, coeffMode, true, transform.DCT_DCT, reducedTxtpSet, qidxIsZero, lossless, dq)
 				fs.SetCoefCtxBlock(plane, bx+tbx, by+tby, tw, th, resCtx)
 				if eob >= 0 && len(coeff) > 0 {
-					visW, visH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, planeW, planeH)
+					visW, visH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, storageW, storageH)
 					ReconBlockDequantizedVisible(dst, stride, coeff, eob, tx, txtp, 8, visW, visH)
 				}
 			} else {
@@ -2385,7 +2386,11 @@ func decodeInterPlaneResidualVarTxImpl(m *bitstream.MSAC, ctx *TileCtx, fs *Fram
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
-	planeW, planeH = fb.codedPlaneSize(plane)
+	if seq != nil {
+		planeW, planeH = syntaxPlaneSize(fb, seq, plane)
+	} else {
+		planeW, planeH = fb.codedPlaneSize(plane)
+	}
 
 	txtpOut := interYTxtp
 	txtpSet := false
@@ -2654,7 +2659,7 @@ func decodeIntraPlane(
 ) {
 	// Select plane buffer.
 	var planeBuf []byte
-	var stride, planeW, planeH, visibleW, visibleH int
+	var stride, planeW, planeH int
 	switch plane {
 	case 0:
 		planeBuf = fb.Y
@@ -2672,24 +2677,13 @@ func decodeIntraPlane(
 		planeW = fb.ChromaW
 		planeH = fb.ChromaH
 	}
-	visibleW, visibleH = planeW, planeH
-	planeW, planeH = fb.codedPlaneSize(plane)
-	if fb.Width&7 == 0 {
-		planeW = visibleW
-	}
-	if fb.Height&7 == 0 {
-		planeH = visibleH
-	}
+	planeW, planeH = syntaxPlaneSize(fb, seq, plane)
 
 	if bx >= planeW || by >= planeH || len(planeBuf) == 0 {
 		return
 	}
-	if bx+bw > planeW {
-		bw = planeW - bx
-	}
-	if by+bh > planeH {
-		bh = planeH - by
-	}
+	syntaxBW, syntaxBH := minInt(bw, planeW-bx), minInt(bh, planeH-by)
+	storageW, storageH := stride, len(planeBuf)/stride
 
 	// Transform dimensions. The prediction still covers the complete transform
 	// block when the coded block is clipped by the visible frame boundary.
@@ -2719,16 +2713,10 @@ func decodeIntraPlane(
 	enableEdgeFilter := seq != nil && seq.IntraEdgeFilter
 	planeEdges := planeIntraEdgeFlags(intraEdges, plane, seq)
 
-	for tby := 0; tby < bh; tby += th {
-		for tbx := 0; tbx < bw; tbx += tw {
-			writeW, writeH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, planeW, planeH)
-			edgeW, edgeH := visibleW, visibleH
-			if bx+tbx+tw > visibleW {
-				edgeW = planeW
-			}
-			if by+tby+th > visibleH {
-				edgeH = planeH
-			}
+	for tby := 0; tby < syntaxBH; tby += th {
+		for tbx := 0; tbx < syntaxBW; tbx += tw {
+			writeW, writeH := visiblePlaneBlock(bx+tbx, by+tby, tw, th, storageW, storageH)
+			edgeW, edgeH := planeW, planeH
 			var dst []byte
 			if writeW > 0 && writeH > 0 {
 				dstOff := (by+tby)*stride + (bx + tbx)
@@ -5321,20 +5309,28 @@ func makeInterPredictionPlane(src []byte, srcStride, srcW, srcH, bx, by, bw, bh 
 	return out
 }
 
-func blendOBMCH(dst []byte, stride, dstX, dstY int, pred []byte, w, fullH int) {
-	blendH := (fullH * 3) >> 2
+func blendOBMCH(dst []byte, stride, dstW, dstH, dstX, dstY int, pred []byte, w, fullH int) {
+	writeW := minInt(w, dstW-dstX)
+	blendH := minInt((fullH*3)>>2, dstH-dstY)
+	if dstX < 0 || dstY < 0 || writeW <= 0 || blendH <= 0 {
+		return
+	}
 	for y := 0; y < blendH; y++ {
 		mask := int(obmcMasks[fullH+y])
-		for x := 0; x < w; x++ {
+		for x := 0; x < writeW; x++ {
 			di := (dstY+y)*stride + dstX + x
 			dst[di] = byte((int(dst[di])*(64-mask) + int(pred[y*w+x])*mask + 32) >> 6)
 		}
 	}
 }
 
-func blendOBMCV(dst []byte, stride, dstX, dstY int, pred []byte, fullW, h int) {
-	blendW := (fullW * 3) >> 2
-	for y := 0; y < h; y++ {
+func blendOBMCV(dst []byte, stride, dstW, dstH, dstX, dstY int, pred []byte, fullW, h int) {
+	blendW := minInt((fullW*3)>>2, dstW-dstX)
+	writeH := minInt(h, dstH-dstY)
+	if dstX < 0 || dstY < 0 || blendW <= 0 || writeH <= 0 {
+		return
+	}
+	for y := 0; y < writeH; y++ {
 		for x := 0; x < blendW; x++ {
 			mask := int(obmcMasks[fullW+x])
 			di := (dstY+y)*stride + dstX + x
@@ -5347,6 +5343,7 @@ func applyOBMCLuma(fb *FrameBuf, fs *FrameState, bx, by, bw, bh int) {
 	if fb == nil || fs == nil || fs.MVFrame == nil || bw <= 0 || bh <= 0 {
 		return
 	}
+	dstW, dstH := syntaxPlaneSize(fb, nil, 0)
 	bw4, bh4 := (bw+3)>>2, (bh+3)>>2
 	if by > fs.TileY0 {
 		for i, x4 := 0, 0; x4 < bw4 && i < minInt(int(BlockDimensions[bsizeFromDim(bw, bh)][2]), 4); {
@@ -5361,7 +5358,7 @@ func applyOBMCLuma(fb *FrameBuf, fs *FrameState, bx, by, bw, bh int) {
 			ref := fb.Refs[blk.RefSlot]
 			pred := makeInterPrediction(ref.Y, ref.StrideY, ref.Width, ref.Height, bx+x4*4, by, ow4*4, predH,
 				refmvs.MV{Y: blk.MV[0], X: blk.MV[1]}, header.FilterMode(blk.Filter), header.FilterMode(blk.FilterV))
-			blendOBMCH(fb.Y, fb.StrideY, bx+x4*4, by, pred, ow4*4, oh4*4)
+			blendOBMCH(fb.Y, fb.StrideY, dstW, dstH, bx+x4*4, by, pred, ow4*4, oh4*4)
 			i++
 			x4 += step4
 		}
@@ -5378,7 +5375,7 @@ func applyOBMCLuma(fb *FrameBuf, fs *FrameState, bx, by, bw, bh int) {
 			ref := fb.Refs[blk.RefSlot]
 			pred := makeInterPrediction(ref.Y, ref.StrideY, ref.Width, ref.Height, bx, by+y4*4, ow4*4, oh4*4,
 				refmvs.MV{Y: blk.MV[0], X: blk.MV[1]}, header.FilterMode(blk.Filter), header.FilterMode(blk.FilterV))
-			blendOBMCV(fb.Y, fb.StrideY, bx, by+y4*4, pred, ow4*4, oh4*4)
+			blendOBMCV(fb.Y, fb.StrideY, dstW, dstH, bx, by+y4*4, pred, ow4*4, oh4*4)
 			i++
 			y4 += step4
 		}
@@ -5390,6 +5387,7 @@ func applyOBMCChroma(fb *FrameBuf, fs *FrameState, seq *header.SequenceHeader, b
 		return
 	}
 	ssH, ssV := int(seq.SsHor), int(seq.SsVer)
+	dstW, dstH := syntaxPlaneSize(fb, seq, 1)
 	bw4, bh4 := (bw+3)>>2, (bh+3)>>2
 	cx, cy := (bx >> ssH), (by >> ssV)
 	predictBlendH := func(plane []byte, refPlane []byte, ref *PlaneBuf, blk Av1Block, x4, ow4, oh4 int) {
@@ -5404,7 +5402,7 @@ func applyOBMCChroma(fb *FrameBuf, fs *FrameState, seq *header.SequenceHeader, b
 		pred := makeInterPredictionPlane(refPlane, ref.StrideUV, ref.ChromaW, ref.ChromaH,
 			(bx+x4*4)>>ssH, cy, fullW, predH, refmvs.MV{Y: blk.MV[0], X: blk.MV[1]},
 			header.FilterMode(blk.Filter), header.FilterMode(blk.FilterV), ssH, ssV)
-		blendOBMCH(plane, fb.StrideUV, (bx+x4*4)>>ssH, cy, pred, fullW, fullH)
+		blendOBMCH(plane, fb.StrideUV, dstW, dstH, (bx+x4*4)>>ssH, cy, pred, fullW, fullH)
 	}
 	predictBlendV := func(plane []byte, refPlane []byte, ref *PlaneBuf, blk Av1Block, y4, ow4, oh4 int) {
 		fullW := (ow4 * 4) >> ssH
@@ -5415,7 +5413,7 @@ func applyOBMCChroma(fb *FrameBuf, fs *FrameState, seq *header.SequenceHeader, b
 		pred := makeInterPredictionPlane(refPlane, ref.StrideUV, ref.ChromaW, ref.ChromaH,
 			cx, (by+y4*4)>>ssV, fullW, fullH, refmvs.MV{Y: blk.MV[0], X: blk.MV[1]},
 			header.FilterMode(blk.Filter), header.FilterMode(blk.FilterV), ssH, ssV)
-		blendOBMCV(plane, fb.StrideUV, cx, (by+y4*4)>>ssV, pred, fullW, fullH)
+		blendOBMCV(plane, fb.StrideUV, dstW, dstH, cx, (by+y4*4)>>ssV, pred, fullW, fullH)
 	}
 	if by > fs.TileY0 && bw4*(4>>ssH)+bh4*(4>>ssV) >= 16 {
 		for i, x4 := 0, 0; x4 < bw4 && i < minInt(int(BlockDimensions[bsizeFromDim(bw, bh)][2]), 4); {
@@ -5607,7 +5605,8 @@ func applyInterIntraState(fs *FrameState, fb *FrameBuf, seq *header.SequenceHead
 	if opt.wedge {
 		mask = predinter.WedgeMask(bw, bh, opt.wedgeIdx)
 	}
-	applyInterIntraPlane(fs, 0, fb.Y, fb.StrideY, fb.Width, fb.Height, bx, by, bw, bh, opt.mode, mask)
+	gridW, gridH := syntaxPlaneSize(fb, seq, 0)
+	applyInterIntraPlane(fs, 0, fb.Y, fb.StrideY, gridW, gridH, bx, by, bw, bh, opt.mode, mask)
 	if seq == nil || len(fb.U) == 0 || len(fb.V) == 0 {
 		return
 	}
@@ -5618,10 +5617,9 @@ func applyInterIntraState(fs *FrameState, fb *FrameBuf, seq *header.SequenceHead
 	if opt.wedge {
 		cmask, _, _ = predinter.SubsampleMask(mask, bw, bh, ssH, ssV)
 	}
-	applyInterIntraPlane(fs, 1, fb.U, fb.StrideUV, (fb.Width+(1<<ssH)-1)>>ssH,
-		(fb.Height+(1<<ssV)-1)>>ssV, cx, cy, cw, ch, opt.mode, cmask)
-	applyInterIntraPlane(fs, 2, fb.V, fb.StrideUV, (fb.Width+(1<<ssH)-1)>>ssH,
-		(fb.Height+(1<<ssV)-1)>>ssV, cx, cy, cw, ch, opt.mode, cmask)
+	gridCW, gridCH := (gridW+(1<<ssH)-1)>>ssH, (gridH+(1<<ssV)-1)>>ssV
+	applyInterIntraPlane(fs, 1, fb.U, fb.StrideUV, gridCW, gridCH, cx, cy, cw, ch, opt.mode, cmask)
+	applyInterIntraPlane(fs, 2, fb.V, fb.StrideUV, gridCW, gridCH, cx, cy, cw, ch, opt.mode, cmask)
 }
 
 func applyGlobalCompoundState(fb *FrameBuf, fhdr *header.FrameHeader, seq *header.SequenceHeader,
@@ -6272,23 +6270,18 @@ func applyGlobalWarpState(fb *FrameBuf, fhdr *header.FrameHeader, seq *header.Se
 func applyWarpState(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh int,
 	hasChroma bool, st interState, wmp header.WarpedMotionParams) bool {
 	codedW, codedH := fb.codedLumaSize()
-	bw = minInt(bw, codedW-bx)
-	bh = minInt(bh, codedH-by)
-	if bw <= 0 || bh <= 0 {
+	if !putWarpAffineClipped(fb.Y, fb.StrideY, codedW, codedH,
+		st.ref.Y, st.ref.StrideY, st.ref.Width, st.ref.Height,
+		bx, by, bw, bh, 0, 0, wmp) {
 		return false
 	}
-	predinter.PutWarpAffine(fb.Y[by*fb.StrideY+bx:], fb.StrideY,
-		st.ref.Y, st.ref.StrideY, st.ref.Width, st.ref.Height,
-		bx, by, bw, bh, 0, 0, wmp.Matrix, wmp.ABCD())
 	if !hasChroma || fb.Monochrome || st.ref.Monochrome || len(fb.U) == 0 || len(st.ref.U) == 0 {
 		return true
 	}
 	ssHor, ssVer := int(seq.SsHor), int(seq.SsVer)
 	cbx, cby, cbw, cbh := chromaRect(seq, bx, by, bw, bh)
 	codedCW, codedCH := fb.codedChromaSize()
-	cbw = minInt(cbw, codedCW-cbx)
-	cbh = minInt(cbh, codedCH-cby)
-	if cbw <= 0 || cbh <= 0 {
+	if cbx < 0 || cby < 0 || cbx >= codedCW || cby >= codedCH || cbw <= 0 || cbh <= 0 {
 		return true
 	}
 	if minInt((cbw+3)>>2, (cbh+3)>>2) <= 1 {
@@ -6300,12 +6293,39 @@ func applyWarpState(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh int
 			cbx, cby, cbw, cbh, st.mv, st.filterMode, st.filterModeV, ssHor, ssVer)
 		return true
 	}
-	predinter.PutWarpAffine(fb.U[cby*fb.StrideUV+cbx:], fb.StrideUV,
+	putWarpAffineClipped(fb.U, fb.StrideUV, codedCW, codedCH,
 		st.ref.U, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH,
-		cbx, cby, cbw, cbh, ssHor, ssVer, wmp.Matrix, wmp.ABCD())
-	predinter.PutWarpAffine(fb.V[cby*fb.StrideUV+cbx:], fb.StrideUV,
+		cbx, cby, cbw, cbh, ssHor, ssVer, wmp)
+	putWarpAffineClipped(fb.V, fb.StrideUV, codedCW, codedCH,
 		st.ref.V, st.ref.StrideUV, st.ref.ChromaW, st.ref.ChromaH,
-		cbx, cby, cbw, cbh, ssHor, ssVer, wmp.Matrix, wmp.ABCD())
+		cbx, cby, cbw, cbh, ssHor, ssVer, wmp)
+	return true
+}
+
+func putWarpAffineClipped(dst []byte, dstStride, dstW, dstH int,
+	src []byte, srcStride, srcW, srcH int,
+	bx, by, bw, bh, ssHor, ssVer int, wmp header.WarpedMotionParams,
+) bool {
+	if len(dst) == 0 || len(src) == 0 || bw <= 0 || bh <= 0 ||
+		bx < 0 || by < 0 || bx >= dstW || by >= dstH {
+		return false
+	}
+	writeW, writeH := minInt(bw, dstW-bx), minInt(bh, dstH-by)
+	if writeW <= 0 || writeH <= 0 {
+		return false
+	}
+	if writeW == bw && writeH == bh {
+		predinter.PutWarpAffine(dst[by*dstStride+bx:], dstStride,
+			src, srcStride, srcW, srcH, bx, by, bw, bh,
+			ssHor, ssVer, wmp.Matrix, wmp.ABCD())
+		return true
+	}
+	pred := make([]byte, bw*bh)
+	predinter.PutWarpAffine(pred, bw, src, srcStride, srcW, srcH,
+		bx, by, bw, bh, ssHor, ssVer, wmp.Matrix, wmp.ABCD())
+	for y := 0; y < writeH; y++ {
+		copy(dst[(by+y)*dstStride+bx:(by+y)*dstStride+bx+writeW], pred[y*bw:y*bw+writeW])
+	}
 	return true
 }
 
@@ -6478,13 +6498,7 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 	if len(dst) == 0 || len(src) == 0 || bw <= 0 || bh <= 0 {
 		return
 	}
-	if bx+bw > dstW {
-		bw = dstW - bx
-	}
-	if by+bh > dstH {
-		bh = dstH - by
-	}
-	if bw <= 0 || bh <= 0 {
+	if bx < 0 || by < 0 || bx >= dstW || by >= dstH {
 		return
 	}
 	planeMV := refmvs.MV{
@@ -6513,13 +6527,29 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 			pad[y*padStride+x] = src[srcY*srcStride+srcX]
 		}
 	}
-
 	dstOff := by*dstStride + bx
 	if dstOff < 0 || dstOff >= len(dst) {
 		return
 	}
 	filt := interFilter2D(modeH, modeV)
 	srcBase := 3*padStride + 3
+	writeW := minInt(bw, dstW-bx)
+	writeH := minInt(bh, dstH-by)
+	if writeW <= 0 || writeH <= 0 {
+		return
+	}
+	if writeW != bw || writeH != bh {
+		pred := make([]byte, bw*bh)
+		if filt == predinter.Filter2DBilinear {
+			predinter.PutBilin(pred, bw, pad, srcBase, padStride, bw, bh, mx, my)
+		} else {
+			predinter.Put8Tap(pred, bw, pad, srcBase, padStride, bw, bh, mx, my, filt)
+		}
+		for y := 0; y < writeH; y++ {
+			copy(dst[dstOff+y*dstStride:dstOff+y*dstStride+writeW], pred[y*bw:y*bw+writeW])
+		}
+		return
+	}
 	if filt == predinter.Filter2DBilinear {
 		predinter.PutBilin(dst[dstOff:], dstStride, pad, srcBase, padStride, bw, bh, mx, my)
 		return
