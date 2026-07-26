@@ -68,8 +68,8 @@ type Encoder interface {
 	Close() error
 }
 
-// NewEncoder constructs an Encoder. The current M11 baseline emits
-// single-tile, intra-only key frames.
+// NewEncoder constructs an Encoder. The current baseline emits single-tile
+// intra key frames and reuses reference slots for identical consecutive frames.
 func NewEncoder(opts EncoderOptions) (Encoder, error) {
 	impl, err := encoder.NewImpl(encoder.Options{
 		Width:        opts.Width,

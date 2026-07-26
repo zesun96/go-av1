@@ -25,7 +25,7 @@ func main() {
 	crf := flag.Int("crf", 30, "constant rate factor (0-63)")
 	flag.Parse()
 
-	fmt.Fprintf(os.Stderr, "go-av1enc %s (M11 conforming intra baseline)\n", av1.Version)
+	fmt.Fprintf(os.Stderr, "go-av1enc %s (M12 reference-reuse baseline)\n", av1.Version)
 
 	if *in == "" || *out == "" {
 		fmt.Fprintln(os.Stderr, "usage: go-av1enc -i <input.y4m> -o <output.ivf> [--crf 30]")

@@ -315,6 +315,30 @@ func WriteTemporalDelimiter() []byte {
 	return append(hdr, 0x00)
 }
 
+// WriteShowExistingFrameHeader emits a standalone frame-header payload that
+// displays an already-decoded reference slot without tile data.
+func WriteShowExistingFrameHeader(refIdx int) []byte {
+	if refIdx < 0 || refIdx > 7 {
+		panic("obuwriter: invalid show-existing reference index")
+	}
+	bw := bitwriter.New(2)
+	bw.PutBit(1)                  // show_existing_frame
+	bw.PutBits(uint32(refIdx), 3) // frame_to_show_map_idx
+	bw.TrailingBits()
+	return bw.Bytes()
+}
+
+// BuildShowExistingTemporalUnit displays one of the eight reference slots.
+func BuildShowExistingTemporalUnit(refIdx int) []byte {
+	out := append([]byte(nil), WriteTemporalDelimiter()...)
+	payload := WriteShowExistingFrameHeader(refIdx)
+	hdr := WriteOBUHeader(OBUFrameHeader, true, false)
+	out = append(out, hdr...)
+	out = appendLeb128(out, uint32(len(payload)))
+	out = append(out, payload...)
+	return out
+}
+
 // BuildTemporalUnit assembles a complete AV1 temporal unit (one access unit)
 // consisting of: TD + Sequence Header (if key frame) + Frame OBU.
 func BuildTemporalUnit(p *SeqParams, qindex int, tileData []byte, isKeyFrame bool) []byte {

@@ -63,6 +63,7 @@ func TestEndToEnd_EncodeGradient(t *testing.T) {
 	enc.Flush()
 	packetCount := 0
 	totalBytes := 0
+	firstPacketBytes := 0
 	for {
 		pkt, err := enc.ReceivePacket()
 		if err != nil {
@@ -74,8 +75,14 @@ func TestEndToEnd_EncodeGradient(t *testing.T) {
 		if len(pkt.Data) == 0 {
 			t.Fatalf("packet %d has zero bytes", packetCount)
 		}
-		if !pkt.Keyframe {
-			t.Fatalf("packet %d is not keyframe (M10 should be all keyframes)", packetCount)
+		if pkt.Keyframe != (packetCount == 0) {
+			t.Fatalf("packet %d keyframe=%t, want %t", packetCount, pkt.Keyframe, packetCount == 0)
+		}
+		if packetCount == 0 {
+			firstPacketBytes = len(pkt.Data)
+		} else if len(pkt.Data) >= firstPacketBytes {
+			t.Fatalf("show-existing packet %d has %d bytes, key frame has %d",
+				packetCount, len(pkt.Data), firstPacketBytes)
 		}
 		totalBytes += len(pkt.Data)
 		packetCount++
@@ -85,6 +92,70 @@ func TestEndToEnd_EncodeGradient(t *testing.T) {
 		t.Fatalf("expected 3 packets, got %d", packetCount)
 	}
 	t.Logf("encoded 3 frames: %d total bytes (avg %.1f bytes/frame)", totalBytes, float64(totalBytes)/3.0)
+}
+
+func TestEncodeDecodeRepeatedFrameReference(t *testing.T) {
+	const width, height = 64, 64
+	y := make([]byte, width*height)
+	for row := 0; row < height; row++ {
+		for col := 0; col < width; col++ {
+			y[row*width+col] = byte(row*3 + col*5)
+		}
+	}
+	uv := bytes.Repeat([]byte{128}, width*height/4)
+	enc, err := encoder.NewImpl(encoder.Options{
+		Width: width, Height: height, BitDepth: 8, CRF: 30,
+	})
+	if err != nil {
+		t.Fatalf("NewImpl: %v", err)
+	}
+	pic := &encoder.RawPicture{Y: y, U: uv, V: uv, Width: width, Height: height}
+	if err := enc.SendPicture(pic); err != nil {
+		t.Fatalf("first SendPicture: %v", err)
+	}
+	if err := enc.SendPicture(pic); err != nil {
+		t.Fatalf("second SendPicture: %v", err)
+	}
+	key, err := enc.ReceivePacket()
+	if err != nil {
+		t.Fatalf("key ReceivePacket: %v", err)
+	}
+	repeat, err := enc.ReceivePacket()
+	if err != nil {
+		t.Fatalf("repeat ReceivePacket: %v", err)
+	}
+	if !key.Keyframe || repeat.Keyframe {
+		t.Fatalf("key flags first=%t repeat=%t", key.Keyframe, repeat.Keyframe)
+	}
+	if len(repeat.Data) >= len(key.Data) {
+		t.Fatalf("repeat packet=%d bytes, key packet=%d", len(repeat.Data), len(key.Data))
+	}
+
+	dec, err := av1.NewDecoder(av1.DecoderOptions{})
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	defer dec.Close()
+	if err := dec.SendData(key.Data); err != nil {
+		t.Fatalf("decode key: %v", err)
+	}
+	first, err := dec.GetPicture()
+	if err != nil {
+		t.Fatalf("GetPicture key: %v", err)
+	}
+	firstY := append([]byte(nil), first.Y...)
+	first.Release()
+	if err := dec.SendData(repeat.Data); err != nil {
+		t.Fatalf("decode show-existing: %v", err)
+	}
+	second, err := dec.GetPicture()
+	if err != nil {
+		t.Fatalf("GetPicture show-existing: %v", err)
+	}
+	defer second.Release()
+	if !bytes.Equal(second.Y, firstY) {
+		t.Fatal("show-existing output differs from referenced key frame")
+	}
 }
 
 // TestEncodeDecodeRoundTripSizes guards the M11 exit criterion: packets from

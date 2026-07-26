@@ -18,6 +18,13 @@ type FrameEncoder struct {
 	BitDepth int
 }
 
+// EncodeShowExisting displays reference slot zero. Every key frame emitted by
+// this baseline refreshes all eight slots, so slot zero is always the latest
+// independently coded picture.
+func (fe *FrameEncoder) EncodeShowExisting() []byte {
+	return obuwriter.BuildShowExistingTemporalUnit(0)
+}
+
 // EncodeFrame returns one complete AV1 temporal unit.
 func (fe *FrameEncoder) EncodeFrame(yPlane, cbPlane, crPlane []byte, frameNum int) []byte {
 	ec := bitwriter.NewMSACEncoder(max(64, fe.Width*fe.Height/64))

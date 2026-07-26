@@ -1,6 +1,7 @@
 package encoder
 
 import (
+	"bytes"
 	"errors"
 
 	"github.com/zesun96/go-av1/internal/encoder/core"
@@ -43,6 +44,9 @@ type Impl struct {
 	frameNum int
 	flushing bool
 	packets  []*Packet
+	lastY    []byte
+	lastU    []byte
+	lastV    []byte
 }
 
 // NewImpl creates a new encoder implementation.
@@ -100,13 +104,24 @@ func (e *Impl) SendPicture(p *RawPicture) error {
 		return errors.New("encoder: luma plane is too small")
 	}
 
-	// Encode the frame
-	data := e.fe.EncodeFrame(p.Y, p.U, p.V, e.frameNum)
+	repeated := e.frameNum > 0 &&
+		bytes.Equal(p.Y, e.lastY) &&
+		bytes.Equal(p.U, e.lastU) &&
+		bytes.Equal(p.V, e.lastV)
+	var data []byte
+	if repeated {
+		data = e.fe.EncodeShowExisting()
+	} else {
+		data = e.fe.EncodeFrame(p.Y, p.U, p.V, e.frameNum)
+		e.lastY = append(e.lastY[:0], p.Y...)
+		e.lastU = append(e.lastU[:0], p.U...)
+		e.lastV = append(e.lastV[:0], p.V...)
+	}
 
 	pkt := &Packet{
 		Data:     data,
 		PTS:      int64(e.frameNum),
-		Keyframe: true, // M11 baseline: all frames are independent key frames
+		Keyframe: !repeated,
 	}
 	e.packets = append(e.packets, pkt)
 	e.frameNum++
@@ -132,5 +147,8 @@ func (e *Impl) Flush() error {
 // Close releases resources.
 func (e *Impl) Close() error {
 	e.packets = nil
+	e.lastY = nil
+	e.lastU = nil
+	e.lastV = nil
 	return nil
 }
