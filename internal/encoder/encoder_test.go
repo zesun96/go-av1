@@ -348,6 +348,64 @@ func TestEncodeDecodeTranslatedInterFrame(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeCompoundInterFrame(t *testing.T) {
+	const width, height = 64, 64
+	uv := bytes.Repeat([]byte{128}, width*height/4)
+	frames := [][]byte{
+		bytes.Repeat([]byte{32}, width*height),
+		bytes.Repeat([]byte{224}, width*height),
+		bytes.Repeat([]byte{128}, width*height),
+	}
+	enc, err := encoder.NewImpl(encoder.Options{
+		Width: width, Height: height, BitDepth: 8, CRF: 5,
+	})
+	if err != nil {
+		t.Fatalf("NewImpl: %v", err)
+	}
+	for _, y := range frames {
+		if err := enc.SendPicture(&encoder.RawPicture{
+			Y: y, U: uv, V: uv, Width: width, Height: height,
+		}); err != nil {
+			t.Fatalf("SendPicture: %v", err)
+		}
+	}
+
+	dec, err := av1.NewDecoder(av1.DecoderOptions{})
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	defer dec.Close()
+	var packetSizes [3]int
+	for frame := range frames {
+		pkt, err := enc.ReceivePacket()
+		if err != nil {
+			t.Fatalf("ReceivePacket %d: %v", frame, err)
+		}
+		packetSizes[frame] = len(pkt.Data)
+		if err := dec.SendData(pkt.Data); err != nil {
+			t.Fatalf("SendData %d: %v", frame, err)
+		}
+		pic, err := dec.GetPicture()
+		if err != nil {
+			t.Fatalf("GetPicture %d: %v", frame, err)
+		}
+		var sum uint64
+		for row := 0; row < height; row++ {
+			for _, sample := range pic.Y[row*pic.StrideY : row*pic.StrideY+width] {
+				sum += uint64(sample)
+			}
+		}
+		mean := float64(sum) / float64(width*height)
+		pic.Release()
+		if diff := mean - float64(frames[frame][0]); diff < -4 || diff > 4 {
+			t.Fatalf("frame %d mean %.2f, want near %d", frame, mean, frames[frame][0])
+		}
+	}
+	if packetSizes[2] >= packetSizes[1] {
+		t.Fatalf("compound packet=%d bytes, single-reference packet=%d", packetSizes[2], packetSizes[1])
+	}
+}
+
 // TestEncodeDecodeRoundTripSizes guards the M11 exit criterion: packets from
 // the encoder must be consumable by the strict decoder, including partial
 // superblocks at the right and bottom frame edges.

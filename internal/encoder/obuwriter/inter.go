@@ -2,19 +2,36 @@ package obuwriter
 
 import "github.com/zesun96/go-av1/internal/encoder/bitwriter"
 
+// InterFrameParams controls reference mapping and refresh for an inter frame.
+type InterFrameParams struct {
+	RefIdx         [7]uint8
+	RefreshFlags   uint8
+	EnableCompound bool
+}
+
+func defaultInterFrameParams() InterFrameParams {
+	return InterFrameParams{RefreshFlags: 0xff}
+}
+
 // WriteInterFrameOBU serializes an INTER_FRAME header followed by one tile.
 // The frame references slot zero for every AV1 reference type and refreshes all
 // slots after decoding. PrimaryRefNone keeps the tile CDF initialization
 // independent of decoder-side reference context.
 func WriteInterFrameOBU(p *SeqParams, qindex int, tileData []byte) []byte {
+	return WriteInterFrameOBUWithParams(p, qindex, tileData, defaultInterFrameParams())
+}
+
+// WriteInterFrameOBUWithParams serializes an INTER_FRAME with explicit
+// reference-slot mappings.
+func WriteInterFrameOBUWithParams(p *SeqParams, qindex int, tileData []byte, fp InterFrameParams) []byte {
 	bw := bitwriter.New(256)
-	writeInterUncompressedHeader(bw, p, qindex)
+	writeInterUncompressedHeader(bw, p, qindex, fp)
 	bw.ByteAlign()
 	bw.DirectWrite(tileData)
 	return bw.Bytes()
 }
 
-func writeInterUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex int) {
+func writeInterUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex int, fp InterFrameParams) {
 	bw.PutBit(0)     // show_existing_frame
 	bw.PutBits(1, 2) // frame_type = INTER_FRAME
 	bw.PutBit(1)     // show_frame
@@ -23,9 +40,9 @@ func writeInterUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex 
 	bw.PutBit(0)     // allow_screen_content_tools
 	bw.PutBit(0)     // frame_size_override_flag
 	bw.PutBits(7, 3) // primary_ref_frame = PRIMARY_REF_NONE
-	bw.PutBits(0xff, 8)
-	for range 7 {
-		bw.PutBits(0, 3) // ref_frame_idx[i] = slot zero
+	bw.PutBits(uint32(fp.RefreshFlags), 8)
+	for _, slot := range fp.RefIdx {
+		bw.PutBits(uint32(slot&7), 3)
 	}
 	bw.PutBit(0) // render_and_frame_size_different
 	bw.PutBit(1) // allow_high_precision_mv
@@ -50,7 +67,11 @@ func writeInterUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex 
 	bw.PutBit(0)     // loop_filter_delta_enabled
 
 	bw.PutBit(0) // tx_mode = TX_MODE_LARGEST
-	bw.PutBit(0) // reference_select = single reference only
+	if fp.EnableCompound {
+		bw.PutBit(1) // reference_select = selectable single/compound
+	} else {
+		bw.PutBit(0)
+	}
 	bw.PutBit(1) // reduced_tx_set
 	for range 7 {
 		bw.PutBit(0) // identity global motion for each reference type
@@ -82,8 +103,14 @@ func writeSingleTileInfo(bw *bitwriter.BitWriter, p *SeqParams) {
 // BuildInterTemporalUnit assembles a temporal delimiter and an INTER_FRAME OBU.
 // The sequence header must already have been emitted by a preceding key frame.
 func BuildInterTemporalUnit(p *SeqParams, qindex int, tileData []byte) []byte {
+	return BuildInterTemporalUnitWithParams(p, qindex, tileData, defaultInterFrameParams())
+}
+
+// BuildInterTemporalUnitWithParams assembles an inter temporal unit with
+// explicit reference mappings.
+func BuildInterTemporalUnitWithParams(p *SeqParams, qindex int, tileData []byte, fp InterFrameParams) []byte {
 	out := append([]byte(nil), WriteTemporalDelimiter()...)
-	payload := WriteInterFrameOBU(p, qindex, tileData)
+	payload := WriteInterFrameOBUWithParams(p, qindex, tileData, fp)
 	hdr := WriteOBUHeader(OBUFrame, true, false)
 	out = append(out, hdr...)
 	out = appendLeb128(out, uint32(len(payload)))

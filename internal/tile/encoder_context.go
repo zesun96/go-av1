@@ -23,6 +23,16 @@ type EncoderSingleRefContexts struct {
 	BaseMVY        int
 }
 
+// EncoderCompoundContexts contains the adaptive contexts for a unidirectional
+// LAST_FRAME + LAST2_FRAME compound block.
+type EncoderCompoundContexts struct {
+	Flag  int
+	Dir   int
+	Ref   int
+	UniP1 int
+	Mode  int
+}
+
 // EnableEncoderMVContexts initializes the reference-MV grids used by inter
 // syntax context derivation.
 func EnableEncoderMVContexts(fs *FrameState, width, height int) {
@@ -34,11 +44,19 @@ func EnableEncoderMVContexts(fs *FrameState, width, height int) {
 // SingleRefEncoderContexts derives contexts for a block that selects reference
 // slot zero as LAST_FRAME. It uses the already committed blocks in fs.
 func SingleRefEncoderContexts(fs *FrameState, bx, by, bw, bh int) EncoderSingleRefContexts {
+	return SingleRefEncoderContextsForSlot(fs, [7]uint8{}, 0, bx, by, bw, bh)
+}
+
+// SingleRefEncoderContextsForSlot derives LAST_FRAME contexts for an explicit
+// frame-header reference map and physical reference slot.
+func SingleRefEncoderContextsForSlot(fs *FrameState, refIdx [7]uint8, refSlot,
+	bx, by, bw, bh int,
+) EncoderSingleRefContexts {
 	fhdr := &header.FrameHeader{}
 	for i := range fhdr.Refidx {
-		fhdr.Refidx[i] = 0
+		fhdr.Refidx[i] = int8(refIdx[i] & 7)
 	}
-	newMV, globalMV, refMV := singleRefModeContexts(fs, fhdr, nil, 0, 1, bx, by, bw, bh)
+	newMV, globalMV, refMV := singleRefModeContexts(fs, fhdr, nil, refSlot, 1, bx, by, bw, bh)
 	out := EncoderSingleRefContexts{
 		Intra:    intraCtx(fs, bx, by),
 		Ref:      refCtx(fs, fhdr, bx, by),
@@ -48,7 +66,7 @@ func SingleRefEncoderContexts(fs *FrameState, bx, by, bw, bh int) EncoderSingleR
 		GlobalMV: globalMV,
 		RefMV:    refMV,
 	}
-	count, stack := singleRefInterCandidates(fs, fhdr, nil, 0, 1, bx, by, bw, bh)
+	count, stack := singleRefInterCandidates(fs, fhdr, nil, refSlot, 1, bx, by, bw, bh)
 	out.CandidateCount = count
 	if out.CandidateCount > 0 {
 		out.BaseMVY = int(stack[0].mv.Y)
@@ -58,6 +76,23 @@ func SingleRefEncoderContexts(fs *FrameState, bx, by, bw, bh int) EncoderSingleR
 		out.DRL0 = refmvs.DRLContext(candidateWeights(stack, out.CandidateCount), 0)
 	}
 	return out
+}
+
+// CompoundEncoderContexts derives contexts for LAST + LAST2 average compound.
+func CompoundEncoderContexts(fs *FrameState, refIdx [7]uint8,
+	bx, by, bw, bh int,
+) EncoderCompoundContexts {
+	fhdr := &header.FrameHeader{SwitchableCompRefs: 1}
+	for i := range fhdr.Refidx {
+		fhdr.Refidx[i] = int8(refIdx[i] & 7)
+	}
+	return EncoderCompoundContexts{
+		Flag:  compoundFlagContext(fs, bx, by),
+		Dir:   compoundDirContext(fs, fhdr, bx, by),
+		Ref:   refCtx(fs, fhdr, bx, by),
+		UniP1: uniP1Context(fs, fhdr, bx, by),
+		Mode:  compoundInterModeContext(fs, fhdr, 1, 2, bx, by, bw, bh),
+	}
 }
 
 // EncoderBlockGeometry returns the block level and block-size enum used by the
@@ -74,4 +109,25 @@ func EncoderInterPrediction(ref []byte, stride, width, height, bx, by, bw, bh,
 	return makeInterPredictionPlane(ref, stride, width, height, bx, by, bw, bh,
 		refmvs.MV{X: int16(mvX), Y: int16(mvY)},
 		header.FilterMode8TapRegular, header.FilterMode8TapRegular, ssHor, ssVer)
+}
+
+// EncoderCompoundPrediction builds the decoder-identical equal-weight average
+// of two zero-motion regular-filter reference predictions.
+func EncoderCompoundPrediction(ref0 []byte, stride0, width0, height0 int,
+	ref1 []byte, stride1, width1, height1 int,
+	bx, by, bw, bh, ssHor, ssVer int,
+) []byte {
+	out := make([]byte, bw*bh)
+	for y := 0; y < bh; y++ {
+		y0 := minInt(maxInt(by+y, 0), height0-1)
+		y1 := minInt(maxInt(by+y, 0), height1-1)
+		for x := 0; x < bw; x++ {
+			x0 := minInt(maxInt(bx+x, 0), width0-1)
+			x1 := minInt(maxInt(bx+x, 0), width1-1)
+			a := int(ref0[y0*stride0+x0])
+			b := int(ref1[y1*stride1+x1])
+			out[y*bw+x] = byte((a + b + 1) >> 1)
+		}
+	}
+	return out
 }

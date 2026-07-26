@@ -6,6 +6,7 @@ import (
 	"github.com/zesun96/go-av1/internal/encoder/entropy"
 	"github.com/zesun96/go-av1/internal/encoder/me"
 	"github.com/zesun96/go-av1/internal/encoder/obuwriter"
+	"github.com/zesun96/go-av1/internal/encoder/reference"
 	encodertx "github.com/zesun96/go-av1/internal/encoder/tx"
 	intrapred "github.com/zesun96/go-av1/internal/predict/intra"
 	"github.com/zesun96/go-av1/internal/tile"
@@ -19,13 +20,20 @@ type FrameEncoder struct {
 	QIndex   int
 	BitDepth int
 	ref      [3][]byte
+	refs     [8][3][]byte
+	refMgr   reference.Manager
+	refIdx   [7]uint8
+	refSlot  int
+	ref2     [3][]byte
+	refSlot2 int
+	compound bool
 }
 
 // EncodeShowExisting displays reference slot zero. Every key frame emitted by
 // this baseline refreshes all eight slots, so slot zero is always the latest
 // independently coded picture.
 func (fe *FrameEncoder) EncodeShowExisting() []byte {
-	return obuwriter.BuildShowExistingTemporalUnit(0)
+	return obuwriter.BuildShowExistingTemporalUnit(fe.refMgr.Latest())
 }
 
 // EncodeFrame returns one complete AV1 temporal unit.
@@ -33,7 +41,7 @@ func (fe *FrameEncoder) EncodeFrame(yPlane, cbPlane, crPlane []byte, frameNum in
 	ec := bitwriter.NewMSACEncoder(max(64, fe.Width*fe.Height/64))
 	st := fe.encodeKeyTile(ec, yPlane, cbPlane, crPlane)
 	tileData := ec.Flush()
-	fe.saveReference(st)
+	fe.saveKeyReferences(st)
 
 	seqParams := &obuwriter.SeqParams{
 		Width:    fe.Width,
@@ -52,14 +60,26 @@ func (fe *FrameEncoder) EncodeInterFrame(yPlane, cbPlane, crPlane []byte) []byte
 	if len(fe.ref[0]) == 0 {
 		return fe.EncodeFrame(yPlane, cbPlane, crPlane, 0)
 	}
+	plan := fe.refMgr.PlanInter()
+	fe.refIdx = plan.RefIdx
+	fe.refSlot = int(plan.RefIdx[0])
+	fe.ref = fe.refs[fe.refSlot]
+	fe.refSlot2 = int(plan.RefIdx[1])
+	fe.ref2 = fe.refs[fe.refSlot2]
+	fe.compound = fe.refSlot2 != fe.refSlot && len(fe.ref2[0]) != 0
 	ec := bitwriter.NewMSACEncoder(max(64, fe.Width*fe.Height/64))
 	st := fe.encodeInterTile(ec, yPlane, cbPlane, crPlane)
 	tileData := ec.Flush()
-	fe.saveReference(st)
+	fe.saveInterReference(plan.TargetSlot, st)
+	fe.refMgr.CommitInter(plan.TargetSlot)
 	seqParams := &obuwriter.SeqParams{
 		Width: fe.Width, Height: fe.Height, BitDepth: 8, ChromaSS: 1, Use128SB: true,
 	}
-	return obuwriter.BuildInterTemporalUnit(seqParams, fe.QIndex, tileData)
+	return obuwriter.BuildInterTemporalUnitWithParams(seqParams, fe.QIndex, tileData,
+		obuwriter.InterFrameParams{
+			RefIdx: plan.RefIdx, RefreshFlags: plan.RefreshFlags,
+			EnableCompound: fe.compound,
+		})
 }
 
 type tileEncodeState struct {
@@ -122,12 +142,29 @@ func (fe *FrameEncoder) encodeInterTile(ec *bitwriter.MSACEncoder, y, u, v []byt
 	return st
 }
 
-func (fe *FrameEncoder) saveReference(st *tileEncodeState) {
+func (fe *FrameEncoder) saveKeyReferences(st *tileEncodeState) {
 	if st == nil {
 		return
 	}
-	for plane := range fe.ref {
-		fe.ref[plane] = append(fe.ref[plane][:0], st.recon[plane]...)
+	for slot := range fe.refs {
+		for plane := range fe.refs[slot] {
+			fe.refs[slot][plane] = append(fe.refs[slot][plane][:0], st.recon[plane]...)
+		}
+	}
+	fe.refMgr.ResetKey()
+	fe.refSlot = 0
+	fe.ref = fe.refs[0]
+	fe.refSlot2 = 0
+	fe.ref2 = fe.refs[0]
+	fe.compound = false
+}
+
+func (fe *FrameEncoder) saveInterReference(slot int, st *tileEncodeState) {
+	if st == nil || slot < 0 || slot >= len(fe.refs) {
+		return
+	}
+	for plane := range fe.refs[slot] {
+		fe.refs[slot][plane] = append(fe.refs[slot][plane][:0], st.recon[plane]...)
 	}
 }
 
@@ -284,6 +321,7 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 		}
 	}
 	var planes []*interPlaneEncode
+	useCompound := false
 	if coded {
 		planes = append(planes, fe.analyzeInterPlane(st, 0, bx, by, 8, transform.TX8x8, mv.X, mv.Y))
 		if blockHasChroma(bx, by, bw, bh) {
@@ -291,39 +329,66 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 				fe.analyzeInterPlane(st, 1, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y),
 				fe.analyzeInterPlane(st, 2, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y))
 		}
+		if fe.compound {
+			compoundPlanes := []*interPlaneEncode{
+				fe.analyzeCompoundInterPlane(st, 0, bx, by, 8, transform.TX8x8),
+			}
+			if blockHasChroma(bx, by, bw, bh) {
+				compoundPlanes = append(compoundPlanes,
+					fe.analyzeCompoundInterPlane(st, 1, bx/2, by/2, 4, transform.TX4x4),
+					fe.analyzeCompoundInterPlane(st, 2, bx/2, by/2, 4, transform.TX4x4))
+			}
+			if interPredictionSSE(st, compoundPlanes[0]) < interPredictionSSE(st, planes[0]) {
+				planes = compoundPlanes
+				useCompound = true
+			}
+		}
 	}
 	skip := !coded || interPlanesAllZero(planes)
 	skipCtx := fs.SkipCtx(bx, by)
 	ec.BoolAdapt(boolSymbol(skip), ctx.SkipCDF[skipCtx][:])
 
-	ic := tile.SingleRefEncoderContexts(fs, bx, by, bw, bh)
+	ic := tile.SingleRefEncoderContextsForSlot(fs, fe.refIdx, fe.refSlot, bx, by, bw, bh)
 	ec.BoolAdapt(1, ctx.IntraCDF[ic.Intra][:]) // inter
-	ec.BoolAdapt(0, ctx.RefCDF[0][ic.Ref][:])  // forward reference group
-	ec.BoolAdapt(0, ctx.RefCDF[2][ic.Ref3][:]) // LAST/LAST2 group
-	ec.BoolAdapt(0, ctx.RefCDF[3][ic.Ref4][:]) // LAST_FRAME
-
 	interMode := tile.InterModeGlobalMV
 	baseX, baseY := 0, 0
 	deltaX, deltaY := 0, 0
-	switch {
-	case ic.CandidateCount > 0 && mv.X == ic.BaseMVX && mv.Y == ic.BaseMVY:
-		interMode = tile.InterModeNearestMV
-		baseX, baseY = ic.BaseMVX, ic.BaseMVY
-		ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
-		ec.BoolAdapt(1, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
-		ec.BoolAdapt(0, ctx.RefMVModeCDF[ic.RefMV][:])
-	case mv.X != 0 || mv.Y != 0:
-		interMode = tile.InterModeNewMV
-		baseX, baseY = ic.BaseMVX, ic.BaseMVY
-		deltaX, deltaY = mv.X-baseX, mv.Y-baseY
-		ec.BoolAdapt(0, ctx.NewMVModeCDF[ic.NewMV][:])
-		if ic.CandidateCount > 1 {
-			ec.BoolAdapt(0, ctx.DRLBitCDF[ic.DRL0][:])
+	if fe.compound {
+		cc := tile.CompoundEncoderContexts(fs, fe.refIdx, bx, by, bw, bh)
+		ec.BoolAdapt(boolSymbol(useCompound), ctx.CompCDF[cc.Flag][:])
+		if useCompound {
+			ec.BoolAdapt(0, ctx.CompDirCDF[cc.Dir][:])         // unidirectional
+			ec.BoolAdapt(0, ctx.CompUniRefCDF[0][cc.Ref][:])   // forward pair
+			ec.BoolAdapt(0, ctx.CompUniRefCDF[1][cc.UniP1][:]) // LAST + LAST2
+			ec.SymbolAdaptDav1d(6, ctx.CompInterModeCDF[cc.Mode][:], 7)
+			mv = me.MV{}
 		}
-		entropy.EncodeMVResidual(ec, ctx, deltaX, deltaY, true)
-	default:
-		ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
-		ec.BoolAdapt(0, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
+	}
+	if !useCompound {
+		ec.BoolAdapt(0, ctx.RefCDF[0][ic.Ref][:])  // forward reference group
+		ec.BoolAdapt(0, ctx.RefCDF[2][ic.Ref3][:]) // LAST/LAST2 group
+		ec.BoolAdapt(0, ctx.RefCDF[3][ic.Ref4][:]) // LAST_FRAME
+
+		switch {
+		case ic.CandidateCount > 0 && mv.X == ic.BaseMVX && mv.Y == ic.BaseMVY:
+			interMode = tile.InterModeNearestMV
+			baseX, baseY = ic.BaseMVX, ic.BaseMVY
+			ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
+			ec.BoolAdapt(1, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
+			ec.BoolAdapt(0, ctx.RefMVModeCDF[ic.RefMV][:])
+		case mv.X != 0 || mv.Y != 0:
+			interMode = tile.InterModeNewMV
+			baseX, baseY = ic.BaseMVX, ic.BaseMVY
+			deltaX, deltaY = mv.X-baseX, mv.Y-baseY
+			ec.BoolAdapt(0, ctx.NewMVModeCDF[ic.NewMV][:])
+			if ic.CandidateCount > 1 {
+				ec.BoolAdapt(0, ctx.DRLBitCDF[ic.DRL0][:])
+			}
+			entropy.EncodeMVResidual(ec, ctx, deltaX, deltaY, true)
+		default:
+			ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
+			ec.BoolAdapt(0, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
+		}
 	}
 
 	maxTx := uint8(transform.TX8x8)
@@ -349,11 +414,19 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	blk := tile.Av1Block{
 		Intra: false, Skip: skip,
 		InterMode: uint8(interMode),
-		RefSlot:   0, RefFrame: 1, RefOrder: 0,
+		RefSlot:   int8(fe.refSlot), RefFrame: 1, RefOrder: 0,
 		Tx: maxTx, MaxYTx: maxTx, Uvtx: uvtx,
 		BaseMV:  [2]int16{int16(baseY), int16(baseX)},
 		DeltaMV: [2]int16{int16(deltaY), int16(deltaX)},
 		MV:      [2]int16{int16(mv.Y), int16(mv.X)},
+	}
+	if useCompound {
+		blk.Compound = true
+		blk.InterMode = 6
+		blk.RefSlot2 = int8(fe.refSlot2)
+		blk.RefFrame2 = 2
+		blk.RefOrder2 = 1
+		blk.CompType = 2
 	}
 	blk.Bl, blk.Bs = tile.EncoderBlockGeometry(bw, bh)
 	if blockHasChroma(bx, by, bw, bh) {
@@ -381,6 +454,26 @@ func (fe *FrameEncoder) analyzeInterPlane(st *tileEncodeState,
 	}
 	pred := tile.EncoderInterPrediction(fe.ref[plane], st.w[plane], st.w[plane], st.h[plane],
 		bx, by, size, size, mvX, mvY, ss, ss)
+	return fe.analyzeInterPlanePrediction(st, plane, bx, by, size, tx, pred)
+}
+
+func (fe *FrameEncoder) analyzeCompoundInterPlane(st *tileEncodeState,
+	plane, bx, by, size int, tx uint8,
+) *interPlaneEncode {
+	ss := 0
+	if plane > 0 {
+		ss = 1
+	}
+	pred := tile.EncoderCompoundPrediction(
+		fe.ref[plane], st.w[plane], st.w[plane], st.h[plane],
+		fe.ref2[plane], st.w[plane], st.w[plane], st.h[plane],
+		bx, by, size, size, ss, ss)
+	return fe.analyzeInterPlanePrediction(st, plane, bx, by, size, tx, pred)
+}
+
+func (fe *FrameEncoder) analyzeInterPlanePrediction(st *tileEncodeState,
+	plane, bx, by, size int, tx uint8, pred []byte,
+) *interPlaneEncode {
 	residual := make([]int16, size*size)
 	for y := 0; y < size; y++ {
 		srcY := min(by+y, st.h[plane]-1)
@@ -401,6 +494,20 @@ func (fe *FrameEncoder) analyzeInterPlane(st *tileEncodeState,
 		plane: plane, bx: bx, by: by, size: size, tx: tx,
 		pred: pred, coeff: coeff,
 	}
+}
+
+func interPredictionSSE(st *tileEncodeState, plane *interPlaneEncode) int64 {
+	var sse int64
+	for y := 0; y < plane.size; y++ {
+		srcY := min(plane.by+y, st.h[plane.plane]-1)
+		for x := 0; x < plane.size; x++ {
+			srcX := min(plane.bx+x, st.w[plane.plane]-1)
+			d := int(st.src[plane.plane][srcY*st.w[plane.plane]+srcX]) -
+				int(plane.pred[y*plane.size+x])
+			sse += int64(d * d)
+		}
+	}
+	return sse
 }
 
 func (fe *FrameEncoder) encodeInterPlane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
