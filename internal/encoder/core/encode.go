@@ -6,6 +6,7 @@ import (
 	"github.com/zesun96/go-av1/internal/encoder/entropy"
 	"github.com/zesun96/go-av1/internal/encoder/me"
 	"github.com/zesun96/go-av1/internal/encoder/obuwriter"
+	"github.com/zesun96/go-av1/internal/encoder/rdo"
 	"github.com/zesun96/go-av1/internal/encoder/reference"
 	encodertx "github.com/zesun96/go-av1/internal/encoder/tx"
 	intrapred "github.com/zesun96/go-av1/internal/predict/intra"
@@ -332,6 +333,7 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 				fe.analyzeInterPlane(st, 1, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y),
 				fe.analyzeInterPlane(st, 2, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y))
 		}
+		bestCost := interPlanesRDOCost(st, planes, 3, fe.QIndex, fe.BitDepth)
 		if fe.EnableOBMC {
 			obmcPresent, obmcBS = tile.EncoderOBMCContext(fs, bx, by, bw, bh, fe.refSlot)
 			if obmcPresent {
@@ -339,8 +341,11 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 					planes[0].pred, fs, fe.refs, fe.Width, fe.Height, bx, by, bw, bh)
 				obmcPlane := fe.analyzeInterPlanePrediction(
 					st, 0, bx, by, 8, transform.TX8x8, pred)
-				if interPredictionSSE(st, obmcPlane) < interPredictionSSE(st, planes[0]) {
-					planes[0] = obmcPlane
+				obmcPlanes := append([]*interPlaneEncode(nil), planes...)
+				obmcPlanes[0] = obmcPlane
+				if cost := interPlanesRDOCost(st, obmcPlanes, 4, fe.QIndex, fe.BitDepth); cost < bestCost {
+					planes = obmcPlanes
+					bestCost = cost
 					useOBMC = true
 				}
 			}
@@ -354,8 +359,9 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 					fe.analyzeCompoundInterPlane(st, 1, bx/2, by/2, 4, transform.TX4x4),
 					fe.analyzeCompoundInterPlane(st, 2, bx/2, by/2, 4, transform.TX4x4))
 			}
-			if interPredictionSSE(st, compoundPlanes[0]) < interPredictionSSE(st, planes[0]) {
+			if cost := interPlanesRDOCost(st, compoundPlanes, 7, fe.QIndex, fe.BitDepth); cost < bestCost {
 				planes = compoundPlanes
+				bestCost = cost
 				useCompound = true
 				useOBMC = false
 			}
@@ -530,6 +536,16 @@ func interPredictionSSE(st *tileEncodeState, plane *interPlaneEncode) int64 {
 	return sse
 }
 
+func interPlanesRDOCost(st *tileEncodeState, planes []*interPlaneEncode,
+	syntaxBits float64, qindex, bitDepth int,
+) float64 {
+	cost := rdo.Lambda(qindex, bitDepth) * syntaxBits
+	for _, plane := range planes {
+		cost += rdo.Cost(interPredictionSSE(st, plane), plane.coeff, 0, qindex, bitDepth)
+	}
+	return cost
+}
+
 func (fe *FrameEncoder) encodeInterPlane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
 	fs *tile.FrameState, st *tileEncodeState, plane *interPlaneEncode,
 ) {
@@ -651,20 +667,30 @@ func (fe *FrameEncoder) chooseLumaMode(st *tileEncodeState, bx, by, size int) in
 			tile.SmoothPred, tile.SmoothVPred, tile.SmoothHPred, tile.PaethPred)
 	}
 	bestMode := tile.DCPred
-	bestSSE := int64(^uint64(0) >> 1)
+	bestCost := float64(^uint64(0) >> 1)
 	for _, mode := range modes {
 		pred := intraPredBlock(st.recon[0], st.w[0], st.h[0], bx, by, size, size, mode)
 		var sse int64
+		residual := make([]int16, size*size)
 		for y := 0; y < size; y++ {
 			srcY := min(by+y, st.h[0]-1)
 			for x := 0; x < size; x++ {
 				srcX := min(bx+x, st.w[0]-1)
 				diff := int(st.src[0][srcY*st.w[0]+srcX]) - int(pred[y*size+x])
 				sse += int64(diff * diff)
+				residual[y*size+x] = int16(diff)
 			}
 		}
-		if sse < bestSSE {
-			bestSSE = sse
+		coeff := make([]int32, size*size)
+		encodertx.FwdDCT8x8(coeff, residual, size)
+		encodertx.Quantize(coeff, fe.QIndex, fe.BitDepth)
+		syntaxBits := 1.0
+		if mode != tile.DCPred {
+			syntaxBits = 3
+		}
+		cost := rdo.Cost(sse, coeff, syntaxBits, fe.QIndex, fe.BitDepth)
+		if cost < bestCost {
+			bestCost = cost
 			bestMode = mode
 		}
 	}

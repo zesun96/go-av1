@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/zesun96/go-av1/internal/encoder/core"
+	"github.com/zesun96/go-av1/internal/encoder/ratecontrol"
 )
 
 // RawPicture is the encoder-internal picture representation.
@@ -33,6 +34,9 @@ type Options struct {
 	BitDepth     int
 	CRF          int
 	EnableOBMC   bool
+	RateControl  int
+	TargetKbps   int
+	QP           int
 }
 
 // ErrAgain is returned when no packet is available.
@@ -48,6 +52,7 @@ type Impl struct {
 	lastY    []byte
 	lastU    []byte
 	lastV    []byte
+	rc       *ratecontrol.Controller
 }
 
 // NewImpl creates a new encoder implementation.
@@ -68,13 +73,34 @@ func NewImpl(opts Options) (*Impl, error) {
 		opts.FrameRateDen = 1
 	}
 
-	// Map CRF to qindex: CRF 0 -> qindex 0 (lossless-ish), CRF 63 -> qindex 255
+	// Map CRF to qindex: CRF 0 -> qindex 1 (lossless-ish), CRF 63 -> qindex 252.
 	qindex := opts.CRF * 4
 	if qindex > 255 {
 		qindex = 255
 	}
 	if qindex < 1 {
 		qindex = 1
+	}
+	rcMode := ratecontrol.Mode(opts.RateControl)
+	if rcMode == ratecontrol.ModeCRF && opts.TargetKbps > 0 {
+		rcMode = ratecontrol.ModeVBR
+	}
+	if rcMode == ratecontrol.ModeCQP {
+		qindex = opts.QP
+		if qindex < 1 {
+			qindex = 1
+		}
+		if qindex > 255 {
+			qindex = 255
+		}
+	}
+	rc, err := ratecontrol.New(ratecontrol.Config{
+		Mode: rcMode, TargetKbps: opts.TargetKbps,
+		FrameRateNum: opts.FrameRateNum, FrameRateDen: opts.FrameRateDen,
+		InitialQIndex: qindex,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	fe := &core.FrameEncoder{
@@ -88,6 +114,7 @@ func NewImpl(opts Options) (*Impl, error) {
 	return &Impl{
 		opts: opts,
 		fe:   fe,
+		rc:   rc,
 	}, nil
 }
 
@@ -111,6 +138,7 @@ func (e *Impl) SendPicture(p *RawPicture) error {
 		bytes.Equal(p.U, e.lastU) &&
 		bytes.Equal(p.V, e.lastV)
 	var data []byte
+	e.fe.QIndex = e.rc.QIndex()
 	if repeated {
 		data = e.fe.EncodeShowExisting()
 	} else {
@@ -130,6 +158,7 @@ func (e *Impl) SendPicture(p *RawPicture) error {
 		Keyframe: e.frameNum == 0,
 	}
 	e.packets = append(e.packets, pkt)
+	e.rc.Update(len(data)*8, pkt.Keyframe)
 	e.frameNum++
 	return nil
 }

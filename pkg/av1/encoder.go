@@ -2,6 +2,20 @@ package av1
 
 import "github.com/zesun96/go-av1/internal/encoder"
 
+// EncoderRateControlMode selects frame-level bitrate control.
+type EncoderRateControlMode uint8
+
+const (
+	// RateControlAuto uses CRF when no target bitrate is set and VBR otherwise.
+	RateControlAuto EncoderRateControlMode = iota
+	// RateControlCQP keeps QP fixed for every coded frame.
+	RateControlCQP
+	// RateControlVBR targets average bitrate while allowing frame-size variation.
+	RateControlVBR
+	// RateControlCBR uses a one-second virtual buffer to constrain variation.
+	RateControlCBR
+)
+
 // EncoderOptions configures an Encoder. Field semantics will solidify during
 // the M10+ encoder phase; today this struct exists so external callers can
 // already write code against the type.
@@ -33,6 +47,12 @@ type EncoderOptions struct {
 
 	// CRF is the constant-rate-factor when TargetBitrateKbps is zero.
 	CRF int
+
+	// RateControl selects Auto, CQP, VBR, or CBR operation.
+	RateControl EncoderRateControlMode
+
+	// QP is the fixed AV1 qindex in CQP mode, in the range 1..255.
+	QP int
 
 	// EnableOBMC lets the mode decision use overlapped block motion
 	// compensation. It is disabled by default because it costs extra search.
@@ -83,6 +103,9 @@ func NewEncoder(opts EncoderOptions) (Encoder, error) {
 		BitDepth:     opts.BitDepth,
 		CRF:          opts.CRF,
 		EnableOBMC:   opts.EnableOBMC,
+		RateControl:  int(opts.RateControl),
+		TargetKbps:   opts.TargetBitrateKbps,
+		QP:           opts.QP,
 	})
 	if err != nil {
 		return nil, err

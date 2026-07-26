@@ -24,6 +24,9 @@ func main() {
 	out := flag.String("o", "", "output IVF file")
 	crf := flag.Int("crf", 30, "constant rate factor (0-63)")
 	obmc := flag.Bool("obmc", false, "enable overlapped block motion compensation")
+	rcName := flag.String("rc", "crf", "rate control: crf, cqp, vbr, or cbr")
+	bitrate := flag.Int("b", 0, "target bitrate in kbit/s for VBR/CBR")
+	qp := flag.Int("qp", 120, "fixed AV1 qindex for CQP (1-255)")
 	flag.Parse()
 
 	fmt.Fprintf(os.Stderr, "go-av1enc %s (M12 inter baseline)\n", av1.Version)
@@ -52,15 +55,32 @@ func main() {
 		hdr.Width, hdr.Height, hdr.BitDepth, hdr.ChromaSS,
 		hdr.FrameRate[0], hdr.FrameRate[1])
 
+	rcMode := av1.RateControlAuto
+	switch *rcName {
+	case "crf":
+	case "cqp":
+		rcMode = av1.RateControlCQP
+	case "vbr":
+		rcMode = av1.RateControlVBR
+	case "cbr":
+		rcMode = av1.RateControlCBR
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown rate-control mode %q\n", *rcName)
+		os.Exit(2)
+	}
+
 	// Create encoder
 	enc, err := av1.NewEncoder(av1.EncoderOptions{
-		Width:        hdr.Width,
-		Height:       hdr.Height,
-		FrameRateNum: hdr.FrameRate[0],
-		FrameRateDen: hdr.FrameRate[1],
-		BitDepth:     hdr.BitDepth,
-		CRF:          *crf,
-		EnableOBMC:   *obmc,
+		Width:             hdr.Width,
+		Height:            hdr.Height,
+		FrameRateNum:      hdr.FrameRate[0],
+		FrameRateDen:      hdr.FrameRate[1],
+		BitDepth:          hdr.BitDepth,
+		CRF:               *crf,
+		EnableOBMC:        *obmc,
+		RateControl:       rcMode,
+		TargetBitrateKbps: *bitrate,
+		QP:                *qp,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: encoder init: %v\n", err)
