@@ -25,19 +25,19 @@ The first checked result uses a six-frame 64x64 `testsrc2` YUV420 sequence at
 
 | Encoder | CRF | Rate (kbps) | PSNR (dB) |
 |---|---:|---:|---:|
-| go-av1 | 12 | 34.9 | 43.64 |
+| go-av1 | 12 | 35.0 | 43.90 |
 | SVT-AV1 | 12 | 32.3 | 45.48 |
-| go-av1 | 24 | 26.5 | 38.47 |
+| go-av1 | 24 | 26.6 | 38.83 |
 | SVT-AV1 | 24 | 19.5 | 40.59 |
-| go-av1 | 36 | 17.2 | 32.44 |
+| go-av1 | 36 | 17.2 | 32.78 |
 | SVT-AV1 | 36 | 12.3 | 34.70 |
-| go-av1 | 48 | 10.1 | 26.39 |
+| go-av1 | 48 | 10.1 | 26.58 |
 | SVT-AV1 | 48 | 7.2 | 29.16 |
 
-The measured go-av1 BD-rate relative to SVT-AV1 preset 12 is **+62.01%**.
+The measured go-av1 BD-rate relative to SVT-AV1 preset 12 is **+57.84%**.
 Therefore the roadmap goal of approximately +25% is not yet met.
 
-The next quality work is variable 16x16 inter residual RDO, in-loop filtering,
-and a multi-sequence benchmark corpus. Preset 12 currently enables hierarchical
-motion estimation, eighth-pixel refinement, rotating references, compound
-prediction, and lambda-based mode RDO. OBMC remains an explicit opt-in.
+The next quality work is variable 16x16 inter residual RDO and a multi-sequence
+benchmark corpus. Preset 12 currently enables hierarchical motion estimation,
+eighth-pixel refinement, rotating references, compound prediction, calibrated
+deblocking, and lambda-based mode RDO. OBMC remains an explicit opt-in.

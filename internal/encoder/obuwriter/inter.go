@@ -66,8 +66,13 @@ func writeInterUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex 
 	bw.PutBit(0) // segmentation_enabled
 	bw.PutBit(0) // delta_q_present
 
-	bw.PutBits(0, 6) // loop_filter_level[0]
-	bw.PutBits(0, 6) // loop_filter_level[1]
+	lfLevel := encoderLoopFilterLevel(qindex)
+	bw.PutBits(uint32(lfLevel), 6)
+	bw.PutBits(uint32(lfLevel), 6)
+	if lfLevel != 0 {
+		bw.PutBits(uint32(lfLevel), 6)
+		bw.PutBits(uint32(lfLevel), 6)
+	}
 	bw.PutBits(0, 3) // loop_filter_sharpness
 	bw.PutBit(0)     // loop_filter_delta_enabled
 

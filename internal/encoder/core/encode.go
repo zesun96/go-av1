@@ -121,6 +121,7 @@ func (fe *FrameEncoder) encodeKeyTile(ec *bitwriter.MSACEncoder, y, u, v []byte)
 			fe.encodePartition(ec, ctx, fs, st, bx, by, tile.BL128X128, false)
 		}
 	}
+	tile.ApplyEncoderLoopFilter(fs, st.recon, st.w, st.h, fe.loopFilterLevel())
 	return st
 }
 
@@ -145,7 +146,15 @@ func (fe *FrameEncoder) encodeInterTile(ec *bitwriter.MSACEncoder, y, u, v []byt
 			fe.encodePartition(ec, ctx, fs, st, bx, by, tile.BL128X128, true)
 		}
 	}
+	tile.ApplyEncoderLoopFilter(fs, st.recon, st.w, st.h, fe.loopFilterLevel())
 	return st
+}
+
+func (fe *FrameEncoder) loopFilterLevel() int {
+	if fe.QIndex < 8 {
+		return 0
+	}
+	return min(fe.QIndex>>3, 32)
 }
 
 func (fe *FrameEncoder) saveKeyReferences(st *tileEncodeState) {
