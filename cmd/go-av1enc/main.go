@@ -27,12 +27,13 @@ func main() {
 	rcName := flag.String("rc", "crf", "rate control: crf, cqp, vbr, or cbr")
 	bitrate := flag.Int("b", 0, "target bitrate in kbit/s for VBR/CBR")
 	qp := flag.Int("qp", 120, "fixed AV1 qindex for CQP (1-255)")
+	preset := flag.Int("preset", 12, "speed preset (0=slowest, 13=fastest)")
 	flag.Parse()
 
-	fmt.Fprintf(os.Stderr, "go-av1enc %s (M12 inter baseline)\n", av1.Version)
+	fmt.Fprintf(os.Stderr, "go-av1enc %s (preset %d)\n", av1.Version, *preset)
 
 	if *in == "" || *out == "" {
-		fmt.Fprintln(os.Stderr, "usage: go-av1enc -i <input.y4m> -o <output.ivf> [--crf 30]")
+		fmt.Fprintln(os.Stderr, "usage: go-av1enc -i <input.y4m> -o <output.ivf> [-preset 12] [-crf 30]")
 		os.Exit(2)
 	}
 
@@ -81,6 +82,7 @@ func main() {
 		RateControl:       rcMode,
 		TargetBitrateKbps: *bitrate,
 		QP:                *qp,
+		Preset:            *preset,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: encoder init: %v\n", err)

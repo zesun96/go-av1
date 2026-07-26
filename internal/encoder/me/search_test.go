@@ -37,6 +37,22 @@ func TestSearchSubpixelTranslation(t *testing.T) {
 	}
 }
 
+func TestSearchHierarchicalTranslation(t *testing.T) {
+	const width, height = 48, 48
+	ref := randomFrame(width, height, 41)
+	src := randomFrame(width, height, 42)
+	want := MV{X: 3 * 8, Y: -2 * 8}
+	copyPredictedBlock(src, ref, width, height, 16, 16, 16, 16, want)
+
+	got, err := SearchHierarchical(testConfig(src, ref, width, height, 16, 16, 16, 16, 5))
+	if err != nil {
+		t.Fatalf("SearchHierarchical: %v", err)
+	}
+	if got.MV != want || got.SAD != 0 {
+		t.Fatalf("result=%+v, want MV=%+v SAD=0", got, want)
+	}
+}
+
 func TestSearchFlatBlockPrefersZeroVector(t *testing.T) {
 	const width, height = 24, 24
 	ref := make([]byte, width*height)

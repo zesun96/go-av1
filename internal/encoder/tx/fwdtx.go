@@ -1,6 +1,8 @@
 // Package tx implements AV1 forward transforms and quantization.
 package tx
 
+import "math"
+
 // These kernels mirror SVT-AV1's svt_av1_fdct{4,8}_new and the 2-D
 // fwd_txfm shifts. The initial x4 shift is essential: AV1's quantizers
 // expect small-transform coefficients in Q3 (eight times pixel scale).
@@ -132,5 +134,41 @@ func FwdDCT4x4(dst []int32, src []int16, srcStride int) {
 		copy(input[:], tmp[y*4:y*4+4])
 		output := fdct4(input)
 		copy(dst[y*4:y*4+4], output[:])
+	}
+}
+
+// FwdDCT16x16 computes a TX_16X16 DCT_DCT in the coefficient scale consumed
+// by AV1 quantization. The orthonormal DCT is scaled by eight, matching the
+// existing integer 4x4 and 8x8 kernels.
+func FwdDCT16x16(dst []int32, src []int16, srcStride int) {
+	const n = 16
+	var basis [n][n]float64
+	for k := 0; k < n; k++ {
+		scale := math.Sqrt(2.0 / n)
+		if k == 0 {
+			scale = math.Sqrt(1.0 / n)
+		}
+		for x := 0; x < n; x++ {
+			basis[k][x] = scale * math.Cos(math.Pi*float64((2*x+1)*k)/(2*n))
+		}
+	}
+	var tmp [n * n]float64
+	for y := 0; y < n; y++ {
+		for u := 0; u < n; u++ {
+			var sum float64
+			for x := 0; x < n; x++ {
+				sum += float64(src[y*srcStride+x]) * basis[u][x]
+			}
+			tmp[y*n+u] = sum
+		}
+	}
+	for v := 0; v < n; v++ {
+		for u := 0; u < n; u++ {
+			var sum float64
+			for y := 0; y < n; y++ {
+				sum += tmp[y*n+u] * basis[v][y]
+			}
+			dst[v*n+u] = int32(math.Round(sum * 8))
+		}
 	}
 }

@@ -92,8 +92,8 @@ type Encoder interface {
 	Close() error
 }
 
-// NewEncoder constructs an Encoder. The current baseline emits single-tile
-// intra key frames and reuses reference slots for identical consecutive frames.
+// NewEncoder constructs a single-tile encoder with intra/inter prediction,
+// rotating references, compound prediction, and frame-level rate control.
 func NewEncoder(opts EncoderOptions) (Encoder, error) {
 	impl, err := encoder.NewImpl(encoder.Options{
 		Width:        opts.Width,
@@ -106,6 +106,7 @@ func NewEncoder(opts EncoderOptions) (Encoder, error) {
 		RateControl:  int(opts.RateControl),
 		TargetKbps:   opts.TargetBitrateKbps,
 		QP:           opts.QP,
+		Preset:       opts.Preset,
 	})
 	if err != nil {
 		return nil, err

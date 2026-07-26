@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/zesun96/go-av1/internal/encoder/core"
+	"github.com/zesun96/go-av1/internal/encoder/preset"
 	"github.com/zesun96/go-av1/internal/encoder/ratecontrol"
 )
 
@@ -37,6 +38,7 @@ type Options struct {
 	RateControl  int
 	TargetKbps   int
 	QP           int
+	Preset       int
 }
 
 // ErrAgain is returned when no packet is available.
@@ -102,13 +104,18 @@ func NewImpl(opts Options) (*Impl, error) {
 	if err != nil {
 		return nil, err
 	}
+	tools := preset.Resolve(opts.Preset)
 
 	fe := &core.FrameEncoder{
-		Width:      opts.Width,
-		Height:     opts.Height,
-		QIndex:     qindex,
-		BitDepth:   0, // 8-bit -> hbd index 0
-		EnableOBMC: opts.EnableOBMC,
+		Width:          opts.Width,
+		Height:         opts.Height,
+		QIndex:         qindex,
+		BitDepth:       0, // 8-bit -> hbd index 0
+		EnableOBMC:     opts.EnableOBMC,
+		SearchRange:    tools.SearchRange,
+		HierarchicalME: tools.HierarchicalME,
+		IntegerMEOnly:  tools.IntegerOnly,
+		EnableCompound: tools.Compound,
 	}
 
 	return &Impl{

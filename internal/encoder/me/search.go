@@ -25,6 +25,7 @@ type Config struct {
 	BlockWidth      int
 	BlockHeight     int
 	SearchRange     int // full pixels in each direction
+	IntegerOnly     bool
 }
 
 // Result is the best motion vector and its sum of absolute differences.
@@ -48,6 +49,44 @@ func Search(cfg Config) (Result, error) {
 			best = chooseBetter(best, Result{MV: mv, SAD: blockSAD(cfg, mv)})
 		}
 	}
+	return refineSubpel(cfg, best), nil
+}
+
+// SearchHierarchical performs a sparse coarse search, two full-pixel local
+// refinements, then the same sub-pixel refinement as Search.
+func SearchHierarchical(cfg Config) (Result, error) {
+	if err := validate(cfg); err != nil {
+		return Result{}, err
+	}
+	best := Result{SAD: ^uint64(0)}
+	for dy := -cfg.SearchRange; dy <= cfg.SearchRange; dy++ {
+		for dx := -cfg.SearchRange; dx <= cfg.SearchRange; dx++ {
+			mv := MV{X: dx * 8, Y: dy * 8}
+			best = chooseBetter(best, Result{MV: mv, SAD: blockSADSubsampled(cfg, mv, 2)})
+		}
+	}
+	best.SAD = blockSAD(cfg, best.MV)
+	for _, stepPixels := range []int{2, 1} {
+		center := best.MV
+		step := stepPixels * 8
+		for oy := -step; oy <= step; oy += step {
+			for ox := -step; ox <= step; ox += step {
+				mv := MV{X: center.X + ox, Y: center.Y + oy}
+				limit := cfg.SearchRange * 8
+				if mv.X < -limit || mv.X > limit || mv.Y < -limit || mv.Y > limit {
+					continue
+				}
+				best = chooseBetter(best, Result{MV: mv, SAD: blockSAD(cfg, mv)})
+			}
+		}
+	}
+	return refineSubpel(cfg, best), nil
+}
+
+func refineSubpel(cfg Config, best Result) Result {
+	if cfg.IntegerOnly {
+		return best
+	}
 	for _, step := range []int{4, 2, 1} {
 		center := best.MV
 		for oy := -step; oy <= step; oy += step {
@@ -61,7 +100,7 @@ func Search(cfg Config) (Result, error) {
 			}
 		}
 	}
-	return best, nil
+	return best
 }
 
 func validate(cfg Config) error {
@@ -91,6 +130,25 @@ func blockSAD(cfg Config, mv MV) uint64 {
 		srcOff := (cfg.Y+y)*cfg.SourceStride + cfg.X
 		refY8 := (cfg.Y+y)*8 + mv.Y
 		for x := 0; x < cfg.BlockWidth; x++ {
+			refX8 := (cfg.X+x)*8 + mv.X
+			pred := sampleBilinear(cfg.Reference, cfg.ReferenceStride,
+				cfg.Width, cfg.Height, refX8, refY8)
+			diff := int(cfg.Source[srcOff+x]) - pred
+			if diff < 0 {
+				diff = -diff
+			}
+			sad += uint64(diff)
+		}
+	}
+	return sad
+}
+
+func blockSADSubsampled(cfg Config, mv MV, step int) uint64 {
+	var sad uint64
+	for y := 0; y < cfg.BlockHeight; y += step {
+		srcOff := (cfg.Y+y)*cfg.SourceStride + cfg.X
+		refY8 := (cfg.Y+y)*8 + mv.Y
+		for x := 0; x < cfg.BlockWidth; x += step {
 			refX8 := (cfg.X+x)*8 + mv.X
 			pred := sampleBilinear(cfg.Reference, cfg.ReferenceStride,
 				cfg.Width, cfg.Height, refX8, refY8)

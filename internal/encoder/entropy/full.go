@@ -32,6 +32,20 @@ func EncodeInterDCT8(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, 0, bx, by, tile.DCPred, false, coeff)
 }
 
+// EncodeInterDCT8Plane writes a TX8x8 block for an explicit plane.
+func EncodeInterDCT8Plane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	plane, bx, by int, coeff []int32,
+) uint8 {
+	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, plane, bx, by, tile.DCPred, false, coeff)
+}
+
+// EncodeInterDCT16 writes an inter luma TX16x16 DCT_DCT coefficient block.
+func EncodeInterDCT16(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	bx, by int, coeff []int32,
+) uint8 {
+	return encodeDCTSquare(ec, ctx, fs, transform.TX16x16, 0, bx, by, tile.DCPred, false, coeff)
+}
+
 // EncodeInterDCT4 writes an inter chroma TX4x4 DCT_DCT coefficient block.
 func EncodeInterDCT4(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
 	plane, bx, by int, coeff []int32,
@@ -195,10 +209,22 @@ func encodeSquareEOB(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, td transform.
 			bin++
 		}
 	}
-	if td.Lw == 0 {
+	tx2dSizeCtx := min(3, int(td.Lw)) + min(3, int(td.Lh))
+	switch tx2dSizeCtx {
+	case 0:
 		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin16Full[chroma][0][:], 4)
-	} else {
+	case 1:
+		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin32Full[chroma][0][:], 5)
+	case 2:
 		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin64Full[chroma][0][:], 6)
+	case 3:
+		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin128Full[chroma][0][:], 7)
+	case 4:
+		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin256Full[chroma][0][:], 8)
+	case 5:
+		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin512Full[chroma][:], 9)
+	default:
+		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin1024Full[chroma][:], 10)
 	}
 	if bin <= 1 {
 		return
