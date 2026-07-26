@@ -158,6 +158,121 @@ func TestEncodeDecodeRepeatedFrameReference(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeChangedInterFrame(t *testing.T) {
+	const width, height = 64, 64
+	values := []byte{64, 160, 32, 220}
+	enc, err := encoder.NewImpl(encoder.Options{
+		Width: width, Height: height, BitDepth: 8, CRF: 30,
+	})
+	if err != nil {
+		t.Fatalf("NewImpl: %v", err)
+	}
+	for i, value := range values {
+		uv := bytes.Repeat([]byte{128 + byte(i)*4}, width*height/4)
+		pic := &encoder.RawPicture{
+			Y: bytes.Repeat([]byte{value}, width*height), U: uv, V: uv,
+			Width: width, Height: height,
+		}
+		if err := enc.SendPicture(pic); err != nil {
+			t.Fatalf("SendPicture %d: %v", i, err)
+		}
+	}
+	packets := make([]*encoder.Packet, len(values))
+	for i := range packets {
+		packets[i], err = enc.ReceivePacket()
+		if err != nil {
+			t.Fatalf("ReceivePacket %d: %v", i, err)
+		}
+		if packets[i].Keyframe != (i == 0) {
+			t.Fatalf("packet %d keyframe=%t", i, packets[i].Keyframe)
+		}
+	}
+
+	dec, err := av1.NewDecoder(av1.DecoderOptions{})
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	defer dec.Close()
+	means := make([]float64, len(values))
+	for i, pkt := range packets {
+		if err := dec.SendData(pkt.Data); err != nil {
+			t.Fatalf("SendData %d: %v", i, err)
+		}
+		pic, err := dec.GetPicture()
+		if err != nil {
+			t.Fatalf("GetPicture %d: %v", i, err)
+		}
+		var sum uint64
+		for row := 0; row < height; row++ {
+			for _, sample := range pic.Y[row*pic.StrideY : row*pic.StrideY+width] {
+				sum += uint64(sample)
+			}
+		}
+		means[i] = float64(sum) / float64(width*height)
+		pic.Release()
+	}
+	for i, mean := range means {
+		if diff := mean - float64(values[i]); diff < -8 || diff > 8 {
+			t.Fatalf("frame %d reconstruction mean %.2f, want near %d (all means %v)",
+				i, mean, values[i], means)
+		}
+	}
+}
+
+func TestEncodeDecodeChangedInterFrameSizes(t *testing.T) {
+	for _, size := range [][2]int{{8, 8}, {16, 18}, {65, 63}, {196, 198}} {
+		w, h := size[0], size[1]
+		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
+			cw, ch := (w+1)/2, (h+1)/2
+			enc, err := encoder.NewImpl(encoder.Options{
+				Width: w, Height: h, BitDepth: 8, CRF: 30,
+			})
+			if err != nil {
+				t.Fatalf("NewImpl: %v", err)
+			}
+			for _, value := range []byte{48, 192} {
+				if err := enc.SendPicture(&encoder.RawPicture{
+					Y:     bytes.Repeat([]byte{value}, w*h),
+					U:     bytes.Repeat([]byte{128}, cw*ch),
+					V:     bytes.Repeat([]byte{128}, cw*ch),
+					Width: w, Height: h,
+				}); err != nil {
+					t.Fatalf("SendPicture: %v", err)
+				}
+			}
+			dec, err := av1.NewDecoder(av1.DecoderOptions{})
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			defer dec.Close()
+			for i, want := range []byte{48, 192} {
+				pkt, err := enc.ReceivePacket()
+				if err != nil {
+					t.Fatalf("ReceivePacket %d: %v", i, err)
+				}
+				if err := dec.SendData(pkt.Data); err != nil {
+					t.Fatalf("SendData %d: %v", i, err)
+				}
+				pic, err := dec.GetPicture()
+				if err != nil {
+					t.Fatalf("GetPicture %d: %v", i, err)
+				}
+				var sum uint64
+				for row := 0; row < h; row++ {
+					for _, sample := range pic.Y[row*pic.StrideY : row*pic.StrideY+w] {
+						sum += uint64(sample)
+					}
+				}
+				mean := float64(sum) / float64(w*h)
+				pic.Release()
+				if diff := mean - float64(want); diff < -10 || diff > 10 {
+					t.Fatalf("frame %d mean %.2f, want near %d", i, mean, want)
+				}
+			}
+		})
+	}
+}
+
 // TestEncodeDecodeRoundTripSizes guards the M11 exit criterion: packets from
 // the encoder must be consumable by the strict decoder, including partial
 // superblocks at the right and bottom frame edges.

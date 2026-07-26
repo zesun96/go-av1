@@ -17,6 +17,7 @@ type FrameEncoder struct {
 	Height   int
 	QIndex   int
 	BitDepth int
+	ref      [3][]byte
 }
 
 // EncodeShowExisting displays reference slot zero. Every key frame emitted by
@@ -29,8 +30,9 @@ func (fe *FrameEncoder) EncodeShowExisting() []byte {
 // EncodeFrame returns one complete AV1 temporal unit.
 func (fe *FrameEncoder) EncodeFrame(yPlane, cbPlane, crPlane []byte, frameNum int) []byte {
 	ec := bitwriter.NewMSACEncoder(max(64, fe.Width*fe.Height/64))
-	fe.encodeKeyTile(ec, yPlane, cbPlane, crPlane)
+	st := fe.encodeKeyTile(ec, yPlane, cbPlane, crPlane)
 	tileData := ec.Flush()
+	fe.saveReference(st)
 
 	seqParams := &obuwriter.SeqParams{
 		Width:    fe.Width,
@@ -42,6 +44,23 @@ func (fe *FrameEncoder) EncodeFrame(yPlane, cbPlane, crPlane []byte, frameNum in
 	return obuwriter.BuildTemporalUnit(seqParams, fe.QIndex, tileData, true)
 }
 
+// EncodeInterFrame returns an inter temporal unit predicted from the most
+// recently reconstructed frame. The first inter baseline uses LAST_FRAME with
+// identity global motion and codes the complete residual.
+func (fe *FrameEncoder) EncodeInterFrame(yPlane, cbPlane, crPlane []byte) []byte {
+	if len(fe.ref[0]) == 0 {
+		return fe.EncodeFrame(yPlane, cbPlane, crPlane, 0)
+	}
+	ec := bitwriter.NewMSACEncoder(max(64, fe.Width*fe.Height/64))
+	st := fe.encodeInterTile(ec, yPlane, cbPlane, crPlane)
+	tileData := ec.Flush()
+	fe.saveReference(st)
+	seqParams := &obuwriter.SeqParams{
+		Width: fe.Width, Height: fe.Height, BitDepth: 8, ChromaSS: 1, Use128SB: true,
+	}
+	return obuwriter.BuildInterTemporalUnit(seqParams, fe.QIndex, tileData)
+}
+
 type tileEncodeState struct {
 	src   [3][]byte
 	recon [3][]byte
@@ -51,7 +70,7 @@ type tileEncodeState struct {
 
 // encodeKeyTile writes the syntax consumed by decode_partition() and
 // write_modes_b() in SVT-AV1: partition, skip, key-frame Y mode and UV mode.
-func (fe *FrameEncoder) encodeKeyTile(ec *bitwriter.MSACEncoder, y, u, v []byte) {
+func (fe *FrameEncoder) encodeKeyTile(ec *bitwriter.MSACEncoder, y, u, v []byte) *tileEncodeState {
 	ctx := tile.NewTileCtxForQIdx(fe.QIndex)
 	fs := tile.NewFrameState(fe.Width, fe.Height)
 	fs.SetSubsampling(1, 1)
@@ -72,13 +91,47 @@ func (fe *FrameEncoder) encodeKeyTile(ec *bitwriter.MSACEncoder, y, u, v []byte)
 	codedH := (fe.Height + 7) &^ 7
 	for by := 0; by < codedH; by += 128 {
 		for bx := 0; bx < codedW; bx += 128 {
-			fe.encodePartition(ec, ctx, fs, st, bx, by, tile.BL128X128)
+			fe.encodePartition(ec, ctx, fs, st, bx, by, tile.BL128X128, false)
 		}
+	}
+	return st
+}
+
+func (fe *FrameEncoder) encodeInterTile(ec *bitwriter.MSACEncoder, y, u, v []byte) *tileEncodeState {
+	ctx := tile.NewTileCtxForQIdx(fe.QIndex)
+	fs := tile.NewFrameState(fe.Width, fe.Height)
+	fs.SetSubsampling(1, 1)
+	tile.EnableEncoderMVContexts(fs, fe.Width, fe.Height)
+	cw, ch := (fe.Width+1)/2, (fe.Height+1)/2
+	st := &tileEncodeState{
+		src: [3][]byte{y, u, v},
+		w:   [3]int{fe.Width, cw, cw},
+		h:   [3]int{fe.Height, ch, ch},
+	}
+	for plane := range st.recon {
+		st.recon[plane] = append([]byte(nil), fe.ref[plane]...)
+	}
+	codedW := (fe.Width + 7) &^ 7
+	codedH := (fe.Height + 7) &^ 7
+	for by := 0; by < codedH; by += 128 {
+		for bx := 0; bx < codedW; bx += 128 {
+			fe.encodePartition(ec, ctx, fs, st, bx, by, tile.BL128X128, true)
+		}
+	}
+	return st
+}
+
+func (fe *FrameEncoder) saveReference(st *tileEncodeState) {
+	if st == nil {
+		return
+	}
+	for plane := range fe.ref {
+		fe.ref[plane] = append(fe.ref[plane][:0], st.recon[plane]...)
 	}
 }
 
 func (fe *FrameEncoder) encodePartition(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
-	fs *tile.FrameState, st *tileEncodeState, bx, by, bl int,
+	fs *tile.FrameState, st *tileEncodeState, bx, by, bl int, inter bool,
 ) {
 	codedW := (fe.Width + 7) &^ 7
 	codedH := (fe.Height + 7) &^ 7
@@ -94,11 +147,11 @@ func (fe *FrameEncoder) encodePartition(ec *bitwriter.MSACEncoder, ctx *tile.Til
 	// A node wholly beyond both half-way boundaries has no partition symbol.
 	if !haveHSplit && !haveVSplit {
 		if bl == tile.BL8X8 {
-			fe.encodeBlock(ec, ctx, fs, st, bx, by, half, half)
+			fe.encodeLeaf(ec, ctx, fs, st, bx, by, half, half, inter)
 			fs.SetPartition(bx, by, bl, tile.PartitionSplit, size)
 			return
 		}
-		fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1)
+		fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1, inter)
 		return
 	}
 
@@ -110,40 +163,50 @@ func (fe *FrameEncoder) encodePartition(ec *bitwriter.MSACEncoder, ctx *tile.Til
 	if !haveVSplit {
 		if bl < tile.BL8X8 {
 			ec.Bool(1, gatherTopPartitionProb(cdf, bl))
-			fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1)
-			fe.encodePartition(ec, ctx, fs, st, bx+half, by, bl+1)
+			fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1, inter)
+			fe.encodePartition(ec, ctx, fs, st, bx+half, by, bl+1, inter)
 			return
 		}
 		ec.Bool(0, gatherTopPartitionProb(cdf, bl))
-		fe.encodeBlock(ec, ctx, fs, st, bx, by, size, half)
+		fe.encodeLeaf(ec, ctx, fs, st, bx, by, size, half, inter)
 		fs.SetPartition(bx, by, bl, tile.PartitionH, size)
 		return
 	}
 	if !haveHSplit {
 		if bl < tile.BL8X8 {
 			ec.Bool(1, gatherLeftPartitionProb(cdf, bl))
-			fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1)
-			fe.encodePartition(ec, ctx, fs, st, bx, by+half, bl+1)
+			fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1, inter)
+			fe.encodePartition(ec, ctx, fs, st, bx, by+half, bl+1, inter)
 			return
 		}
 		ec.Bool(0, gatherLeftPartitionProb(cdf, bl))
-		fe.encodeBlock(ec, ctx, fs, st, bx, by, half, size)
+		fe.encodeLeaf(ec, ctx, fs, st, bx, by, half, size, inter)
 		fs.SetPartition(bx, by, bl, tile.PartitionV, size)
 		return
 	}
 
 	if bl < tile.BL8X8 {
 		ec.SymbolAdaptDav1d(tile.PartitionSplit, cdf, n-1)
-		fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1)
-		fe.encodePartition(ec, ctx, fs, st, bx+half, by, bl+1)
-		fe.encodePartition(ec, ctx, fs, st, bx, by+half, bl+1)
-		fe.encodePartition(ec, ctx, fs, st, bx+half, by+half, bl+1)
+		fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1, inter)
+		fe.encodePartition(ec, ctx, fs, st, bx+half, by, bl+1, inter)
+		fe.encodePartition(ec, ctx, fs, st, bx, by+half, bl+1, inter)
+		fe.encodePartition(ec, ctx, fs, st, bx+half, by+half, bl+1, inter)
 		return
 	}
 
 	ec.SymbolAdaptDav1d(tile.PartitionNone, cdf, n-1)
-	fe.encodeBlock(ec, ctx, fs, st, bx, by, size, size)
+	fe.encodeLeaf(ec, ctx, fs, st, bx, by, size, size, inter)
 	fs.SetPartition(bx, by, bl, tile.PartitionNone, size)
+}
+
+func (fe *FrameEncoder) encodeLeaf(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
+	fs *tile.FrameState, st *tileEncodeState, bx, by, bw, bh int, inter bool,
+) {
+	if inter {
+		fe.encodeInterBlock(ec, ctx, fs, st, bx, by, bw, bh)
+		return
+	}
+	fe.encodeBlock(ec, ctx, fs, st, bx, by, bw, bh)
 }
 
 func (fe *FrameEncoder) encodeBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
@@ -200,6 +263,83 @@ func (fe *FrameEncoder) encodeBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx
 		UvMode: tile.DCPred,
 	})
 	fs.SetBlock(bx, by, bw, bh, !coded, yMode)
+}
+
+func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
+	fs *tile.FrameState, st *tileEncodeState, bx, by, bw, bh int,
+) {
+	coded := bw == 8 && bh == 8
+	skip := !coded
+	skipCtx := fs.SkipCtx(bx, by)
+	ec.BoolAdapt(boolSymbol(skip), ctx.SkipCDF[skipCtx][:])
+
+	ic := tile.SingleRefEncoderContexts(fs, bx, by, bw, bh)
+	ec.BoolAdapt(1, ctx.IntraCDF[ic.Intra][:]) // inter
+	ec.BoolAdapt(0, ctx.RefCDF[0][ic.Ref][:])  // forward reference group
+	ec.BoolAdapt(0, ctx.RefCDF[2][ic.Ref3][:]) // LAST/LAST2 group
+	ec.BoolAdapt(0, ctx.RefCDF[3][ic.Ref4][:]) // LAST_FRAME
+	ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
+	ec.BoolAdapt(0, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
+
+	maxTx := uint8(transform.TX8x8)
+	uvtx := uint8(transform.TX4x4)
+	fs.SetTxCtx(bx, by, bw, bh, maxTx, false, skip)
+	fs.SetInterTxIntraCtx(bx, by, bw, bh)
+	if coded {
+		fe.encodeInterPlane(ec, ctx, fs, st, 0, bx, by, 8, transform.TX8x8)
+		if blockHasChroma(bx, by, bw, bh) {
+			fe.encodeInterPlane(ec, ctx, fs, st, 1, bx/2, by/2, 4, transform.TX4x4)
+			fe.encodeInterPlane(ec, ctx, fs, st, 2, bx/2, by/2, 4, transform.TX4x4)
+		}
+	} else {
+		fs.SetCoefCtxBlock(0, bx, by, bw, bh, 0x40)
+		if blockHasChroma(bx, by, bw, bh) {
+			fs.SetCoefCtxBlock(1, bx/2, by/2, (bw+1)/2, (bh+1)/2, 0x40)
+			fs.SetCoefCtxBlock(2, bx/2, by/2, (bw+1)/2, (bh+1)/2, 0x40)
+		}
+	}
+
+	blk := tile.Av1Block{
+		Intra: false, Skip: skip,
+		InterMode: tile.InterModeGlobalMV,
+		RefSlot:   0, RefFrame: 1, RefOrder: 0,
+		Tx: maxTx, MaxYTx: maxTx, Uvtx: uvtx,
+	}
+	blk.Bl, blk.Bs = tile.EncoderBlockGeometry(bw, bh)
+	if blockHasChroma(bx, by, bw, bh) {
+		fs.SetChromaBlockState(bx, by, bw, bh, blk)
+	}
+	fs.CommitInterBlock(bx, by, bw, bh, blk, 1, blockHasChroma(bx, by, bw, bh))
+}
+
+func (fe *FrameEncoder) encodeInterPlane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
+	fs *tile.FrameState, st *tileEncodeState, plane, bx, by, size int, tx uint8,
+) {
+	pred := make([]byte, size*size)
+	residual := make([]int16, size*size)
+	for y := 0; y < size; y++ {
+		srcY := min(by+y, st.h[plane]-1)
+		for x := 0; x < size; x++ {
+			srcX := min(bx+x, st.w[plane]-1)
+			i := y*size + x
+			pred[i] = fe.ref[plane][srcY*st.w[plane]+srcX]
+			residual[i] = int16(int(st.src[plane][srcY*st.w[plane]+srcX]) - int(pred[i]))
+		}
+	}
+	coeff := make([]int32, size*size)
+	if size == 8 {
+		encodertx.FwdDCT8x8(coeff, residual, size)
+	} else {
+		encodertx.FwdDCT4x4(coeff, residual, size)
+	}
+	encodertx.Quantize(coeff, fe.QIndex, fe.BitDepth)
+	if plane == 0 {
+		entropy.EncodeInterDCT8(ec, ctx, fs, bx, by, coeff)
+	} else {
+		entropy.EncodeInterDCT4(ec, ctx, fs, plane, bx, by, coeff)
+	}
+	reconstructDCTBlock(st.recon[plane], st.w[plane], st.h[plane],
+		bx, by, size, pred, coeff, tx, fe.QIndex, fe.BitDepth)
 }
 
 func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,

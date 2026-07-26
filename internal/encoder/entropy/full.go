@@ -14,7 +14,7 @@ import (
 func EncodeDCT8(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
 	bx, by, yMode int, coeff []int32,
 ) uint8 {
-	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, 0, bx, by, yMode, coeff)
+	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, 0, bx, by, yMode, true, coeff)
 }
 
 // EncodeDCT4 writes a complete TX4x4 DCT_DCT coefficient block. It is used
@@ -22,11 +22,25 @@ func EncodeDCT8(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameStat
 func EncodeDCT4(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
 	plane, bx, by int, coeff []int32,
 ) uint8 {
-	return encodeDCTSquare(ec, ctx, fs, transform.TX4x4, plane, bx, by, tile.DCPred, coeff)
+	return encodeDCTSquare(ec, ctx, fs, transform.TX4x4, plane, bx, by, tile.DCPred, true, coeff)
+}
+
+// EncodeInterDCT8 writes an inter luma TX8x8 DCT_DCT coefficient block.
+func EncodeInterDCT8(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	bx, by int, coeff []int32,
+) uint8 {
+	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, 0, bx, by, tile.DCPred, false, coeff)
+}
+
+// EncodeInterDCT4 writes an inter chroma TX4x4 DCT_DCT coefficient block.
+func EncodeInterDCT4(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	plane, bx, by int, coeff []int32,
+) uint8 {
+	return encodeDCTSquare(ec, ctx, fs, transform.TX4x4, plane, bx, by, tile.DCPred, false, coeff)
 }
 
 func encodeDCTSquare(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
-	tx uint8, plane, bx, by, yMode int, coeff []int32,
+	tx uint8, plane, bx, by, yMode int, intra bool, coeff []int32,
 ) uint8 {
 	td := transform.TxfmDimensions[tx]
 	blockSize := int(td.W) * 4
@@ -45,18 +59,21 @@ func encodeDCTSquare(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 		}
 	}
 	if eob < 0 {
-		return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockSize, blockSize, yMode, 0)
+		return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockSize, blockSize, yMode, intra, 0)
 	}
 	if eob == 0 {
-		return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockSize, blockSize, yMode, int(coeff[0]))
+		return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockSize, blockSize, yMode, intra, int(coeff[0]))
 	}
 
 	skipCtx := fs.CoefSkipCtx(plane, bx, by, blockSize, blockSize, tx)
 	ec.BoolAdapt(0, ctx.CoefSkipFull[td.Ctx][skipCtx][:])
 	if plane == 0 {
-		// reduced_txtp_set=1: DCT_DCT is symbol 1. Chroma inherits DCT_DCT
-		// from its DC prediction mode and does not signal a transform type.
-		ec.SymbolAdaptDav1d(1, ctx.TxTypeIntra2CDF[int(td.Min)][yMode][:], len(tile.TxTypeIntra2Set)-1)
+		// reduced_txtp_set=1. Chroma inherits DCT_DCT and signals no type.
+		if intra {
+			ec.SymbolAdaptDav1d(1, ctx.TxTypeIntra2CDF[int(td.Min)][yMode][:], len(tile.TxTypeIntra2Set)-1)
+		} else {
+			ec.BoolAdapt(1, ctx.TxTypeInter3CDF[min(3, int(td.Min))][:])
+		}
 	}
 	encodeSquareEOB(ec, ctx, td, chroma, eob)
 

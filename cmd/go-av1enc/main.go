@@ -4,8 +4,8 @@
 //
 //	go-av1enc -i input.y4m -o output.ivf [--crf 30]
 //
-// It reads a Y4M file, encodes each frame as AV1 intra-only key frames,
-// and writes the output as an IVF container.
+// It reads a Y4M file, emits an AV1 key frame followed by reference inter
+// frames, and writes the output as an IVF container.
 package main
 
 import (
@@ -25,7 +25,7 @@ func main() {
 	crf := flag.Int("crf", 30, "constant rate factor (0-63)")
 	flag.Parse()
 
-	fmt.Fprintf(os.Stderr, "go-av1enc %s (M12 reference-reuse baseline)\n", av1.Version)
+	fmt.Fprintf(os.Stderr, "go-av1enc %s (M12 inter baseline)\n", av1.Version)
 
 	if *in == "" || *out == "" {
 		fmt.Fprintln(os.Stderr, "usage: go-av1enc -i <input.y4m> -o <output.ivf> [--crf 30]")

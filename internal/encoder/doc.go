@@ -13,6 +13,5 @@
 //
 // Reference implementation: SVT-AV1/Source/Lib/Codec.
 //
-// Milestone: M10 onwards. The package exists at M0 only to reserve the
-// import path.
+// Milestone: M12 inter baseline.
 package encoder

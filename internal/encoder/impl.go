@@ -58,7 +58,7 @@ func NewImpl(opts Options) (*Impl, error) {
 		opts.BitDepth = 8
 	}
 	if opts.BitDepth != 8 {
-		return nil, errors.New("encoder: only 8-bit supported by the M11 baseline")
+		return nil, errors.New("encoder: only 8-bit supported by the M12 baseline")
 	}
 	if opts.FrameRateNum == 0 {
 		opts.FrameRateNum = 30
@@ -112,7 +112,11 @@ func (e *Impl) SendPicture(p *RawPicture) error {
 	if repeated {
 		data = e.fe.EncodeShowExisting()
 	} else {
-		data = e.fe.EncodeFrame(p.Y, p.U, p.V, e.frameNum)
+		if e.frameNum == 0 {
+			data = e.fe.EncodeFrame(p.Y, p.U, p.V, e.frameNum)
+		} else {
+			data = e.fe.EncodeInterFrame(p.Y, p.U, p.V)
+		}
 		e.lastY = append(e.lastY[:0], p.Y...)
 		e.lastU = append(e.lastU[:0], p.U...)
 		e.lastV = append(e.lastV[:0], p.V...)
@@ -121,7 +125,7 @@ func (e *Impl) SendPicture(p *RawPicture) error {
 	pkt := &Packet{
 		Data:     data,
 		PTS:      int64(e.frameNum),
-		Keyframe: !repeated,
+		Keyframe: e.frameNum == 0,
 	}
 	e.packets = append(e.packets, pkt)
 	e.frameNum++

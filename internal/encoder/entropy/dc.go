@@ -16,11 +16,11 @@ import (
 func EncodeDCOnly(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
 	tx uint8, plane, bx, by, blockW, blockH, level int,
 ) uint8 {
-	return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockW, blockH, tile.DCPred, level)
+	return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockW, blockH, tile.DCPred, true, level)
 }
 
 func encodeDCOnlyMode(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
-	tx uint8, plane, bx, by, blockW, blockH, yMode, level int,
+	tx uint8, plane, bx, by, blockW, blockH, yMode int, intra bool, level int,
 ) uint8 {
 	td := transform.TxfmDimensions[tx]
 	skipCtx := fs.CoefSkipCtx(plane, bx, by, blockW, blockH, tx)
@@ -39,8 +39,12 @@ func encodeDCOnlyMode(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fra
 	// transforms signal DCT_DCT as symbol 1 in the reduced intra set;
 	// chroma DCT_DCT is inferred from the chroma prediction mode.
 	if plane == 0 && int(td.Max)+1 < 4 {
-		txClass := min(2, int(td.Min))
-		ec.SymbolAdaptDav1d(1, ctx.TxTypeIntra2CDF[txClass][yMode][:], len(tile.TxTypeIntra2Set)-1)
+		if intra {
+			txClass := min(2, int(td.Min))
+			ec.SymbolAdaptDav1d(1, ctx.TxTypeIntra2CDF[txClass][yMode][:], len(tile.TxTypeIntra2Set)-1)
+		} else {
+			ec.BoolAdapt(1, ctx.TxTypeInter3CDF[min(3, int(td.Min))][:])
+		}
 	}
 
 	// EOB position zero means exactly one coefficient (DC).
