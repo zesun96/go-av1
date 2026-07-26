@@ -42,6 +42,7 @@ type vectorResult struct {
 	FramesActual   int                     `json:"frames_actual"`
 	Comparison     *conformance.Comparison `json:"comparison,omitempty"`
 	GoError        string                  `json:"go_error,omitempty"`
+	Outcome        string                  `json:"outcome,omitempty"`
 	ElapsedNS      int64                   `json:"elapsed_ns"`
 }
 
@@ -120,6 +121,9 @@ func discoverVectors(root, corpus string, include *regexp.Regexp) (conformance.M
 
 func vectorTags(name string) []string {
 	tags := []string{"directory"}
+	if strings.HasPrefix(strings.ToLower(name), "invalid-") {
+		tags = append(tags, "robustness")
+	}
 	switch {
 	case strings.Contains(strings.ToLower(name), "-b8-"):
 		tags = append(tags, "bitdepth-8")
@@ -133,6 +137,9 @@ func vectorTags(name string) []string {
 
 func vectorExpectedStatus(name string) string {
 	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, "invalid-") {
+		return "invalid"
+	}
 	if strings.Contains(lower, "-b10-") || strings.Contains(lower, "-b12-") {
 		return "unsupported"
 	}
@@ -178,7 +185,13 @@ func runSuite(manifest conformance.Manifest, baseDir, reportPath, markdownPath, 
 			item.GoError = fmt.Sprintf("input SHA-256 %s, expected %s", actualSHA, vector.SHA256)
 		} else {
 			detailPath := filepath.Join(detailDir, vector.Name+".json")
-			runErr := run(input, detailPath, dav1d, limit)
+			runDav1d := dav1d
+			if vector.ExpectedStatus == "invalid" {
+				// Robustness vectors may be safely decoded or rejected. A
+				// reference decoder's acceptance policy is not compared.
+				runDav1d = ""
+			}
+			runErr := run(input, detailPath, runDav1d, limit)
 			var detail report
 			if data, readErr := os.ReadFile(detailPath); readErr == nil {
 				if jsonErr := json.Unmarshal(data, &detail); jsonErr != nil {
@@ -186,7 +199,7 @@ func runSuite(manifest conformance.Manifest, baseDir, reportPath, markdownPath, 
 				} else {
 					item.FramesActual = len(detail.Frames)
 					item.Comparison = detail.Comparison
-					if dav1d == "" {
+					if runDav1d == "" && vector.ExpectedStatus != "invalid" {
 						limitedVector := vector
 						limitedVector.Limit = limit
 						comparison := conformance.CompareExpected(detail.Frames, limitedVector)
@@ -196,6 +209,16 @@ func runSuite(manifest conformance.Manifest, baseDir, reportPath, markdownPath, 
 			}
 			if runErr != nil && item.GoError == "" && item.Comparison == nil {
 				item.GoError = runErr.Error()
+			}
+			if vector.ExpectedStatus == "invalid" {
+				item.Status = "pass"
+				if runErr != nil {
+					item.Outcome = "safely rejected: " + runErr.Error()
+				} else {
+					item.Outcome = "decoded without fatal error"
+				}
+				item.GoError = ""
+				item.Comparison = nil
 			}
 			if errors.Is(runErr, av1.ErrUnsupported) && vector.ExpectedStatus == "unsupported" {
 				item.Status = "unsupported"
@@ -303,6 +326,8 @@ func writeMarkdown(path string, suite suiteReport) error {
 			}
 		} else if result.GoError != "" {
 			difference = strings.ReplaceAll(result.GoError, "|", "\\|")
+		} else if result.Outcome != "" {
+			difference = strings.ReplaceAll(result.Outcome, "|", "\\|")
 		}
 		fmt.Fprintf(f, "| %s | %s | %d/%d | %s | %.3fs |\n", result.Name, result.Status, result.FramesActual, result.FramesExpected, difference, float64(result.ElapsedNS)/1e9)
 	}

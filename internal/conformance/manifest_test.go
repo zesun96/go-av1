@@ -32,3 +32,19 @@ func TestReadManifestRejectsUnknownField(t *testing.T) {
 		t.Fatal("expected validation error")
 	}
 }
+
+func TestReadManifestAcceptsInvalidExpectedStatus(t *testing.T) {
+	_, err := ReadManifest(strings.NewReader(`{
+  "schema_version": 1,
+  "corpus": "robustness",
+  "vectors": [{
+    "name": "invalid-crash", "path": "invalid-crash.ivf",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frames": 0, "profile": 0, "bit_depth": 8, "chroma": "4:2:0",
+    "expected_status": "invalid"
+  }]
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+}

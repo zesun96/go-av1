@@ -62,7 +62,7 @@ func ReadManifest(r io.Reader) (Manifest, error) {
 		if vector.Frames < 0 || vector.Limit < 0 {
 			return Manifest{}, fmt.Errorf("conformance: vector %q has a negative frame count or limit", vector.Name)
 		}
-		if vector.ExpectedStatus != "pass" && vector.ExpectedStatus != "unsupported" {
+		if vector.ExpectedStatus != "pass" && vector.ExpectedStatus != "unsupported" && vector.ExpectedStatus != "invalid" {
 			return Manifest{}, fmt.Errorf("conformance: vector %q has invalid expected_status %q", vector.Name, vector.ExpectedStatus)
 		}
 		lastIndex := -1

@@ -51,6 +51,20 @@ func TestDiscoverVectorsClassifiesHighBitDepth(t *testing.T) {
 	}
 }
 
+func TestDiscoverVectorsClassifiesInvalidAsRobustness(t *testing.T) {
+	root := t.TempDir()
+	writeTestIVF(t, filepath.Join(root, "invalid-crash.ivf"), 1)
+	manifest, err := discoverVectors(root, "test", regexp.MustCompile(`invalid-`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Vectors) != 1 ||
+		manifest.Vectors[0].ExpectedStatus != "invalid" ||
+		!containsString(manifest.Vectors[0].Tags, "robustness") {
+		t.Fatalf("invalid vector classification = %+v", manifest.Vectors)
+	}
+}
+
 func TestDiscoverVectorsAppliesIncludeToRelativePath(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "keep"), 0o755); err != nil {
@@ -113,6 +127,29 @@ func TestWriteMarkdownIncludesFirstSample(t *testing.T) {
 	}
 	text := string(data)
 	if !strings.Contains(text, "Total: 1") || !strings.Contains(text, "frame 1: frame_md5 U(2,3)") {
+		t.Fatalf("Markdown report:\n%s", text)
+	}
+}
+
+func TestWriteMarkdownIncludesRobustnessOutcome(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report.md")
+	suite := suiteReport{
+		Corpus:  "robustness",
+		Summary: suiteSummary{Total: 1, Passed: 1},
+		Results: []vectorResult{{
+			Name:    "invalid-obu",
+			Status:  "pass",
+			Outcome: "safely rejected: malformed OBU",
+		}},
+	}
+	if err := writeMarkdown(path, suite); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(data); !strings.Contains(text, "safely rejected: malformed OBU") {
 		t.Fatalf("Markdown report:\n%s", text)
 	}
 }

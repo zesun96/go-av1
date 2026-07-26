@@ -107,7 +107,10 @@ go run ./cmd/av1-conformance `
 
 Directory mode infers AOM `-b10-` and `-b12-` files as expected unsupported
 until the decoder has high-bit-depth storage. `-include` is a Go regular
-expression matched against slash-separated relative paths.
+expression matched against slash-separated relative paths. AOM `invalid-*`
+inputs are classified as robustness vectors: either a safe decoder rejection
+or a completed decode passes, while a panic or process failure still fails the
+suite.
 
 The JSON report records the input SHA-256, container metadata, native output
 dimensions, and separate Y/U/V plus whole-frame MD5 values. Row padding is
