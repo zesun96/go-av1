@@ -315,11 +315,13 @@ func TestEncodeDecodeTranslatedInterFrame(t *testing.T) {
 		t.Fatalf("NewDecoder: %v", err)
 	}
 	defer dec.Close()
+	var packetSizes [2]int
 	for frame := 0; frame < 2; frame++ {
 		pkt, err := enc.ReceivePacket()
 		if err != nil {
 			t.Fatalf("ReceivePacket %d: %v", frame, err)
 		}
+		packetSizes[frame] = len(pkt.Data)
 		if err := dec.SendData(pkt.Data); err != nil {
 			t.Fatalf("SendData %d: %v", frame, err)
 		}
@@ -340,6 +342,9 @@ func TestEncodeDecodeTranslatedInterFrame(t *testing.T) {
 			}
 		}
 		pic.Release()
+	}
+	if packetSizes[1] >= packetSizes[0] {
+		t.Fatalf("translated inter packet=%d bytes, key packet=%d", packetSizes[1], packetSizes[0])
 	}
 }
 

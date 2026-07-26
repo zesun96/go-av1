@@ -270,16 +270,6 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	fs *tile.FrameState, st *tileEncodeState, bx, by, bw, bh int,
 ) {
 	coded := bw == 8 && bh == 8
-	skip := !coded
-	skipCtx := fs.SkipCtx(bx, by)
-	ec.BoolAdapt(boolSymbol(skip), ctx.SkipCDF[skipCtx][:])
-
-	ic := tile.SingleRefEncoderContexts(fs, bx, by, bw, bh)
-	ec.BoolAdapt(1, ctx.IntraCDF[ic.Intra][:]) // inter
-	ec.BoolAdapt(0, ctx.RefCDF[0][ic.Ref][:])  // forward reference group
-	ec.BoolAdapt(0, ctx.RefCDF[2][ic.Ref3][:]) // LAST/LAST2 group
-	ec.BoolAdapt(0, ctx.RefCDF[3][ic.Ref4][:]) // LAST_FRAME
-
 	mv := me.MV{}
 	if coded && bx+8 <= fe.Width && by+8 <= fe.Height {
 		result, err := me.Search(me.Config{
@@ -293,6 +283,25 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 			mv = result.MV
 		}
 	}
+	var planes []*interPlaneEncode
+	if coded {
+		planes = append(planes, fe.analyzeInterPlane(st, 0, bx, by, 8, transform.TX8x8, mv.X, mv.Y))
+		if blockHasChroma(bx, by, bw, bh) {
+			planes = append(planes,
+				fe.analyzeInterPlane(st, 1, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y),
+				fe.analyzeInterPlane(st, 2, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y))
+		}
+	}
+	skip := !coded || interPlanesAllZero(planes)
+	skipCtx := fs.SkipCtx(bx, by)
+	ec.BoolAdapt(boolSymbol(skip), ctx.SkipCDF[skipCtx][:])
+
+	ic := tile.SingleRefEncoderContexts(fs, bx, by, bw, bh)
+	ec.BoolAdapt(1, ctx.IntraCDF[ic.Intra][:]) // inter
+	ec.BoolAdapt(0, ctx.RefCDF[0][ic.Ref][:])  // forward reference group
+	ec.BoolAdapt(0, ctx.RefCDF[2][ic.Ref3][:]) // LAST/LAST2 group
+	ec.BoolAdapt(0, ctx.RefCDF[3][ic.Ref4][:]) // LAST_FRAME
+
 	interMode := tile.InterModeGlobalMV
 	baseX, baseY := 0, 0
 	deltaX, deltaY := 0, 0
@@ -321,13 +330,15 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	uvtx := uint8(transform.TX4x4)
 	fs.SetTxCtx(bx, by, bw, bh, maxTx, false, skip)
 	fs.SetInterTxIntraCtx(bx, by, bw, bh)
-	if coded {
-		fe.encodeInterPlane(ec, ctx, fs, st, 0, bx, by, 8, transform.TX8x8, mv.X, mv.Y)
-		if blockHasChroma(bx, by, bw, bh) {
-			fe.encodeInterPlane(ec, ctx, fs, st, 1, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y)
-			fe.encodeInterPlane(ec, ctx, fs, st, 2, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y)
+	if !skip {
+		for _, plane := range planes {
+			fe.encodeInterPlane(ec, ctx, fs, st, plane)
 		}
 	} else {
+		for _, plane := range planes {
+			copyPredictedBlock(st.recon[plane.plane], st.w[plane.plane], st.h[plane.plane],
+				plane.bx, plane.by, plane.size, plane.pred)
+		}
 		fs.SetCoefCtxBlock(0, bx, by, bw, bh, 0x40)
 		if blockHasChroma(bx, by, bw, bh) {
 			fs.SetCoefCtxBlock(1, bx/2, by/2, (bw+1)/2, (bh+1)/2, 0x40)
@@ -351,9 +362,19 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	fs.CommitInterBlock(bx, by, bw, bh, blk, 1, blockHasChroma(bx, by, bw, bh))
 }
 
-func (fe *FrameEncoder) encodeInterPlane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
-	fs *tile.FrameState, st *tileEncodeState, plane, bx, by, size int, tx uint8, mvX, mvY int,
-) {
+type interPlaneEncode struct {
+	plane int
+	bx    int
+	by    int
+	size  int
+	tx    uint8
+	pred  []byte
+	coeff []int32
+}
+
+func (fe *FrameEncoder) analyzeInterPlane(st *tileEncodeState,
+	plane, bx, by, size int, tx uint8, mvX, mvY int,
+) *interPlaneEncode {
 	ss := 0
 	if plane > 0 {
 		ss = 1
@@ -376,13 +397,43 @@ func (fe *FrameEncoder) encodeInterPlane(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 		encodertx.FwdDCT4x4(coeff, residual, size)
 	}
 	encodertx.Quantize(coeff, fe.QIndex, fe.BitDepth)
-	if plane == 0 {
-		entropy.EncodeInterDCT8(ec, ctx, fs, bx, by, coeff)
-	} else {
-		entropy.EncodeInterDCT4(ec, ctx, fs, plane, bx, by, coeff)
+	return &interPlaneEncode{
+		plane: plane, bx: bx, by: by, size: size, tx: tx,
+		pred: pred, coeff: coeff,
 	}
-	reconstructDCTBlock(st.recon[plane], st.w[plane], st.h[plane],
-		bx, by, size, pred, coeff, tx, fe.QIndex, fe.BitDepth)
+}
+
+func (fe *FrameEncoder) encodeInterPlane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
+	fs *tile.FrameState, st *tileEncodeState, plane *interPlaneEncode,
+) {
+	if plane.plane == 0 {
+		entropy.EncodeInterDCT8(ec, ctx, fs, plane.bx, plane.by, plane.coeff)
+	} else {
+		entropy.EncodeInterDCT4(ec, ctx, fs, plane.plane, plane.bx, plane.by, plane.coeff)
+	}
+	reconstructDCTBlock(st.recon[plane.plane], st.w[plane.plane], st.h[plane.plane],
+		plane.bx, plane.by, plane.size, plane.pred, plane.coeff, plane.tx, fe.QIndex, fe.BitDepth)
+}
+
+func interPlanesAllZero(planes []*interPlaneEncode) bool {
+	if len(planes) == 0 {
+		return false
+	}
+	for _, plane := range planes {
+		for _, coeff := range plane.coeff {
+			if coeff != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func copyPredictedBlock(dst []byte, width, height, bx, by, size int, pred []byte) {
+	for y := 0; y < size && by+y < height; y++ {
+		n := min(size, width-bx)
+		copy(dst[(by+y)*width+bx:(by+y)*width+bx+n], pred[y*size:y*size+n])
+	}
 }
 
 func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
