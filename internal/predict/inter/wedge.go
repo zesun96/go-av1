@@ -170,6 +170,11 @@ func InterIntraMask(w, h, mode int) []uint8 {
 
 // SubsampleMask averages a luma mask for chroma subsampling.
 func SubsampleMask(mask []uint8, w, h, ssHor, ssVer int) ([]uint8, int, int) {
+	return SubsampleMaskSigned(mask, w, h, ssHor, ssVer, false)
+}
+
+// SubsampleMaskSigned applies AV1's mask_sign-dependent chroma rounding.
+func SubsampleMaskSigned(mask []uint8, w, h, ssHor, ssVer int, sign bool) ([]uint8, int, int) {
 	cw, ch := (w+(1<<ssHor)-1)>>ssHor, (h+(1<<ssVer)-1)>>ssVer
 	out := make([]uint8, cw*ch)
 	for y := 0; y < ch; y++ {
@@ -184,7 +189,11 @@ func SubsampleMask(mask []uint8, w, h, ssHor, ssVer int) ([]uint8, int, int) {
 					}
 				}
 			}
-			out[y*cw+x] = uint8((sum + count/2) / count)
+			round := count / 2
+			if sign {
+				round--
+			}
+			out[y*cw+x] = uint8((sum + round) / count)
 		}
 	}
 	return out, cw, ch

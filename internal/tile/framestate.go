@@ -24,7 +24,9 @@ type FrameState struct {
 	// AboveSkip[col4] — skip flag of the block above column col4 (4-px units).
 	AboveSkip []uint8
 	// LeftSkip[row4] — skip flag of the block to the left of row row4.
-	LeftSkip []uint8
+	LeftSkip      []uint8
+	AboveSkipMode []uint8
+	LeftSkipMode  []uint8
 
 	// AboveMode[col4] — KFY-context mode (0-4) of the block above col4.
 	AboveMode []uint8
@@ -150,6 +152,8 @@ func NewFrameState(w, h int) *FrameState {
 	return &FrameState{
 		AboveSkip:      make([]uint8, w4),
 		LeftSkip:       make([]uint8, h4),
+		AboveSkipMode:  make([]uint8, w4),
+		LeftSkipMode:   make([]uint8, h4),
 		AboveMode:      make([]uint8, w4),
 		LeftMode:       make([]uint8, h4),
 		AbovePresent:   make([]uint8, w4),
@@ -303,6 +307,19 @@ func (fs *FrameState) SkipCtx(bx, by int) int {
 		left = int(fs.LeftSkip[row4])
 	}
 	return above + left
+}
+
+func (fs *FrameState) SkipModeCtx(bx, by int) int {
+	col4 := bx / 4
+	row4 := by / 4
+	ctx := 0
+	if row4 > 0 && col4 < fs.W4 {
+		ctx += int(fs.AboveSkipMode[col4])
+	}
+	if col4 > 0 && row4 < fs.H4 {
+		ctx += int(fs.LeftSkipMode[row4])
+	}
+	return ctx
 }
 
 // TopModeCtx returns the KFY top-mode context (0-4) for a block at (bx,by).
@@ -497,6 +514,16 @@ func (fs *FrameState) SetBlockState(bx, by, bw, bh int, blk Av1Block) {
 	row4End := (by + bh + 3) / 4
 	if row4End > fs.H4 {
 		row4End = fs.H4
+	}
+	skipMode := uint8(0)
+	if blk.SkipMode {
+		skipMode = 1
+	}
+	for c := col4Start; c < col4End; c++ {
+		fs.AboveSkipMode[c] = skipMode
+	}
+	for r := row4Start; r < row4End; r++ {
+		fs.LeftSkipMode[r] = skipMode
 	}
 	for r := row4Start; r < row4End; r++ {
 		base := r * fs.W4
@@ -710,6 +737,38 @@ func (fs *FrameState) CommitInterBlock(bx, by, bw, bh int, blk Av1Block, refFram
 	if blk.Compound {
 		fs.setCurrentCompoundMVBlock(bx, by, bw, bh, blk)
 	}
+	fs.setTemporalMVBlockFromState(bx, by, bw, bh, blk)
+}
+
+func (fs *FrameState) setTemporalMVBlockFromState(bx, by, bw, bh int, blk Av1Block) {
+	refFrame := int(blk.RefFrame)
+	mv := refmvs.MV{Y: blk.MV[0], X: blk.MV[1]}
+	valid := fs.temporalMVReference(refFrame, mv)
+	if blk.Compound {
+		mv2 := refmvs.MV{Y: blk.MV2[0], X: blk.MV2[1]}
+		if ref2 := int(blk.RefFrame2); fs.temporalMVReference(ref2, mv2) {
+			refFrame, mv, valid = ref2, mv2, true
+		}
+	}
+	if !valid {
+		refFrame, mv = 0, refmvs.MV{}
+	}
+	fs.setTemporalMVBlock(bx, by, bw, bh, refFrame, mv)
+}
+
+func (fs *FrameState) temporalMVReference(refFrame int, mv refmvs.MV) bool {
+	if fs == nil || fs.MVFrame == nil || fs.MVFrame.OrderBits == 0 ||
+		refFrame <= 0 || refFrame > len(fs.MVFrame.RefFrameOrderHints) {
+		return false
+	}
+	if absInt(int(mv.X)) >= 4096 || absInt(int(mv.Y)) >= 4096 {
+		return false
+	}
+	return refmvs.RelativeDist(
+		fs.MVFrame.RefFrameOrderHints[refFrame-1],
+		fs.MVFrame.OrderHint,
+		fs.MVFrame.OrderBits,
+	) < 0
 }
 
 // CommitIntraMVBlock records an intra block in the reference-MV grid. Spatial
@@ -719,9 +778,11 @@ func (fs *FrameState) CommitIntraMVBlock(bx, by, bw, bh int) {
 	if fs.MVFrame == nil {
 		return
 	}
+	fs.setTemporalMVBlock(bx, by, bw, bh, 0, refmvs.MV{})
 	bw4 := (bw + 3) >> 2
 	bh4 := (bh + 3) >> 2
 	fs.MVFrame.PutGridBlock(bx>>2, by>>2, bw4, bh4, refmvs.Block{
+		MV:  refmvs.MVPair{refmvs.InvalidMV, {}},
 		Ref: refmvs.RefPair{0, -1},
 		BS:  uint8(maxInt(bsizeFromDim(bw, bh), 0)),
 	})
@@ -731,13 +792,17 @@ func (fs *FrameState) setTemporalMVBlock(bx, by, bw, bh int, refFrame int, mv re
 	if fs.MVFrame == nil || fs.MVFrame.RPStride == 0 {
 		return
 	}
-	col8Start := bx >> 3
-	col8End := (bx + bw + 7) >> 3
+	bx4, by4 := bx>>2, by>>2
+	bw4, bh4 := (bw+3)>>2, (bh+3)>>2
+	// save_tmvs samples the bottom-right 4x4 cell of each 8x8 location.
+	// Sub-8x8 neighbours sharing that location must not overwrite its owner.
+	col8Start := bx4 >> 1
+	col8End := (bx4 + bw4) >> 1
 	if col8End > fs.MVFrame.IW8 {
 		col8End = fs.MVFrame.IW8
 	}
-	row8Start := by >> 3
-	row8End := (by + bh + 7) >> 3
+	row8Start := by4 >> 1
+	row8End := (by4 + bh4) >> 1
 	if row8End > fs.MVFrame.IH8 {
 		row8End = fs.MVFrame.IH8
 	}
@@ -792,10 +857,10 @@ func (fs *FrameState) setCurrentCompoundMVBlock(bx, by, bw, bh int, av1Blk Av1Bl
 		return
 	}
 	mf := uint8(0)
-	if int(av1Blk.InterMode) == InterModeGlobalMV {
+	if av1Blk.InterMode == compInterModeGlobalGlobal {
 		mf |= 1
 	}
-	if int(av1Blk.InterMode) == InterModeNewMV {
+	if (uint16(1) << av1Blk.InterMode & 0xbc) != 0 {
 		mf |= 2
 	}
 	fs.MVFrame.PutGridBlock(bx>>2, by>>2, (bw+3)>>2, (bh+3)>>2, refmvs.Block{

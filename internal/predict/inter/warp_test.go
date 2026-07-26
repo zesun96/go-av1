@@ -21,3 +21,26 @@ func TestPutWarpAffineIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestPrepWarpAffineIdentityRoundTripsThroughCompoundAverage(t *testing.T) {
+	const width, height = 24, 24
+	src := make([]byte, width*height)
+	for i := range src {
+		src[i] = byte((i*11 + 7) & 0xff)
+	}
+	tmp := make([]int16, 8*8)
+	PrepWarpAffine(tmp, 8, src, width, width, height, 8, 8, 8, 8, 0, 0,
+		[6]int32{0, 0, 1 << 16, 0, 0, 1 << 16}, [4]int16{})
+	dst := make([]byte, 8*8)
+	Avg(dst, 8, tmp, tmp, 8, 8)
+	want := make([]byte, 8*8)
+	PutWarpAffine(want, 8, src, width, width, height, 8, 8, 8, 8, 0, 0,
+		[6]int32{0, 0, 1 << 16, 0, 0, 1 << 16}, [4]int16{})
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			if got := dst[y*8+x]; got != want[y*8+x] {
+				t.Fatalf("pixel (%d,%d) = %d, want %d", x, y, got, want[y*8+x])
+			}
+		}
+	}
+}

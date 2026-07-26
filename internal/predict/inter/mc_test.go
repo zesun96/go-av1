@@ -475,6 +475,29 @@ func TestAvg_DifferentBuffers(t *testing.T) {
 	}
 }
 
+func TestDiffWtdMask(t *testing.T) {
+	tmp1 := []int16{60 << 4, 40 << 4}
+	tmp2 := []int16{40 << 4, 60 << 4}
+	dst := make([]byte, 2)
+	mask := DiffWtdMask(dst, 2, tmp1, tmp2, 2, 1)
+	if !slices.Equal(mask, []byte{39, 39}) {
+		t.Fatalf("mask=%v want [39 39]", mask)
+	}
+	if !slices.Equal(dst, []byte{52, 48}) {
+		t.Fatalf("dst=%v want [52 48]", dst)
+	}
+}
+
+func TestBlendCompoundMask(t *testing.T) {
+	tmp1 := []int16{60 << 4, 40 << 4}
+	tmp2 := []int16{40 << 4, 60 << 4}
+	dst := make([]byte, 2)
+	BlendCompoundMask(dst, 2, tmp1, tmp2, []byte{64, 0}, 2, 1)
+	if !slices.Equal(dst, []byte{60, 60}) {
+		t.Fatalf("dst=%v want [60 60]", dst)
+	}
+}
+
 func TestAvg_Clamp(t *testing.T) {
 	n := 4
 	tmp1 := make([]int16, n)
@@ -603,6 +626,22 @@ func TestPut8Tap_Ramp_IntPos_MatchesCopy(t *testing.T) {
 	for i := range dst1[:8*4] {
 		if dst1[i] != dst2[i] {
 			t.Fatalf("ramp int-pos mismatch at %d: %d vs %d", i, dst1[i], dst2[i])
+		}
+	}
+}
+
+func TestPut8TapScaledPreservesConstantReference(t *testing.T) {
+	const srcW, srcH = 8, 8
+	src := make([]uint8, srcW*srcH)
+	for i := range src {
+		src[i] = 77
+	}
+	dst := make([]uint8, 16*16)
+	Put8TapScaled(dst, 16, src, srcW, srcW, srcH, 16, 16,
+		-480, -480, 512, 512, Filter2D8TapRegular)
+	for i, value := range dst {
+		if value != 77 {
+			t.Fatalf("scaled constant prediction[%d]=%d, want 77", i, value)
 		}
 	}
 }

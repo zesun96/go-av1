@@ -50,6 +50,10 @@ type FrameBuf struct {
 	Refs    [8]*PlaneBuf
 	MVFrame *refmvs.Frame
 	RefMVs  [8]*refmvs.Frame
+	// RefOrderHints remains available even for intra references, which do not
+	// retain a motion field.
+	RefOrderHints     [8]int
+	RefOrderHintValid [8]bool
 
 	// FilterState retains full-frame block metadata assembled from the
 	// independently decoded tile states. Post-filters consume this after tile

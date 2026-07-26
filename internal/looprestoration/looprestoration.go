@@ -37,6 +37,74 @@ type LooprestorationParams struct {
 	SGR    SGRParams
 }
 
+// SGRMixSnapshot applies both self-guided projections and combines their
+// unweighted residuals with a single normative rounding step.
+func SGRMixSnapshot(dst, src []uint8, stride, planeW, planeH, x0, y0, w, h int, params *SGRParams) {
+	type ab struct {
+		a int
+		b int
+	}
+	calc := func(cx, cy, radius, n, strength, oneByX int) ab {
+		sum, sumsq := 0, 0
+		for dy := -radius; dy <= radius; dy++ {
+			sy := iclip(cy+dy, 0, planeH-1)
+			for dx := -radius; dx <= radius; dx++ {
+				sx := iclip(cx+dx, 0, planeW-1)
+				v := int(src[sy*stride+sx])
+				sum += v
+				sumsq += v * v
+			}
+		}
+		p := sumsq*n - sum*sum
+		if p < 0 {
+			p = 0
+		}
+		z := (uint(p)*uint(strength) + (1 << 19)) >> 20
+		x := int(sgrXbyX[umin(z, 255)])
+		return ab{a: (x*sum*oneByX + (1 << 11)) >> 12, b: x}
+	}
+	projection3 := func(x, y int) int {
+		a, b := 0, 0
+		weights := [3][3]int{{3, 4, 3}, {4, 4, 4}, {3, 4, 3}}
+		for dy := -1; dy <= 1; dy++ {
+			for dx := -1; dx <= 1; dx++ {
+				v := calc(x+dx, y+dy, 1, 9, int(params.S1), 455)
+				weight := weights[dy+1][dx+1]
+				a += v.b * weight
+				b += v.a * weight
+			}
+		}
+		return (b - a*int(src[y*stride+x]) + (1 << 8)) >> 9
+	}
+	row5 := func(x, y int) (a, b int) {
+		for dx, weight := range [3]int{5, 6, 5} {
+			v := calc(x+dx-1, y, 2, 25, int(params.S0), 164)
+			a += v.b * weight
+			b += v.a * weight
+		}
+		return a, b
+	}
+	projection5 := func(x, y int) int {
+		a, b := row5(x, y)
+		shift, rounding := 8, 1<<7
+		if y&1 == 0 {
+			a, b = row5(x, y-1)
+			a1, b1 := row5(x, y+1)
+			a += a1
+			b += b1
+			shift, rounding = 9, 1<<8
+		}
+		return (b - a*int(src[y*stride+x]) + rounding) >> shift
+	}
+	for y := y0; y < y0+h; y++ {
+		for x := x0; x < x0+w; x++ {
+			s := int(src[y*stride+x])
+			v := params.W0*projection5(x, y) + params.W1*projection3(x, y)
+			dst[y*stride+x] = uint8(iclip(s+((v+(1<<10))>>11), 0, 255))
+		}
+	}
+}
+
 // SGR3x3Snapshot applies the normative single-radius SGR projection from an
 // immutable source plane. It is used for rows that do not touch restoration
 // stripe boundaries, where ordinary frame-edge replication applies.

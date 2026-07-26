@@ -56,12 +56,68 @@ func TestFindSpatialSortsSecondarySeparately(t *testing.T) {
 	}
 }
 
+func TestFindSortsSpatialCandidatesWithoutTemporalMVs(t *testing.T) {
+	frame := NewFrame(32, 32)
+	frame.PutGridBlock(2, 1, 2, 1, Block{Ref: RefPair{1, -1}, MV: MVPair{{X: -4}}, BS: 1})
+	frame.PutGridBlock(1, 2, 1, 2, Block{Ref: RefPair{1, -1}, MV: MVPair{{Y: 8}}, BS: 1})
+
+	got := Find(SearchConfig{
+		Frame: frame, Ref: 1, Bx4: 2, By4: 2, Bw4: 4, Bh4: 4,
+		TileX1: 8, TileY1: 8, BlockDims: testBlockDims(),
+	})
+	if got.Count < 2 {
+		t.Fatalf("candidate count=%d, want at least 2", got.Count)
+	}
+	if got.Candidates[0].Weight < got.Candidates[1].Weight {
+		t.Fatalf("unsorted candidates=%+v", got.Candidates[:got.Count])
+	}
+}
+
 func TestFindSpatialSecondaryNewMVDoesNotSetNearestContext(t *testing.T) {
 	f := NewFrame(64, 64)
 	f.PutGridBlock(1, 5, 1, 1, Block{Ref: RefPair{1, -1}, MV: MVPair{{X: 8}}, BS: 0, MF: 2})
 	r := FindSpatial(SearchConfig{Frame: f, Ref: 1, Bx4: 4, By4: 4, Bw4: 2, Bh4: 2, BlockDims: testBlockDims()})
 	if r.Count == 0 || r.NearestCount != 0 || r.HaveNewMV || r.Candidates[0].Weight >= 640 {
 		t.Fatalf("secondary result count=%d haveNewMV=%v, want candidate without nearest NEWMV match", r.Count, r.HaveNewMV)
+	}
+}
+
+func TestFindSpatialCompoundGlobalCandidateUsesTargetGlobalMVs(t *testing.T) {
+	f := NewFrame(64, 64)
+	dims := testBlockDims()
+	f.PutGridBlock(0, 4, 4, 4, Block{
+		Ref: RefPair{1, 7},
+		MV:  MVPair{{Y: -9, X: -54}, {Y: 9, X: 53}},
+		BS:  0,
+		MF:  1,
+	})
+	want := MVPair{{Y: -9, X: -52}, {Y: 9, X: 51}}
+	r := FindSpatial(SearchConfig{
+		Frame: f, Ref: 1, Ref2: 7,
+		GlobalMV: want[0], GlobalMV2: want[1],
+		Bx4: 4, By4: 4, Bw4: 4, Bh4: 4,
+		BlockDims: dims,
+	})
+	if r.Count == 0 || r.Candidates[0].MV != want {
+		t.Fatalf("candidate=%+v count=%d, want global pair %+v", r.Candidates[0].MV, r.Count, want)
+	}
+}
+
+func TestFindSpatialAcceptsIntraBCCandidate(t *testing.T) {
+	f := NewFrame(64, 64)
+	want := MV{Y: -64, X: 128}
+	f.PutGridBlock(0, 0, 4, 4, Block{
+		Ref: RefPair{0, -1},
+		MV:  MVPair{want, {}},
+		BS:  0,
+	})
+	r := FindSpatial(SearchConfig{
+		Frame: f, Ref: 0,
+		Bx4: 4, By4: 0, Bw4: 4, Bh4: 4,
+		BlockDims: testBlockDims(),
+	})
+	if r.Count != 1 || r.Candidates[0].MV[0] != want {
+		t.Fatalf("IntraBC candidate=%+v count=%d, want %+v", r.Candidates[0].MV[0], r.Count, want)
 	}
 }
 
@@ -93,6 +149,40 @@ func TestFindTemporalScalesMotionField(t *testing.T) {
 	mv, ok := FindTemporal(current, source, 3, 2, 2)
 	if !ok || mv != (MV{Y: 3, X: -2}) {
 		t.Fatalf("FindTemporal = (%+v, %v), want {3,-2}, true", mv, ok)
+	}
+}
+
+func TestTemporalProjectionDoesNotCrossVertical64PixelBand(t *testing.T) {
+	current := NewFrame(128, 128)
+	current.OrderHint, current.OrderBits = 9, 5
+	current.RefOrderHints[3] = 8
+	source := NewFrame(128, 128)
+	source.OrderHint, source.OrderBits = 8, 5
+	source.RefFrameOrderHints[2] = 6
+	// This vector would project the source entry from y8=7 to y8=8. Motion
+	// field projection is confined to the source entry's 64-pixel band.
+	source.RP[7*source.RPStride+1] = TemporalBlock{MV: MV{Y: -128}, Ref: 3}
+	projectTestSource(current, source, 3)
+
+	if got := current.RPProj[8*current.RPStride+1]; got.Ref != 0 {
+		t.Fatalf("cross-band temporal projection=%+v, want invalid", got)
+	}
+}
+
+func TestTemporalProjectionIgnoresScaledReference(t *testing.T) {
+	current := NewFrame(64, 64)
+	current.OrderHint, current.OrderBits = 9, 5
+	current.RefOrderHints[3] = 8
+	source := NewFrame(32, 32)
+	source.OrderHint, source.OrderBits = 8, 5
+	source.RefFrameOrderHints[2] = 6
+	source.RP[source.RPStride+1] = TemporalBlock{MV: MV{Y: 16}, Ref: 3}
+	projectTestSource(current, source, 3)
+
+	for i, projected := range current.RPProj {
+		if projected.Ref != 0 {
+			t.Fatalf("scaled reference populated temporal projection at %d: %+v", i, projected)
+		}
 	}
 }
 
@@ -314,6 +404,33 @@ func TestFindExtendedCandidateFlipsAcrossReferenceDirections(t *testing.T) {
 	})
 	if got.Count != 1 || got.Candidates[0].MV[0] != (MV{Y: 16, X: -8}) {
 		t.Fatalf("direction-adjusted candidates=%+v count=%d", got.Candidates, got.Count)
+	}
+}
+
+func TestFindExtendsCompoundStackFromSingleReferenceNeighbors(t *testing.T) {
+	frame := NewFrame(32, 32)
+	frame.OrderHint, frame.OrderBits = 10, 5
+	frame.RefFrameOrderHints[0] = 9
+	frame.RefFrameOrderHints[6] = 8
+	frame.PutGridBlock(2, 0, 2, 2, Block{
+		Ref: RefPair{7, -1}, MV: MVPair{{Y: -12, X: 88}}, BS: 17,
+	})
+	frame.PutGridBlock(0, 2, 2, 2, Block{
+		Ref: RefPair{1, -1}, MV: MVPair{{Y: 4, X: -8}}, BS: 17,
+	})
+
+	got := Find(SearchConfig{
+		Frame: frame, Ref: 1, Ref2: 7, Bx4: 2, By4: 2, Bw4: 2, Bh4: 2,
+		TileX1: 8, TileY1: 8, BlockDims: testFullBlockDims(),
+		GlobalMV: MV{Y: 2}, GlobalMV2: MV{X: 6},
+	})
+	want := MVPair{{Y: 4, X: -8}, {Y: -12, X: 88}}
+	if got.Count != 2 || got.Candidates[0].MV != want {
+		t.Fatalf("compound extended candidates=%+v count=%d, want first=%+v", got.Candidates, got.Count, want)
+	}
+	cross := MVPair{{Y: -12, X: 88}, {Y: 4, X: -8}}
+	if got.Candidates[1].MV != cross {
+		t.Fatalf("compound cross-reference fallback=%+v, want %+v", got.Candidates[1].MV, cross)
 	}
 }
 

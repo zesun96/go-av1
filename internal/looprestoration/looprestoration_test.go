@@ -193,6 +193,22 @@ func TestSGR5x5SnapshotKeepsFlatPlane(t *testing.T) {
 	}
 }
 
+func TestSGRMixSnapshotKeepsFlatPlane(t *testing.T) {
+	const w, h = 12, 10
+	src := make([]byte, w*h)
+	dst := make([]byte, w*h)
+	for i := range src {
+		src[i] = 103
+	}
+	SGRMixSnapshot(dst, src, w, w, h, 0, 0, w, h,
+		&SGRParams{S0: 140, S1: 3236, W0: -5, W1: 126})
+	for i, got := range dst {
+		if got != 103 {
+			t.Fatalf("flat mixed SGR output[%d] = %d, want 103", i, got)
+		}
+	}
+}
+
 func TestSGRXByXTransitionIndices(t *testing.T) {
 	for index, want := range map[int]uint8{100: 3, 101: 3, 102: 2, 169: 2, 170: 1, 255: 0} {
 		if got := sgrXbyX[index]; got != want {

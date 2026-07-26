@@ -9,7 +9,9 @@ type SearchConfig struct {
 	Ref                int8
 	Ref2               int8
 	TargetSlot         int
+	TargetSlot2        int
 	GlobalMV           MV
+	GlobalMV2          MV
 	Bx4, By4, Bw4, Bh4 int
 	TileX0, TileY0     int
 	TileX1, TileY1     int
@@ -34,11 +36,26 @@ type SearchResult struct {
 // reference. Spatial candidates retain priority; a projected temporal sample
 // is appended to the secondary range and merged when its MV already exists.
 func Find(cfg SearchConfig) SearchResult {
-	out := FindSpatial(cfg)
+	out := findSpatial(cfg, false)
+	temporalEnabled := cfg.UseRefFrameMVs && cfg.TargetSlot >= 0 && cfg.Frame != nil && cfg.Frame.OrderBits != 0 &&
+		(cfg.Ref2 <= 0 || cfg.TargetSlot2 >= 0)
+	secondary := append([]Candidate(nil), out.Candidates[out.NearestCount:out.Count]...)
+	if temporalEnabled {
+		out.Count = out.NearestCount
+	}
+	if temporalEnabled && cfg.Ref2 > 0 {
+		for _, pos := range temporalCandidatePositions(cfg) {
+			mv0, ok0 := projectTemporalAt(cfg.Frame, cfg.TargetSlot, pos[0], pos[1])
+			mv1, ok1 := projectTemporalAt(cfg.Frame, cfg.TargetSlot2, pos[0], pos[1])
+			if ok0 && ok1 {
+				out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv0, mv1}, 2)
+			}
+		}
+	}
 	// dav1d initializes globalmv_ctx from use_ref_frame_mvs. Without order
 	// hints temporal projection is disabled, so the context remains zero even
 	// when a decoded reference picture is available.
-	if cfg.UseRefFrameMVs && cfg.TargetSlot >= 0 && cfg.Frame != nil && cfg.Frame.OrderBits != 0 {
+	if temporalEnabled && cfg.Ref2 <= 0 {
 		out.GlobalMVContext = 1
 		// Only the temporal sample at the block's top-left 8x8 position
 		// updates globalmv_ctx. Later samples may extend the candidate stack,
@@ -52,11 +69,153 @@ func Find(cfg SearchConfig) SearchResult {
 		for _, mv := range temporal {
 			out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, 2)
 		}
+	}
+	if temporalEnabled {
+		for _, cand := range secondary {
+			out.Count = AddCandidate(out.Candidates[:], out.Count, cand.MV, cand.Weight)
+		}
+		SortCandidates(out.Candidates[:], out.NearestCount)
+		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
+	} else {
+		SortCandidates(out.Candidates[:], out.NearestCount)
 		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
 	}
-	appendSingleExtendedCandidates(&out, cfg)
+	if cfg.Ref2 > 0 {
+		appendCompoundExtendedCandidates(&out, cfg)
+	} else {
+		appendSingleExtendedCandidates(&out, cfg)
+	}
 	clampCandidates(&out, cfg)
 	return out
+}
+
+func appendCompoundExtendedCandidates(out *SearchResult, cfg SearchConfig) {
+	if out == nil || out.Count >= 2 || cfg.Frame == nil || cfg.Ref <= 0 || cfg.Ref2 <= 0 {
+		return
+	}
+	tileX1, tileY1 := cfg.TileX1, cfg.TileY1
+	if tileX1 <= cfg.TileX0 {
+		tileX1 = cfg.Frame.IW4
+	}
+	if tileY1 <= cfg.TileY0 {
+		tileY1 = cfg.Frame.IH4
+	}
+	w4 := minSearch(minSearch(cfg.Bw4, 16), tileX1-cfg.Bx4)
+	h4 := minSearch(minSearch(cfg.Bh4, 16), tileY1-cfg.By4)
+	sz4 := minSearch(w4, h4)
+	if sz4 <= 0 {
+		return
+	}
+	var same, diff [2]MVPair
+	var sameCount, diffCount [2]int
+	sign0 := referenceSignBias(cfg.Frame, cfg.Ref)
+	sign1 := referenceSignBias(cfg.Frame, cfg.Ref2)
+	add := func(blk Block) {
+		for n := 0; n < 2; n++ {
+			candRef := blk.Ref[n]
+			if candRef <= 0 {
+				break
+			}
+			candMV := blk.MV[n]
+			candSign := referenceSignBias(cfg.Frame, candRef)
+			invert := func(mv MV, targetSign bool) MV {
+				if targetSign != candSign {
+					mv.Y, mv.X = -mv.Y, -mv.X
+				}
+				return mv
+			}
+			switch candRef {
+			case cfg.Ref:
+				if sameCount[0] < 2 {
+					same[sameCount[0]][0] = candMV
+					sameCount[0]++
+				}
+				if diffCount[1] < 2 {
+					diff[diffCount[1]][1] = invert(candMV, sign1)
+					diffCount[1]++
+				}
+			case cfg.Ref2:
+				if sameCount[1] < 2 {
+					same[sameCount[1]][1] = candMV
+					sameCount[1]++
+				}
+				if diffCount[0] < 2 {
+					diff[diffCount[0]][0] = invert(candMV, sign0)
+					diffCount[0]++
+				}
+			default:
+				if diffCount[0] < 2 {
+					diff[diffCount[0]][0] = invert(candMV, sign0)
+					diffCount[0]++
+				}
+				if diffCount[1] < 2 {
+					diff[diffCount[1]][1] = invert(candMV, sign1)
+					diffCount[1]++
+				}
+			}
+		}
+	}
+	if cfg.By4 > cfg.TileY0 {
+		for x := 0; x < sz4; {
+			blk, ok := cfg.Frame.GridBlock(cfg.Bx4+x, cfg.By4-1)
+			if !ok {
+				break
+			}
+			add(blk)
+			bw, _, ok := dimsForSearch(cfg, blk)
+			if !ok {
+				break
+			}
+			x += bw
+		}
+	}
+	if cfg.Bx4 > cfg.TileX0 {
+		for y := 0; y < sz4; {
+			blk, ok := cfg.Frame.GridBlock(cfg.Bx4-1, cfg.By4+y)
+			if !ok {
+				break
+			}
+			add(blk)
+			_, bh, ok := dimsForSearch(cfg, blk)
+			if !ok {
+				break
+			}
+			y += bh
+		}
+	}
+	globals := MVPair{cfg.GlobalMV, cfg.GlobalMV2}
+	for n := 0; n < 2; n++ {
+		m := sameCount[n]
+		if m >= 2 {
+			continue
+		}
+		if diffCount[n] > 0 {
+			same[m][n] = diff[0][n]
+			m++
+			if m == 2 {
+				continue
+			}
+			if diffCount[n] == 2 {
+				same[1][n] = diff[1][n]
+				continue
+			}
+		}
+		for m < 2 {
+			same[m][n] = globals[n]
+			m++
+		}
+	}
+	if out.Count == 0 {
+		out.Candidates[0] = Candidate{MV: same[0], Weight: 2}
+		out.Candidates[1] = Candidate{MV: same[1], Weight: 2}
+	} else {
+		extended := same[0]
+		if out.Candidates[0].MV == same[0] {
+			extended = same[1]
+		}
+		out.Candidates[1] = Candidate{MV: extended, Weight: 2}
+	}
+	out.Count = 2
 }
 
 func clampCandidates(out *SearchResult, cfg SearchConfig) {
@@ -145,11 +304,19 @@ func referenceSignBias(frame *Frame, ref int8) bool {
 
 func temporalCandidates(cfg SearchConfig) []MV {
 	var out []MV
-	add := func(x8, y8 int) {
-		mv, ok := projectTemporalAt(cfg.Frame, cfg.TargetSlot, x8, y8)
+	for _, pos := range temporalCandidatePositions(cfg) {
+		mv, ok := projectTemporalAt(cfg.Frame, cfg.TargetSlot, pos[0], pos[1])
 		if ok {
 			out = append(out, mv)
 		}
+	}
+	return out
+}
+
+func temporalCandidatePositions(cfg SearchConfig) [][2]int {
+	var out [][2]int
+	add := func(x8, y8 int) {
+		out = append(out, [2]int{x8, y8})
 	}
 	bx8, by8 := cfg.Bx4>>1, cfg.By4>>1
 	w4 := minSearch(cfg.Bw4, cfg.Frame.IW4-cfg.Bx4)
@@ -228,6 +395,10 @@ func projectTemporalAt(current *Frame, targetSlot, x8, y8 int) (MV, bool) {
 // FindSpatial builds dav1d's nearest spatial range. Row scanning precedes
 // column scanning, so stable sorting preserves row-first ties.
 func FindSpatial(cfg SearchConfig) SearchResult {
+	return findSpatial(cfg, true)
+}
+
+func findSpatial(cfg SearchConfig, sortSecondary bool) SearchResult {
 	var out SearchResult
 	if cfg.Frame == nil || cfg.Bw4 <= 0 || cfg.Bh4 <= 0 || len(cfg.BlockDims) == 0 {
 		return out
@@ -266,12 +437,15 @@ func FindSpatial(cfg SearchConfig) SearchResult {
 		out.Candidates[i].Weight += 640
 	}
 	appendSecondarySpatial(&out, cfg, nRows, nCols, maxRows, maxCols, w4, h4)
-	SortCandidates(out.Candidates[:], out.NearestCount)
+	if sortSecondary {
+		SortCandidates(out.Candidates[:], out.NearestCount)
+		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
+	}
 	return out
 }
 
 func addSpatialCandidate(out *SearchResult, cfg SearchConfig, blk Block, weight int, row, direct, trackNewMV bool) {
-	if out == nil || weight <= 0 || blk.Ref.IsIntra() {
+	if out == nil || weight <= 0 || blk.MV[0].IsInvalid() {
 		return
 	}
 	mvp := MVPair{InvalidMV, {}}
@@ -280,6 +454,14 @@ func addSpatialCandidate(out *SearchResult, cfg SearchConfig, blk Block, weight 
 			return
 		}
 		mvp = blk.MV
+		if blk.MF&1 != 0 {
+			if !cfg.GlobalMV.IsInvalid() {
+				mvp[0] = cfg.GlobalMV
+			}
+			if !cfg.GlobalMV2.IsInvalid() {
+				mvp[1] = cfg.GlobalMV2
+			}
+		}
 	} else {
 		for i := 0; i < 2; i++ {
 			if blk.Ref[i] == cfg.Ref {
@@ -417,7 +599,6 @@ func appendSecondarySpatial(out *SearchResult, cfg SearchConfig, nRows, nCols, m
 				cfg.Bh4, h4, 1+maxCols-n, 2+2*boolSearch(cfg.Bh4 >= 16), false)
 		}
 	}
-	SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
 }
 
 func dimsForSearch(cfg SearchConfig, blk Block) (int, int, bool) {

@@ -40,9 +40,10 @@ func DecodeTileGroupWithContext(
 		logf = func(string, ...any) {}
 	}
 	if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" || os.Getenv("GOAV1_TRACE_FRAMES") != "" {
-		logf("sym frame offset=%d type=%d show=%d refresh=%02x primary=%d refidx=%v comp_refs=%d cdf_update=%d refresh_cdf=%d tile_update=%d qidx=%d qm=%d qmy=%d qmu=%d qmv=%d",
+		logf("sym frame offset=%d type=%d show=%d refresh=%02x primary=%d refidx=%v size=%d/%dx%d comp_refs=%d cdf_update=%d refresh_cdf=%d tile_update=%d qidx=%d qm=%d qmy=%d qmu=%d qmv=%d",
 			fhdr.FrameOffset, fhdr.FrameType, fhdr.ShowFrame, fhdr.RefreshFrameFlags,
-			fhdr.PrimaryRefFrame, fhdr.Refidx, fhdr.SwitchableCompRefs, fhdr.DisableCDFUpdate, fhdr.RefreshContext, fhdr.Tiling.Update,
+			fhdr.PrimaryRefFrame, fhdr.Refidx, fhdr.Width[0], fhdr.Width[1], fhdr.Height,
+			fhdr.SwitchableCompRefs, fhdr.DisableCDFUpdate, fhdr.RefreshContext, fhdr.Tiling.Update,
 			fhdr.Quant.YAC, fhdr.Quant.QM,
 			fhdr.Quant.QMY, fhdr.Quant.QMU, fhdr.Quant.QMV)
 		logf("sym frame_mv force_integer=%d hp=%d gmv=%v", fhdr.ForceIntegerMV, fhdr.HP, fhdr.GMV)
@@ -93,7 +94,7 @@ func DecodeTileGroupWithContext(
 		}
 	}
 	var updateCtx *TileCtx
-	for tileIndex, td := range tiles {
+	for _, td := range tiles {
 		// Tile entropy and neighbour state is independent. Full-frame indexing
 		// is retained so block coordinates remain absolute, but no above/left
 		// context may leak across a tile boundary.
@@ -130,7 +131,7 @@ func DecodeTileGroupWithContext(
 		}
 		fb.FilterState.MergeFilterState(fs)
 		absoluteTile := int(td.Row)*int(fhdr.Tiling.Cols) + int(td.Col)
-		if absoluteTile == int(fhdr.Tiling.Update) || (updateCtx == nil && tileIndex == len(tiles)-1) {
+		if absoluteTile == int(fhdr.Tiling.Update) {
 			updateCtx = tileCtx
 			if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
 				logf("sym cdf_update_tile=%d comp_0=%v", absoluteTile, tileCtx.CompCDF[0])

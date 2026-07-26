@@ -142,6 +142,7 @@ type Av1Block struct {
 	RefFrame2  int8
 	RefOrder2  int8
 	Compound   bool
+	CompType   uint8
 	InterIntra bool
 	Filter     uint8
 	FilterV    uint8

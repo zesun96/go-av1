@@ -27,6 +27,7 @@ func main() {
 	traceSymbols := flag.Bool("trace-symbols", false, "log tile syntax symbols and MSAC state")
 	traceFrames := flag.Bool("trace-frames", false, "log frame headers and reference CDF updates")
 	traceFrame := flag.Int("trace-frame", -1, "only trace this zero-based IVF frame (-1 = all)")
+	outputInvisible := flag.Bool("output-invisible", false, "also output hidden reference frames")
 	limit := flag.Int("limit", 0, "stop after decoding this many frames (0 = all)")
 	flag.Parse()
 
@@ -79,6 +80,7 @@ func main() {
 		Threads:          *threads,
 		InloopFilters:    inloopFilters,
 		InloopFiltersSet: true,
+		OutputInvisible:  *outputInvisible,
 		Logger:           logger,
 	})
 	if err != nil {

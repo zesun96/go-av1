@@ -16,7 +16,7 @@ func TestReferenceSlotsRetainMotionField(t *testing.T) {
 	d := &decoderImpl{}
 	pic := &Picture{Y: make([]byte, 16), StrideY: 4, Width: 4, Height: 4, Chroma: ChromaMonochrome}
 	pic.Retain()
-	fhdr := &header.FrameHeader{FrameType: header.FrameTypeInter, RefreshFrameFlags: 0x05}
+	fhdr := &header.FrameHeader{FrameType: header.FrameTypeInter, RefreshFrameFlags: 0x05, FrameOffset: 7}
 	mv := refmvs.NewFrame(4, 4)
 	d.updateRefs(pic, fhdr, tile.NewTileCtxForQIdx(0), mv)
 
@@ -26,6 +26,10 @@ func TestReferenceSlotsRetainMotionField(t *testing.T) {
 	fb := d.picToFrameBuf(pic)
 	if fb.RefMVs[0] != mv || fb.RefMVs[2] != mv || fb.RefMVs[1] != nil {
 		t.Fatalf("frame buffer motion fields were not restored by slot")
+	}
+	if !fb.RefOrderHintValid[0] || fb.RefOrderHints[0] != 7 ||
+		!fb.RefOrderHintValid[2] || fb.RefOrderHints[2] != 7 {
+		t.Fatalf("frame buffer order hints were not restored by slot")
 	}
 	for i := range d.refs {
 		if d.refs[i].pic != nil {
@@ -235,6 +239,23 @@ func TestNewDecoder_ExplicitZeroInloopFilters(t *testing.T) {
 	}
 }
 
+func TestFinishFrameCanOutputInvisibleReference(t *testing.T) {
+	pic := &Picture{
+		Y: make([]byte, 16), StrideY: 4,
+		Width: 4, Height: 4, Chroma: ChromaMonochrome,
+	}
+	pic.Retain()
+	d := &decoderImpl{
+		opts: DecoderOptions{OutputInvisible: true},
+		logf: func(string, ...any) {},
+	}
+	d.finishFrame(pic, &header.FrameHeader{ShowFrame: 0}, nil, nil, nil)
+	if len(d.outQ) != 1 || d.outQ[0] != pic {
+		t.Fatalf("invisible output queue=%v, want decoded picture", d.outQ)
+	}
+	d.outQ[0].Release()
+}
+
 func TestApplyLoopFilterZeroChromaLevelsLeaveChromaUntouched(t *testing.T) {
 	pic := loopFilterTestPicture()
 	wantU := append([]byte(nil), pic.U...)
@@ -295,6 +316,19 @@ func TestAllocPictureIncludesCodedGridPadding(t *testing.T) {
 	fb := d.picToFrameBuf(pic)
 	if fb.CodedWidth != 1512 || fb.CodedHeight != 1024 || fb.CodedChromaW != 756 || fb.CodedChromaH != 512 {
 		t.Fatalf("coded geometry = %dx%d chroma=%dx%d", fb.CodedWidth, fb.CodedHeight, fb.CodedChromaW, fb.CodedChromaH)
+	}
+}
+
+func TestAllocPicturePreservesMonochromeSequenceLayout(t *testing.T) {
+	d := &decoderImpl{seq: &header.SequenceHeader{Monochrome: true}}
+	pic := d.allocPicture(&header.FrameHeader{Width: [2]int{64, 64}, Height: 48})
+	defer pic.Release()
+
+	if pic.Chroma != ChromaMonochrome || pic.ChromaWidth() != 0 || pic.ChromaHeight() != 0 {
+		t.Fatalf("picture chroma = %v %dx%d, want monochrome", pic.Chroma, pic.ChromaWidth(), pic.ChromaHeight())
+	}
+	if !d.picToFrameBuf(pic).Monochrome {
+		t.Fatal("tile frame buffer did not preserve monochrome layout")
 	}
 }
 

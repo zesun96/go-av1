@@ -129,24 +129,25 @@ func ClampMV(mv MV, bx4, by4, bw4, bh4, iw4, ih4 int) MV {
 //
 // Returns InvalidMV if tr is zero (avoid division by zero).
 func ScaleMV(mv MV, td, tr int) MV {
-	if tr == 0 {
+	if tr <= 0 || tr >= 32 || td <= -32 || td >= 32 {
 		return InvalidMV
 	}
-	// Clamp ratio to [-4096, 4096] per AV1 spec.
-	ratio := clamp(4096*td/tr, -4096, 4096)
+	divMult := [...]int{
+		0, 16384, 8192, 5461, 4096, 3276, 2730, 2340,
+		2048, 1820, 1638, 1489, 1365, 1260, 1170, 1092,
+		1024, 963, 910, 862, 819, 780, 744, 712,
+		682, 655, 630, 606, 585, 564, 546, 528,
+	}
+	frac := td * divMult[tr]
+	scale := func(v int16) int16 {
+		product := int(v) * frac
+		scaled := (product + 8192 + (product >> 31)) >> 14
+		return int16(clamp(scaled, -0x3fff, 0x3fff))
+	}
 	return MV{
-		Y: int16(scaleMVComp(int(mv.Y), ratio)),
-		X: int16(scaleMVComp(int(mv.X), ratio)),
+		Y: scale(mv.Y),
+		X: scale(mv.X),
 	}
-}
-
-func scaleMVComp(v, ratio int) int {
-	// round-towards-zero with sign-aware rounding.
-	scaled := v * ratio
-	if scaled >= 0 {
-		return (scaled + 2048) >> 12
-	}
-	return -((-scaled + 2048) >> 12)
 }
 
 func clamp(v, lo, hi int) int {
@@ -339,7 +340,11 @@ func BuildTemporalProjectionRegion(current *Frame, refs [8]*Frame, colStart, col
 		if slot < 0 || slot >= len(refs) {
 			return nil
 		}
-		return refs[slot]
+		ref := refs[slot]
+		if ref == nil || ref.IW4 != current.IW4 || ref.IH4 != current.IH4 {
+			return nil
+		}
+		return ref
 	}
 	var sources []motionSource
 	total := 2
@@ -398,11 +403,14 @@ func BuildTemporalProjectionRegion(current *Frame, refs [8]*Frame, colStart, col
 				for x+run < xEnd && source.RP[y*source.RPStride+x+run] == tb {
 					run++
 				}
-				if py >= rowStart && py < rowEnd {
-					xRegion0 := max(colStart, (x&^7)-8)
-					xRegion1 := min(colEnd, (x&^7)+16)
+				yRegion0 := max(rowStart, y&^7)
+				yRegion1 := min(rowEnd, (y&^7)+8)
+				if py >= yRegion0 && py < yRegion1 {
 					for n := 0; n < run; n++ {
+						sx := x + n
 						dx := px + n
+						xRegion0 := max(colStart, (sx&^7)-8)
+						xRegion1 := min(colEnd, (sx&^7)+16)
 						if dx >= xRegion0 && dx < xRegion1 {
 							current.RPProj[py*current.RPStride+dx] = TemporalBlock{MV: tb.MV, Ref: uint8(ref2ref)}
 						}

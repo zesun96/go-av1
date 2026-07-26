@@ -5,7 +5,22 @@ import (
 	"testing"
 
 	"github.com/zesun96/go-av1/internal/header"
+	"github.com/zesun96/go-av1/internal/refmvs"
 )
+
+func TestCompoundJointWeightMatchesDav1dDistanceQuantization(t *testing.T) {
+	fb := &FrameBuf{}
+	fb.RefOrderHints[0], fb.RefOrderHintValid[0] = 0, true
+	fb.RefOrderHints[6], fb.RefOrderHintValid[6] = 3, true
+	fhdr := &header.FrameHeader{FrameOffset: 1}
+	seq := &header.SequenceHeader{OrderHintNBits: 5}
+	if got, want := compoundJointWeight(fhdr, seq, fb, 0, 6), 11; got != want {
+		t.Fatalf("joint compound weight = %d, want %d", got, want)
+	}
+	if got, want := compoundJointWeight(fhdr, seq, fb, 6, 0), 5; got != want {
+		t.Fatalf("reversed joint compound weight = %d, want %d", got, want)
+	}
+}
 
 func TestTPartitionBlocksMatchAV1Geometry(t *testing.T) {
 	tests := []struct {
@@ -503,5 +518,116 @@ func TestMotionModeNeighboursExcludesInterIntraFromWarpSamples(t *testing.T) {
 	_, matchingRef = motionModeNeighbours(fs, 8, 8, 8, 8, 0)
 	if !matchingRef {
 		t.Fatal("ordinary inter neighbour should enable matching-reference warp")
+	}
+}
+
+func TestMotionModeNeighboursExcludesCompoundFromWarpSamples(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.SetBlockState(0, 0, 8, 8, Av1Block{Intra: true})
+	fs.SetBlockState(8, 0, 8, 8, Av1Block{Intra: true})
+	fs.CommitInterBlock(0, 8, 8, 8, Av1Block{
+		Compound: true,
+		RefSlot:  0,
+		RefSlot2: 1,
+		RefFrame: 1,
+	}, 1)
+
+	overlap, matchingRef := motionModeNeighbours(fs, 8, 8, 8, 8, 0)
+	if !overlap {
+		t.Fatal("compound neighbour should remain eligible for OBMC overlap")
+	}
+	if matchingRef {
+		t.Fatal("compound neighbour must not enable local warped motion")
+	}
+}
+
+func TestMotionModeNeighboursExcludesTopRightFor128Block(t *testing.T) {
+	fs := NewFrameState(256, 256)
+	fs.TileX1, fs.TileY1 = 256, 256
+	fs.RefMVTopRightKnown, fs.RefMVTopRightAvailable = true, true
+	fs.SetBlockState(0, 124, 128, 4, Av1Block{RefSlot: 0, RefFrame: 1})
+	fs.SetBlockState(124, 128, 4, 128, Av1Block{RefSlot: 0, RefFrame: 1})
+	fs.CommitInterBlock(128, 124, 4, 4, Av1Block{RefSlot: 3, RefFrame: 4}, 4)
+
+	overlap, matchingRef := motionModeNeighbours(fs, 0, 128, 128, 128, 3)
+	if !overlap {
+		t.Fatal("non-matching inter edge neighbours should still make OBMC available")
+	}
+	if matchingRef {
+		t.Fatal("128-pixel block must not use its top-right block as a warp sample")
+	}
+}
+
+func TestInterReferenceIsScaled(t *testing.T) {
+	fhdr := &header.FrameHeader{Height: 720}
+	fhdr.Width[0] = 1280
+
+	if interReferenceIsScaled(fhdr, interState{ref: &PlaneBuf{Width: 1280, Height: 720}}) {
+		t.Fatal("matching reference size reported as scaled")
+	}
+	if !interReferenceIsScaled(fhdr, interState{ref: &PlaneBuf{Width: 640, Height: 720}}) {
+		t.Fatal("horizontally scaled reference was not detected")
+	}
+	if !interReferenceIsScaled(fhdr, interState{ref: &PlaneBuf{Width: 1280, Height: 360}}) {
+		t.Fatal("vertically scaled reference was not detected")
+	}
+}
+
+func TestMakeFrameInterPredictionUsesScaledReferenceCoordinates(t *testing.T) {
+	ref := &PlaneBuf{
+		Y:       make([]byte, 8*8),
+		StrideY: 8,
+		Width:   8,
+		Height:  8,
+	}
+	for y := 0; y < ref.Height; y++ {
+		for x := 0; x < ref.Width; x++ {
+			ref.Y[y*ref.StrideY+x] = byte(10 + x)
+		}
+	}
+	fb := &FrameBuf{Width: 16, Height: 16}
+	got := makeFrameInterPredictionPlane(fb, ref, ref.Y, ref.StrideY, ref.Width, ref.Height,
+		8, 0, 4, 4, refmvs.MV{}, header.FilterMode8TapRegular, header.FilterMode8TapRegular, 0, 0)
+	if len(got) != 16 {
+		t.Fatalf("prediction length=%d want 16", len(got))
+	}
+	if got[0] < 13 || got[0] > 15 {
+		t.Fatalf("scaled prediction first sample=%d, want source near x=4", got[0])
+	}
+}
+
+func TestInterFilterContextMatchesCompoundSecondReference(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.SetBlockState(8, 0, 8, 8, Av1Block{
+		Compound: true,
+		RefSlot:  0,
+		RefSlot2: 6,
+		Filter:   uint8(header.FilterMode8TapRegular),
+		FilterV:  uint8(header.FilterMode8TapRegular),
+	})
+
+	if got := getInterFilterCtx(fs, 0, 6, 8, 8); got != 0 {
+		t.Fatalf("compound second-reference filter context=%d want 0", got)
+	}
+}
+
+func TestPredictCFLBlockUsesTileRelativeEdgeAvailability(t *testing.T) {
+	const width, height = 4, 4
+	tlBuf, tl := newIntraEdgeBuffer(width, height)
+	for x := 0; x < width; x++ {
+		tlBuf[tl+1+x] = 200
+	}
+	for y := 0; y < height; y++ {
+		tlBuf[tl-1-y] = 40
+	}
+	dst := make([]byte, width*height)
+
+	// At a non-zero absolute x coordinate that is also a tile boundary, the
+	// left edge belongs to another tile and must not enter the CFL DC base.
+	predictCFLBlock(dst, width, tlBuf, tl, width, height, 0, make([]int16, width*height), true, false)
+	for i, value := range dst {
+		if value != 200 {
+			t.Fatalf("prediction[%d]=%d, want top-only DC 200", i, value)
+		}
 	}
 }

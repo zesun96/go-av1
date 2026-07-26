@@ -173,6 +173,56 @@ func TestCommitInterBlockWithoutChromaPreservesUVModeEdges(t *testing.T) {
 	}
 }
 
+func TestCommitCompoundBlockSavesProjectableSecondTemporalMV(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.MVFrame = refmvs.NewFrame(32, 32)
+	fs.MVFrame.OrderHint = 10
+	fs.MVFrame.OrderBits = 5
+	fs.MVFrame.RefFrameOrderHints[0] = 12 // First reference is in the future.
+	fs.MVFrame.RefFrameOrderHints[6] = 8  // Second reference is in the past.
+	blk := Av1Block{
+		Compound:  true,
+		RefSlot:   0,
+		RefFrame:  1,
+		RefSlot2:  6,
+		RefFrame2: 7,
+		MV:        [2]int16{3, 5},
+		MV2:       [2]int16{-7, 9},
+	}
+
+	fs.CommitInterBlock(8, 8, 8, 8, blk, 1)
+	got := fs.MVFrame.RP[fs.MVFrame.RPStride+1]
+	want := refmvs.TemporalBlock{MV: refmvs.MV{Y: -7, X: 9}, Ref: 7}
+	if got != want {
+		t.Fatalf("compound temporal block=%+v want %+v", got, want)
+	}
+}
+
+func TestCommitIntraBlockClearsStaleTemporalMV(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.MVFrame = refmvs.NewFrame(32, 32)
+	fs.MVFrame.RP[fs.MVFrame.RPStride+1] = refmvs.TemporalBlock{
+		MV: refmvs.MV{Y: 5, X: -3}, Ref: 1,
+	}
+
+	fs.CommitIntraMVBlock(12, 12, 4, 4)
+	if got := fs.MVFrame.RP[fs.MVFrame.RPStride+1]; got != (refmvs.TemporalBlock{}) {
+		t.Fatalf("stale temporal block after intra commit=%+v", got)
+	}
+}
+
+func TestSub8BlockOutsideTemporalSampleDoesNotOverwrite(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.MVFrame = refmvs.NewFrame(32, 32)
+	want := refmvs.TemporalBlock{MV: refmvs.MV{Y: 5, X: -3}, Ref: 1}
+	fs.MVFrame.RP[fs.MVFrame.RPStride+1] = want
+
+	fs.CommitIntraMVBlock(8, 8, 4, 4)
+	if got := fs.MVFrame.RP[fs.MVFrame.RPStride+1]; got != want {
+		t.Fatalf("non-sample sub-8x8 block overwrote temporal block: got %+v want %+v", got, want)
+	}
+}
+
 func TestFrameStateIntraBlockClearsInterEdges(t *testing.T) {
 	fs := NewFrameState(64, 64)
 	fs.SetInterBlock(0, 0, 16, 16, false, 0, 2, 1, 2, 1, InterModeNearestMV, refmvs.MV{Y: 4, X: -2})
@@ -270,7 +320,7 @@ func TestFrameStateCommitCompoundBlockStoresReferencePair(t *testing.T) {
 	fs := NewFrameState(64, 64)
 	fs.MVFrame = refmvs.NewFrame(64, 64)
 	blk := Av1Block{
-		Compound: true, InterMode: InterModeGlobalMV,
+		Compound: true, InterMode: compInterModeGlobalGlobal,
 		RefSlot: 2, RefFrame: 1, MV: [2]int16{8, -4},
 		RefSlot2: 6, RefFrame2: 7, MV2: [2]int16{-12, 20},
 	}
@@ -286,5 +336,14 @@ func TestFrameStateCommitCompoundBlockStoresReferencePair(t *testing.T) {
 	}
 	if got.BS != BS32x16 || got.MF != 1 {
 		t.Fatalf("compound MV metadata bs=%d mf=%d", got.BS, got.MF)
+	}
+}
+
+func TestSkipModeCtxUsesDecodedNeighbours(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.SetBlockState(8, 0, 8, 8, Av1Block{SkipMode: true})
+	fs.SetBlockState(0, 8, 8, 8, Av1Block{SkipMode: true})
+	if got := fs.SkipModeCtx(8, 8); got != 2 {
+		t.Fatalf("SkipModeCtx=%d want 2", got)
 	}
 }

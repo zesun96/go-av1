@@ -40,6 +40,15 @@ func TestSubsampleWedgeMask420(t *testing.T) {
 	}
 }
 
+func TestSubsampleMaskSignedUsesAV1ChromaRounding(t *testing.T) {
+	mask := []byte{0, 0, 1, 1}
+	unsigned, _, _ := SubsampleMaskSigned(mask, 2, 2, 1, 1, false)
+	signed, _, _ := SubsampleMaskSigned(mask, 2, 2, 1, 1, true)
+	if unsigned[0] != 1 || signed[0] != 0 {
+		t.Fatalf("subsample rounding unsigned=%d signed=%d, want 1/0", unsigned[0], signed[0])
+	}
+}
+
 func TestBlendMask(t *testing.T) {
 	dst := []byte{90, 100, 103, 105, 99, 96, 97, 101}
 	intra := []byte{92, 92, 92, 92, 92, 92, 92, 92}

@@ -62,6 +62,10 @@ type DecoderOptions struct {
 	// DecodeFrameAll.
 	FrameSelection DecodeFrameType
 
+	// OutputInvisible also emits decoded frames whose show_frame flag is zero.
+	// These frames normally exist only as references for later pictures.
+	OutputInvisible bool
+
 	// Logger receives diagnostics. Nil disables logging.
 	Logger Logger
 

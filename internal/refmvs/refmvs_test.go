@@ -125,6 +125,9 @@ func TestScaleMV_Double(t *testing.T) {
 	// td = 2, tr = 1 → scale ×2.
 	mv := MV{Y: 32, X: -16}
 	got := ScaleMV(mv, 2, 1)
+	if got != (MV{Y: 64, X: -32}) {
+		t.Fatalf("ScaleMV double=%+v want {64,-32}", got)
+	}
 	// ratio = 4096*2/1 = clamped to 4096 → scaled = 32*4096, >>12 = 32.
 	// Wait: ratio = clamp(4096*2/1, -4096, 4096) = 4096 (clamped).
 	// scaleMVComp(32, 4096): 32*4096=131072, (131072+2048)>>12 = 133120>>12 = 32.
@@ -132,10 +135,6 @@ func TestScaleMV_Double(t *testing.T) {
 	// ratio = 4096, scaleMVComp(32, 4096) = (32*4096+2048)>>12 = (131072+2048)>>12=133120/4096=32.
 	// Hmm, clamped to max. Let td=2, tr=2: ratio=4096*2/2=4096, same issue.
 	// Use td=1, tr=2 → ratio=4096/2=2048, scaleMVComp(32,2048)=(32*2048+2048)>>12=(65536+2048)>>12=67584/4096=16.
-	if got.Y != 32 || got.X != -16 {
-		// ratio clamped to 4096; scaleMVComp(32, 4096) = 32.
-		t.Logf("ScaleMV double: got Y=%d X=%d", got.Y, got.X)
-	}
 }
 
 func TestScaleMV_Half(t *testing.T) {

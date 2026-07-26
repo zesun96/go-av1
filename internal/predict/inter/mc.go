@@ -183,6 +183,64 @@ func Put8Tap(dst []uint8, dstStride int,
 	}
 }
 
+// Put8TapScaled writes a block using AV1's Q10 scaled-reference coordinates.
+// posX/posY locate the first sample and stepX/stepY advance one output sample.
+func Put8TapScaled(dst []uint8, dstStride int,
+	src []uint8, srcStride, srcW, srcH int,
+	w, h, posX, posY, stepX, stepY int, f Filter2D,
+) {
+	sample := func(x, y int) int {
+		if x < 0 {
+			x = 0
+		} else if x >= srcW {
+			x = srcW - 1
+		}
+		if y < 0 {
+			y = 0
+		} else if y >= srcH {
+			y = srcH - 1
+		}
+		return int(src[y*srcStride+x])
+	}
+	for y := 0; y < h; y++ {
+		sy := posY + y*stepY
+		iy, py := sy>>10, (sy&0x3ff)>>6
+		for x := 0; x < w; x++ {
+			sx := posX + x*stepX
+			ix, px := sx>>10, (sx&0x3ff)>>6
+			if f == Filter2DBilinear {
+				top := (sample(ix, iy)*(16-px) + sample(ix+1, iy)*px + 8) >> 4
+				bottom := (sample(ix, iy+1)*(16-px) + sample(ix+1, iy+1)*px + 8) >> 4
+				dst[y*dstStride+x] = clampPixel((top*(16-py) + bottom*py + 8) >> 4)
+				continue
+			}
+			fh, fv := GetFilters(f, w, h, px, py)
+			var mid [8]int
+			for ky := 0; ky < 8; ky++ {
+				srcY := iy + ky - 3
+				if fh == nil {
+					mid[ky] = sample(ix, srcY) << intermediateBits
+					continue
+				}
+				sum := 0
+				for kx := 0; kx < 8; kx++ {
+					sum += int(fh[kx]) * sample(ix+kx-3, srcY)
+				}
+				mid[ky] = (sum + (1 << (5 - intermediateBits))) >> (6 - intermediateBits)
+			}
+			if fv == nil {
+				dst[y*dstStride+x] = clampPixel((mid[3] + (1 << (intermediateBits - 1))) >> intermediateBits)
+				continue
+			}
+			sum := 0
+			for ky := 0; ky < 8; ky++ {
+				sum += int(fv[ky]) * mid[ky]
+			}
+			dst[y*dstStride+x] = clampPixel((sum + (1 << (5 + intermediateBits))) >> (6 + intermediateBits))
+		}
+	}
+}
+
 // PutCopy copies a w×h block starting at src[srcBase] into dst.
 func PutCopy(dst []uint8, dstStride int,
 	src []uint8, srcBase, srcStride int, w, h int) {
@@ -429,5 +487,38 @@ func WAvg(dst []uint8, dstStride int,
 		}
 		dstOff += dstStride
 		off += w
+	}
+}
+
+// DiffWtdMask applies AV1's difference-weighted compound blend and returns
+// the Q6 luma mask used to blend subsampled chroma planes.
+func DiffWtdMask(dst []uint8, dstStride int, tmp1, tmp2 []int16, w, h int) []uint8 {
+	mask := make([]uint8, w*h)
+	for y, off := 0, 0; y < h; y, off = y+1, off+w {
+		for x := 0; x < w; x++ {
+			diff := int(tmp1[off+x]) - int(tmp2[off+x])
+			adiff := diff
+			if adiff < 0 {
+				adiff = -adiff
+			}
+			m := 38 + ((adiff + 8) >> 8)
+			if m > 64 {
+				m = 64
+			}
+			mask[off+x] = uint8(m)
+			dst[y*dstStride+x] = clampPixel((diff*m + int(tmp2[off+x])*64 + 512) >> 10)
+		}
+	}
+	return mask
+}
+
+// BlendCompoundMask blends two Q4 compound prediction buffers with a Q6 mask.
+func BlendCompoundMask(dst []uint8, dstStride int, tmp1, tmp2 []int16, mask []uint8, w, h int) {
+	for y, off := 0, 0; y < h; y, off = y+1, off+w {
+		for x := 0; x < w; x++ {
+			m := int(mask[off+x])
+			diff := int(tmp1[off+x]) - int(tmp2[off+x])
+			dst[y*dstStride+x] = clampPixel((diff*m + int(tmp2[off+x])*64 + 512) >> 10)
+		}
 	}
 }

@@ -53,6 +53,8 @@ type decoderImpl struct {
 	// pending state for OBUFrameHeader + OBUTileGroup split mode.
 	pendingFhdr    *header.FrameHeader
 	pendingPic     *Picture
+	pendingFB      *tile.FrameBuf
+	pendingCDF     *tile.TileCtx
 	pendingFhdrRaw []byte // raw payload bytes of the pending frame header
 
 	closed bool
@@ -164,6 +166,8 @@ func (d *decoderImpl) discardPending() {
 		d.pendingPic = nil
 	}
 	d.pendingFhdr = nil
+	d.pendingFB = nil
+	d.pendingCDF = nil
 	d.pendingFhdrRaw = nil
 }
 
@@ -215,23 +219,41 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 		fhdrCopy := fhdr
 		d.pendingFhdr = &fhdrCopy
 		d.pendingPic = d.allocPicture(&fhdrCopy)
+		d.pendingFB = d.picToFrameBuf(d.pendingPic)
 
 	case header.OBUTileGroup:
-		if d.pendingFhdr == nil || d.pendingPic == nil || d.seq == nil {
+		if d.pendingFhdr == nil || d.pendingPic == nil || d.pendingFB == nil || d.seq == nil {
+			return nil
+		}
+		tiles, err := tile.ParseTileGroup(o.Payload, d.pendingFhdr)
+		if err != nil || len(tiles) == 0 {
+			if !d.opts.BestEffort {
+				d.discardPending()
+				return fmt.Errorf("parse tile group: %w: %v", ErrInvalidBitstream, err)
+			}
 			return nil
 		}
 		// Decode all tiles into the pending picture.
-		fb := d.picToFrameBuf(d.pendingPic)
-		frameCDF, err := tile.DecodeTileGroupWithContext(o.Payload, d.pendingFhdr, d.seq, fb, d.initialFrameCDF(d.pendingFhdr), d.logf)
+		frameCDF, err := tile.DecodeTileGroupWithContext(o.Payload, d.pendingFhdr, d.seq, d.pendingFB, d.initialFrameCDF(d.pendingFhdr), d.logf)
 		if err != nil {
 			if !d.opts.BestEffort {
 				d.discardPending()
 				return fmt.Errorf("decode tile group: %w: %v", ErrInvalidBitstream, err)
 			}
 		}
-		d.finishFrame(d.pendingPic, d.pendingFhdr, frameCDF, fb.MVFrame, fb.FilterState)
+		if frameCDF != nil {
+			d.pendingCDF = frameCDF
+		}
+		last := tiles[len(tiles)-1]
+		lastTile := int(last.Row)*int(d.pendingFhdr.Tiling.Cols) + int(last.Col)
+		if lastTile+1 < int(d.pendingFhdr.Tiling.Cols)*int(d.pendingFhdr.Tiling.Rows) {
+			return nil
+		}
+		d.finishFrame(d.pendingPic, d.pendingFhdr, d.pendingCDF, d.pendingFB.MVFrame, d.pendingFB.FilterState)
 		d.pendingFhdr = nil
 		d.pendingPic = nil
+		d.pendingFB = nil
+		d.pendingCDF = nil
 
 	case header.OBUFrame:
 		// OBU_FRAME carries frame_header_obu() + tile_group_obu() concatenated.
@@ -314,7 +336,7 @@ func frameOBUTilePayload(payload []byte, frameHeaderBytes int) []byte {
 func (d *decoderImpl) finishFrame(pic *Picture, fhdr *header.FrameHeader, cdf *tile.TileCtx, mv *refmvs.Frame, filterState *tile.FrameState) {
 	d.postFilter(pic, fhdr, filterState)
 	d.updateRefs(pic, fhdr, cdf, mv)
-	if fhdr.ShowFrame != 0 {
+	if fhdr.ShowFrame != 0 || d.opts.OutputInvisible {
 		d.outQ = append(d.outQ, pic.Retain())
 	}
 	pic.Release()
@@ -353,6 +375,10 @@ func (d *decoderImpl) picToFrameBuf(p *Picture) *tile.FrameBuf {
 	}
 	for i, ref := range d.refs {
 		fb.RefMVs[i] = ref.mv
+		if ref.fhdr != nil {
+			fb.RefOrderHints[i] = int(ref.fhdr.FrameOffset)
+			fb.RefOrderHintValid[i] = true
+		}
 		if ref.pic == nil {
 			continue
 		}
@@ -388,6 +414,10 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 	codedCW := (codedW + 1) >> 1
 	strideUV := (codedCW + 15) &^ 15
 	codedCh := (codedH + 1) >> 1
+	chroma := Chroma420
+	if d.seq != nil && d.seq.Monochrome {
+		chroma = ChromaMonochrome
+	}
 
 	pic := &Picture{
 		Y:        make([]byte, strideY*codedH),
@@ -398,7 +428,7 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 		Width:    w,
 		Height:   h,
 		BitDepth: 8,
-		Chroma:   Chroma420,
+		Chroma:   chroma,
 	}
 	// Seed planes with neutral grey so any block that fails to decode shows
 	// up as grey rather than pure-green (chroma=0 maps to bright green in
@@ -1091,7 +1121,32 @@ func applyRestorationUnit(dst, src, boundary []byte, stride, planeW, planeH, ssV
 	}
 	if unit.Type == header.RestorationSGRProj {
 		s0, s1 := restorationSGRStrengths(unit.SGRIndex)
-		if s0 == 0 {
+		if s0 != 0 && s1 != 0 {
+			params := restorationSGRParams(unit)
+			looprestoration.SGRMixSnapshot(dst, src, stride, planeW, planeH,
+				unit.X, unit.Y, unit.W, unit.H, &params)
+			regularStripe, firstStripeEnd := 64>>ssV, 56>>ssV
+			unitEnd := unit.Y + unit.H
+			for boundaryY := firstStripeEnd; boundaryY < planeH; boundaryY += regularStripe {
+				if boundaryY > unit.Y && boundaryY <= unitEnd {
+					aboveSrc := append([]byte(nil), src...)
+					copyRestorationRows(aboveSrc, boundary, stride, boundaryY, 2, planeH)
+					copyRestorationRow(aboveSrc, boundary, stride, boundaryY+2, boundaryY+1, planeH)
+					aboveY := max(unit.Y, boundaryY-3)
+					if aboveY < boundaryY {
+						looprestoration.SGRMixSnapshot(dst, aboveSrc, stride, planeW, planeH,
+							unit.X, aboveY, unit.W, boundaryY-aboveY, &params)
+					}
+				}
+				if boundaryY >= unit.Y && boundaryY < unitEnd {
+					belowSrc := append([]byte(nil), src...)
+					copyRestorationRows(belowSrc, boundary, stride, boundaryY-2, 2, planeH)
+					copyRestorationRow(belowSrc, boundary, stride, boundaryY-3, boundaryY-2, planeH)
+					looprestoration.SGRMixSnapshot(dst, belowSrc, stride, planeW, planeH,
+						unit.X, boundaryY, unit.W, min(3, unitEnd-boundaryY), &params)
+				}
+			}
+		} else if s0 == 0 {
 			params := restorationSGRParams(unit)
 			looprestoration.SGR3x3Snapshot(dst, src, stride, planeW, planeH,
 				unit.X, unit.Y, unit.W, unit.H, &params)

@@ -43,7 +43,8 @@ type TileCtx struct {
 	// -----------------------------------------------------------------------
 	// Skip CDF: 3 contexts × {2 symbols + counter}.
 	// -----------------------------------------------------------------------
-	SkipCDF [3][3]uint16
+	SkipCDF     [3][3]uint16
+	SkipModeCDF [3][2]uint16
 
 	// Intra decision in inter/switch frames and intrabc flag.
 	IntraCDF         [4][2]uint16
@@ -205,6 +206,9 @@ type TileCtx struct {
 	InterIntraModeCDF  [4][5]uint16
 	InterIntraWedgeCDF [7][2]uint16
 	WedgeIdxCDF        [9][17]uint16
+	JntCompCDF         [6][2]uint16
+	MaskCompCDF        [6][2]uint16
+	WedgeCompCDF       [9][2]uint16
 	MotionModeCDF      [NBlockSizes][4]uint16
 	OBMCCDF            [NBlockSizes][2]uint16
 
@@ -393,6 +397,13 @@ func (ctx *TileCtx) resetCDFCounts() {
 	for i := range ctx.WedgeIdxCDF {
 		ctx.WedgeIdxCDF[i][15] = 0
 	}
+	for i := range ctx.JntCompCDF {
+		ctx.JntCompCDF[i][1] = 0
+		ctx.MaskCompCDF[i][1] = 0
+	}
+	for i := range ctx.WedgeCompCDF {
+		ctx.WedgeCompCDF[i][1] = 0
+	}
 }
 
 // NewTileCtx allocates a TileCtx and copies the default CDF values into it.
@@ -418,6 +429,7 @@ func NewTileCtxForQIdx(qidx int) *TileCtx {
 
 	// Skip
 	ctx.SkipCDF = SkipCDFDefault
+	ctx.SkipModeCDF = SkipModeCDFDefault
 	ctx.IntraCDF = DefaultIntraCDF
 	ctx.IntrabcCDF = DefaultIntrabcCDF
 	ctx.CompCDF = DefaultCompCDF
@@ -492,6 +504,9 @@ func NewTileCtxForQIdx(qidx int) *TileCtx {
 	ctx.InterIntraModeCDF = InterIntraModeCDFDefault
 	ctx.InterIntraWedgeCDF = InterIntraWedgeCDFDefault
 	ctx.WedgeIdxCDF = WedgeIdxCDFDefault
+	ctx.JntCompCDF = JntCompCDFDefault
+	ctx.MaskCompCDF = MaskCompCDFDefault
+	ctx.WedgeCompCDF = WedgeCompCDFDefault
 	ctx.MotionModeCDF = MotionModeCDFDefault
 	ctx.OBMCCDF = OBMCCDFDefault
 	ctx.MVJointCDF = MVJointCDFDefault
