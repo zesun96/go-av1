@@ -2,13 +2,13 @@ package tx
 
 import "github.com/zesun96/go-av1/internal/transform"
 
-// Quantize applies forward quantization to an 8x8 coefficient block.
+// Quantize applies forward quantization to a small-transform coefficient block.
 //
 // For each coefficient: qcoeff = sign(coeff) * floor((abs(coeff) * qval + round) >> shift)
 // where qval is DqTbl[hbd][qindex][isAC] and shift = dqShift derived from transform size.
 //
 // Parameters:
-//   - coeffs: 64 transform coefficients (8x8, raster order)
+//   - coeffs: transform coefficients in raster order
 //   - qindex: quantization parameter index [0, 255]
 //   - hbd: bit depth index (0=8bit, 1=10bit, 2=12bit)
 //
@@ -21,7 +21,7 @@ func Quantize(coeffs []int32, qindex int, hbd int) int {
 	const dqShift = 0
 
 	eob := -1
-	for i := 0; i < 64; i++ {
+	for i := range coeffs {
 		if coeffs[i] == 0 {
 			continue
 		}
@@ -59,7 +59,7 @@ func Dequantize(coeffs []int32, qindex int, hbd int) {
 
 	const dqShift = 0
 
-	for i := 0; i < 64; i++ {
+	for i := range coeffs {
 		if coeffs[i] == 0 {
 			continue
 		}

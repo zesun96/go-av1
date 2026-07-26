@@ -1,135 +1,136 @@
-// Package tx implements forward transform and quantization for the AV1 encoder.
+// Package tx implements AV1 forward transforms and quantization.
 package tx
 
-// FwdDCT8 computes the 8-point forward Type-II DCT.
-//
-// This is the exact inverse of InvDCT8 in internal/transform/itx1d.go,
-// using the same fixed-point constants (cosine approximations) so that
-// forward(inverse(x)) == x within rounding.
-//
-// Input/output convention: c[i*stride] for i = 0..7.
-func FwdDCT8(c []int32, stride int) {
-	// Stage 1: butterfly (even/odd decomposition)
-	s0 := int(c[0]) + int(c[7*stride])
-	s7 := int(c[0]) - int(c[7*stride])
-	s1 := int(c[stride]) + int(c[6*stride])
-	s6 := int(c[stride]) - int(c[6*stride])
-	s2 := int(c[2*stride]) + int(c[5*stride])
-	s5 := int(c[2*stride]) - int(c[5*stride])
-	s3 := int(c[3*stride]) + int(c[4*stride])
-	s4 := int(c[3*stride]) - int(c[4*stride])
+// These kernels mirror SVT-AV1's svt_av1_fdct{4,8}_new and the 2-D
+// fwd_txfm shifts. The initial x4 shift is essential: AV1's quantizers
+// expect small-transform coefficients in Q3 (eight times pixel scale).
 
-	// Stage 2: even part → 4-point forward DCT
-	e0 := s0 + s3
-	e3 := s0 - s3
-	e1 := s1 + s2
-	e2 := s1 - s2
+const (
+	cos8  = 8035
+	cos16 = 7568
+	cos24 = 6811
+	cos32 = 5793
+	cos40 = 4551
+	cos48 = 3135
+	cos56 = 1598
+)
 
-	// 4-pt DCT outputs (c[0], c[2], c[4], c[6])
-	c[0] = int32((e0 + e1) * 181 >> 8)        // cos(0) * sqrt(2)/2
-	c[4*stride] = int32((e0 - e1) * 181 >> 8) // cos(pi/2)
-	c[2*stride] = int32((e2*1567 + e3*3784 + 2048) >> 12)
-	c[6*stride] = int32((e3*1567 - e2*3784 + 2048) >> 12)
-
-	// Odd part
-	c[stride] = int32((s7*4017 + s4*799 + 2048) >> 12)
-	c[3*stride] = int32((s6*1138 + s5*1703 + 1024) >> 11)
-	c[5*stride] = int32((s6*1703 - s5*1138 + 1024) >> 11)
-	c[7*stride] = int32((s7*799 - s4*4017 + 2048) >> 12)
+func halfBTF(a int32, x int32, b int32, y int32) int32 {
+	return int32((int64(a)*int64(x) + int64(b)*int64(y) + 4096) >> 13)
 }
 
-// FwdDCT8x8 computes the 2D forward DCT on an 8x8 block.
-//
-// The input block is stored row-major in src (8 values per row, stride srcStride).
-// The output coefficients are stored in dst (8 values per row, stride 8).
-//
-// Process: column transforms first, then row transforms (mirroring the
-// decoder's row-first-then-column inverse).
-func FwdDCT8x8(dst []int32, src []int16, srcStride int) {
-	// Temporary buffer for intermediate results.
-	var tmp [64]int32
+func fdct4(input [4]int32) (output [4]int32) {
+	s0 := input[0] + input[3]
+	s1 := input[1] + input[2]
+	s2 := input[1] - input[2]
+	s3 := input[0] - input[3]
+	output[0] = halfBTF(cos32, s0, cos32, s1)
+	output[1] = halfBTF(cos48, s2, cos16, s3)
+	output[2] = halfBTF(-cos32, s1, cos32, s0)
+	output[3] = halfBTF(cos48, s3, -cos16, s2)
+	return output
+}
 
-	// Column transforms (process each column)
-	for col := 0; col < 8; col++ {
-		// Load column from src into contiguous temp
-		for row := 0; row < 8; row++ {
-			tmp[row*8+col] = int32(src[row*srcStride+col])
+func fdct8(input [8]int32) (output [8]int32) {
+	// Stage 1.
+	var s [8]int32
+	s[0] = input[0] + input[7]
+	s[1] = input[1] + input[6]
+	s[2] = input[2] + input[5]
+	s[3] = input[3] + input[4]
+	s[4] = input[3] - input[4]
+	s[5] = input[2] - input[5]
+	s[6] = input[1] - input[6]
+	s[7] = input[0] - input[7]
+
+	// Stage 2.
+	var t [8]int32
+	t[0] = s[0] + s[3]
+	t[1] = s[1] + s[2]
+	t[2] = s[1] - s[2]
+	t[3] = s[0] - s[3]
+	t[4] = s[4]
+	t[5] = halfBTF(-cos32, s[5], cos32, s[6])
+	t[6] = halfBTF(cos32, s[6], cos32, s[5])
+	t[7] = s[7]
+
+	// Stage 3.
+	s[0] = halfBTF(cos32, t[0], cos32, t[1])
+	s[1] = halfBTF(-cos32, t[1], cos32, t[0])
+	s[2] = halfBTF(cos48, t[2], cos16, t[3])
+	s[3] = halfBTF(cos48, t[3], -cos16, t[2])
+	s[4] = t[4] + t[5]
+	s[5] = t[4] - t[5]
+	s[6] = t[7] - t[6]
+	s[7] = t[7] + t[6]
+
+	// Stage 4 and output permutation.
+	t[4] = halfBTF(cos56, s[4], cos8, s[7])
+	t[5] = halfBTF(cos24, s[5], cos40, s[6])
+	t[6] = halfBTF(cos24, s[6], -cos40, s[5])
+	t[7] = halfBTF(cos56, s[7], -cos8, s[4])
+	output[0] = s[0]
+	output[1] = t[4]
+	output[2] = s[2]
+	output[3] = t[6]
+	output[4] = s[1]
+	output[5] = t[5]
+	output[6] = s[3]
+	output[7] = t[7]
+	return output
+}
+
+// FwdDCT8 applies the AV1 8-point forward DCT in place.
+func FwdDCT8(c []int32, stride int) {
+	var input [8]int32
+	for i := range input {
+		input[i] = c[i*stride]
+	}
+	output := fdct8(input)
+	for i := range output {
+		c[i*stride] = output[i]
+	}
+}
+
+// FwdDCT8x8 computes SVT-AV1's TX_8X8 DCT_DCT forward transform.
+func FwdDCT8x8(dst []int32, src []int16, srcStride int) {
+	var tmp [64]int32
+	for x := 0; x < 8; x++ {
+		var input [8]int32
+		for y := 0; y < 8; y++ {
+			input[y] = int32(src[y*srcStride+x]) << 2
+		}
+		output := fdct8(input)
+		for y := 0; y < 8; y++ {
+			// TX8 shift[1] is -1: round right by one after columns.
+			tmp[y*8+x] = (output[y] + 1) >> 1
 		}
 	}
-
-	// Apply 1D DCT to each column (stride = 8, since tmp is row-major)
-	for col := 0; col < 8; col++ {
-		fwdDCT8Col(tmp[:], col)
-	}
-
-	// Intermediate rounding shift (matches AV1 spec intermediate transform shift)
-	for i := range tmp {
-		tmp[i] = (tmp[i] + 1) >> 1
-	}
-
-	// Row transforms
-	for row := 0; row < 8; row++ {
-		fwdDCT8Row(tmp[:], row, dst)
+	for y := 0; y < 8; y++ {
+		var input [8]int32
+		copy(input[:], tmp[y*8:y*8+8])
+		output := fdct8(input)
+		copy(dst[y*8:y*8+8], output[:])
 	}
 }
 
-// fwdDCT8Col performs forward DCT8 on column col of buf (row-major, 8-wide).
-func fwdDCT8Col(buf []int32, col int) {
-	s0 := int(buf[0*8+col]) + int(buf[7*8+col])
-	s7 := int(buf[0*8+col]) - int(buf[7*8+col])
-	s1 := int(buf[1*8+col]) + int(buf[6*8+col])
-	s6 := int(buf[1*8+col]) - int(buf[6*8+col])
-	s2 := int(buf[2*8+col]) + int(buf[5*8+col])
-	s5 := int(buf[2*8+col]) - int(buf[5*8+col])
-	s3 := int(buf[3*8+col]) + int(buf[4*8+col])
-	s4 := int(buf[3*8+col]) - int(buf[4*8+col])
-
-	// Even part: 4-point DCT
-	e0 := s0 + s3
-	e3 := s0 - s3
-	e1 := s1 + s2
-	e2 := s1 - s2
-
-	buf[0*8+col] = int32((e0+e1)*181+128) >> 8
-	buf[4*8+col] = int32((e0-e1)*181+128) >> 8
-	buf[2*8+col] = int32((e2*1567 + e3*3784 + 2048) >> 12)
-	buf[6*8+col] = int32((e3*1567 - e2*3784 + 2048) >> 12)
-
-	// Odd part
-	buf[1*8+col] = int32((s7*4017 + s4*799 + 2048) >> 12)
-	buf[5*8+col] = int32((s6*1703 - s5*1138 + 1024) >> 11)
-	buf[3*8+col] = int32((s6*1138 + s5*1703 + 1024) >> 11)
-	buf[7*8+col] = int32((s7*799 - s4*4017 + 2048) >> 12)
-}
-
-// fwdDCT8Row performs forward DCT8 on row of buf (row-major, 8-wide) and
-// writes output to dst.
-func fwdDCT8Row(buf []int32, row int, dst []int32) {
-	off := row * 8
-	s0 := int(buf[off+0]) + int(buf[off+7])
-	s7 := int(buf[off+0]) - int(buf[off+7])
-	s1 := int(buf[off+1]) + int(buf[off+6])
-	s6 := int(buf[off+1]) - int(buf[off+6])
-	s2 := int(buf[off+2]) + int(buf[off+5])
-	s5 := int(buf[off+2]) - int(buf[off+5])
-	s3 := int(buf[off+3]) + int(buf[off+4])
-	s4 := int(buf[off+3]) - int(buf[off+4])
-
-	// Even part
-	e0 := s0 + s3
-	e3 := s0 - s3
-	e1 := s1 + s2
-	e2 := s1 - s2
-
-	dstOff := row * 8
-	dst[dstOff+0] = int32((e0+e1)*181+128) >> 8
-	dst[dstOff+4] = int32((e0-e1)*181+128) >> 8
-	dst[dstOff+2] = int32((e2*1567 + e3*3784 + 2048) >> 12)
-	dst[dstOff+6] = int32((e3*1567 - e2*3784 + 2048) >> 12)
-
-	// Odd part
-	dst[dstOff+1] = int32((s7*4017 + s4*799 + 2048) >> 12)
-	dst[dstOff+5] = int32((s6*1703 - s5*1138 + 1024) >> 11)
-	dst[dstOff+3] = int32((s6*1138 + s5*1703 + 1024) >> 11)
-	dst[dstOff+7] = int32((s7*799 - s4*4017 + 2048) >> 12)
+// FwdDCT4x4 computes SVT-AV1's TX_4X4 DCT_DCT forward transform.
+func FwdDCT4x4(dst []int32, src []int16, srcStride int) {
+	var tmp [16]int32
+	for x := 0; x < 4; x++ {
+		var input [4]int32
+		for y := 0; y < 4; y++ {
+			input[y] = int32(src[y*srcStride+x]) << 2
+		}
+		output := fdct4(input)
+		for y := 0; y < 4; y++ {
+			tmp[y*4+x] = output[y]
+		}
+	}
+	for y := 0; y < 4; y++ {
+		var input [4]int32
+		copy(input[:], tmp[y*4:y*4+4])
+		output := fdct4(input)
+		copy(dst[y*4:y*4+4], output[:])
+	}
 }

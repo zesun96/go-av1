@@ -2,17 +2,15 @@ package bitwriter
 
 import "math/bits"
 
-// MSACEncoder is the AV1 multi-symbol arithmetic encoder, the inverse of
-// the MSAC decoder in internal/bitstream/msac.go.
-//
-// It maintains the [low, low+rng) interval in 15-bit precision with a
-// 64-bit carry-propagation window, matching the dav1d/libaom normalization
-// convention.
+// MSACEncoder is the AV1/Daala multi-symbol arithmetic encoder used for tile
+// payloads.  It is a Go port of SVT-AV1's svt_od_ec_enc_* implementation in
+// Source/Lib/Codec/bitstream_unit.c.
 type MSACEncoder struct {
-	low uint64 // lower bound of the interval (33-bit + carry region)
-	rng uint32 // interval width, always in [0x8000, 0xFFFF]
-	cnt int    // number of bits stored in low ready to output
-	buf []byte // output buffer
+	buf  []byte
+	offs int
+	low  uint64
+	rng  uint32
+	cnt  int
 }
 
 const (
@@ -20,107 +18,133 @@ const (
 	msacMinProb   = 4
 )
 
-// NewMSACEncoder creates a new arithmetic encoder.
-func NewMSACEncoder(cap int) *MSACEncoder {
+// NewMSACEncoder creates a fresh arithmetic encoder.
+func NewMSACEncoder(capacity int) *MSACEncoder {
+	if capacity < 0 {
+		capacity = 0
+	}
 	return &MSACEncoder{
+		buf: make([]byte, 0, capacity),
 		rng: 0x8000,
-		cnt: -15,
-		buf: make([]byte, 0, cap),
+		cnt: -9,
 	}
 }
 
 // Reset clears the encoder for reuse.
 func (e *MSACEncoder) Reset() {
+	e.buf = e.buf[:0]
+	e.offs = 0
 	e.low = 0
 	e.rng = 0x8000
-	e.cnt = -15
-	e.buf = e.buf[:0]
+	e.cnt = -9
 }
 
-// norm renormalizes after encoding so rng stays in [0x8000, 0x10000).
-func (e *MSACEncoder) norm() {
-	d := 15 - bits.Len32(e.rng) + 1
-	e.low <<= uint(d)
-	e.rng <<= uint(d)
-	e.cnt += d
-	if e.cnt >= 0 {
-		e.carry()
+func (e *MSACEncoder) propagateCarryBackward(offs int) {
+	for offs >= 0 {
+		sum := uint16(e.buf[offs]) + 1
+		e.buf[offs] = byte(sum)
+		if sum < 0x100 {
+			return
+		}
+		offs--
 	}
+	panic("bitwriter: MSAC carry propagated before start of buffer")
 }
 
-// carry propagates carry bits from low into the output buffer.
-func (e *MSACEncoder) carry() {
-	for e.cnt >= 8 {
-		e.cnt -= 8
-		b := byte(e.low >> (uint(e.cnt) + 16))
-		e.buf = append(e.buf, b)
-		e.low &= (1 << (uint(e.cnt) + 16)) - 1
+func (e *MSACEncoder) emitBytes(output uint64, carry bool, n int) {
+	needed := e.offs + n
+	for len(e.buf) < needed {
+		e.buf = append(e.buf, 0)
 	}
+	for i := 0; i < n; i++ {
+		shift := uint(n-1-i) * 8
+		e.buf[e.offs+i] = byte(output >> shift)
+	}
+	if carry {
+		e.propagateCarryBackward(e.offs - 1)
+	}
+	e.offs += n
 }
 
-// Bool encodes a boolean with probability f/32768 of being 0.
+func (e *MSACEncoder) normalize(low uint64, rng uint32) {
+	d := 16 - bits.Len32(rng)
+	s := e.cnt + d
+	if s >= 40 {
+		n := (s >> 3) + 1
+		c := e.cnt + 24 - (n << 3)
+		output := low >> uint(c)
+		low &= (uint64(1) << uint(c)) - 1
+		carryMask := uint64(1) << (uint(n) * 8)
+		e.emitBytes(output&(carryMask-1), output&carryMask != 0, n)
+		s = c + d - 24
+	}
+	e.low = low << uint(d)
+	e.rng = rng << uint(d)
+	e.cnt = s
+}
+
+// Bool encodes val with probability f/32768 of val being one.
 func (e *MSACEncoder) Bool(val uint32, f uint32) {
 	r := e.rng
 	v := ((r>>8)*(f>>msacProbShift))>>(7-msacProbShift) + msacMinProb
-	if val == 0 {
-		// Symbol 0: upper portion [v, rng)
-		e.low += uint64(v)
-		e.rng = r - v
+	low := e.low
+	var newRng uint32
+	if val != 0 {
+		low += uint64(r - v)
+		newRng = v
 	} else {
-		// Symbol 1: lower portion [0, v)
-		e.rng = v
+		newRng = r - v
 	}
-	e.norm()
+	e.normalize(low, newRng)
 }
 
-// BoolEqui encodes a boolean assuming probability 1/2.
+// BoolEqui encodes an equiprobable bit.
 func (e *MSACEncoder) BoolEqui(val uint32) {
-	r := e.rng
-	v := ((r >> 8) << 7) + msacMinProb
-	if val == 0 {
-		e.low += uint64(v)
-		e.rng = r - v
-	} else {
-		e.rng = v
-	}
-	e.norm()
+	e.Bool(val, 16384)
 }
 
-// Symbol encodes val in [0, n-1] using a non-adaptive CDF.
-// CDF format matches the decoder: cdf[i] is the "inverse CDF" in Q15.
+// Symbol encodes val using an inverse Q15 CDF. n is the number of symbols;
+// cdf[n-1] is the zero sentinel.
 func (e *MSACEncoder) Symbol(val uint32, cdf []uint16, n int) {
-	r := e.rng >> 8
-	nMinus1 := uint32(n - 1)
-
-	// Compute the interval boundaries for val.
-	var lo, hi uint32
-	if val == 0 {
-		hi = e.rng
-	} else {
-		hi = r*uint32(cdf[val-1]>>msacProbShift)>>(7-msacProbShift) + msacMinProb*(nMinus1-(val-1))
+	if n < 2 || n > 16 || len(cdf) < n || val >= uint32(n) {
+		panic("bitwriter: invalid MSAC symbol or CDF")
 	}
-	lo = r*uint32(cdf[val]>>msacProbShift)>>(7-msacProbShift) + msacMinProb*(nMinus1-val)
-
-	e.low += uint64(lo)
-	e.rng = hi - lo
-	e.norm()
+	var fl uint32 = 32768
+	if val > 0 {
+		fl = uint32(cdf[val-1])
+	}
+	fh := uint32(cdf[val])
+	r := e.rng
+	// SVT-AV1 svt_od_ec_encode_q15 uses N = nsyms - 1 for the minimum
+	// probability boost. Do not use n here: that creates a self-consistent
+	// stream with the old Go test encoder, but diverges from AV1 decoders.
+	n32 := uint32(n - 1)
+	var u, v uint32
+	if fl < 32768 {
+		u = ((r>>8)*(fl>>msacProbShift))>>(7-msacProbShift) +
+			msacMinProb*(n32-(val-1))
+	} else {
+		u = r
+	}
+	v = ((r>>8)*(fh>>msacProbShift))>>(7-msacProbShift) +
+		msacMinProb*(n32-val)
+	e.normalize(e.low+uint64(r-u), u-v)
 }
 
-// SymbolAdapt encodes val and updates the CDF (adaptive).
-// cdf has n+1 entries: n probabilities + 1 counter.
+// SymbolAdapt encodes a symbol and updates the CDF. It is provided for
+// frames that allow CDF updates; callers of disable_cdf_update frames should
+// use Symbol.
 func (e *MSACEncoder) SymbolAdapt(val uint32, cdf []uint16, n int) {
 	e.Symbol(val, cdf, n)
-
-	// CDF update (same logic as decoder).
 	count := uint32(cdf[n])
 	rate := 4 + (count >> 4)
-	if n > 2 {
+	if n-1 > 2 {
 		rate++
 	}
 	for i := uint32(0); i < val; i++ {
 		cdf[i] += uint16((32768 - uint32(cdf[i])) >> rate)
 	}
-	for i := val; i < uint32(n); i++ {
+	for i := val; i < uint32(n-1); i++ {
 		cdf[i] -= uint16(uint32(cdf[i]) >> rate)
 	}
 	if count < 32 {
@@ -128,11 +152,9 @@ func (e *MSACEncoder) SymbolAdapt(val uint32, cdf []uint16, n int) {
 	}
 }
 
-// BoolAdapt encodes a boolean with adaptive probability.
-// cdf[0] = probability of 0 in Q15, cdf[1] = counter.
+// BoolAdapt encodes a boolean and updates its two-entry CDF.
 func (e *MSACEncoder) BoolAdapt(val uint32, cdf []uint16) {
 	e.Bool(val, uint32(cdf[0]))
-
 	count := uint32(cdf[1])
 	rate := 4 + (count >> 4)
 	if val != 0 {
@@ -152,29 +174,39 @@ func (e *MSACEncoder) Bools(v uint32, n int) {
 	}
 }
 
-// Flush finalizes the arithmetic coder and returns the encoded bytes.
-// After Flush, the encoder must be Reset before reuse.
+// Flush finalizes the arithmetic code and returns the encoded tile bytes.
 func (e *MSACEncoder) Flush() []byte {
-	// Determine the minimal value within [low, low+rng) that can be
-	// represented in the fewest bits.
-	s := 15 + e.cnt
-	m := uint64(1)<<uint(s+16) - 1
-	low := (e.low + m) & ^m
-	// Write remaining bits.
-	for s >= 0 {
-		e.buf = append(e.buf, byte(low>>(uint(s)+8)))
-		low &= (1 << (uint(s) + 8)) - 1
-		s -= 8
+	low := e.low
+	c := e.cnt
+	s := 10 + c
+	const mask = uint64(0x3fff)
+	end := ((low + mask) &^ mask) | (mask + 1)
+	if s > 0 {
+		n := (uint64(1) << uint(c+16)) - 1
+		for {
+			if e.offs >= len(e.buf) {
+				e.buf = append(e.buf, 0)
+			}
+			val := uint16(end >> uint(c+16))
+			e.buf[e.offs] = byte(val)
+			if val&0x100 != 0 {
+				e.propagateCarryBackward(e.offs - 1)
+			}
+			e.offs++
+			end &= n
+			s -= 8
+			c -= 8
+			n >>= 8
+			if s <= 0 {
+				break
+			}
+		}
 	}
-	return e.buf
+	return e.buf[:e.offs]
 }
 
-// Bytes returns the raw buffer (valid only after Flush).
-func (e *MSACEncoder) Bytes() []byte {
-	return e.buf
-}
+// Bytes returns the bytes emitted so far.
+func (e *MSACEncoder) Bytes() []byte { return e.buf[:e.offs] }
 
-// Len returns current buffer length.
-func (e *MSACEncoder) Len() int {
-	return len(e.buf)
-}
+// Len returns the number of bytes emitted so far.
+func (e *MSACEncoder) Len() int { return e.offs }

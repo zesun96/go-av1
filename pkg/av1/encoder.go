@@ -68,7 +68,8 @@ type Encoder interface {
 	Close() error
 }
 
-// NewEncoder constructs an Encoder. M10 implements a minimal intra-only encoder.
+// NewEncoder constructs an Encoder. The current M11 baseline emits
+// single-tile, intra-only key frames.
 func NewEncoder(opts EncoderOptions) (Encoder, error) {
 	impl, err := encoder.NewImpl(encoder.Options{
 		Width:        opts.Width,

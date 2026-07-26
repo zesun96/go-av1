@@ -54,7 +54,7 @@ func NewImpl(opts Options) (*Impl, error) {
 		opts.BitDepth = 8
 	}
 	if opts.BitDepth != 8 {
-		return nil, errors.New("encoder: only 8-bit supported in M10")
+		return nil, errors.New("encoder: only 8-bit supported by the M11 baseline")
 	}
 	if opts.FrameRateNum == 0 {
 		opts.FrameRateNum = 30
@@ -93,6 +93,12 @@ func (e *Impl) SendPicture(p *RawPicture) error {
 	if p == nil {
 		return errors.New("encoder: nil picture")
 	}
+	if p.Width != e.opts.Width || p.Height != e.opts.Height {
+		return errors.New("encoder: picture dimensions do not match encoder")
+	}
+	if len(p.Y) < p.Width*p.Height {
+		return errors.New("encoder: luma plane is too small")
+	}
 
 	// Encode the frame
 	data := e.fe.EncodeFrame(p.Y, p.U, p.V, e.frameNum)
@@ -100,7 +106,7 @@ func (e *Impl) SendPicture(p *RawPicture) error {
 	pkt := &Packet{
 		Data:     data,
 		PTS:      int64(e.frameNum),
-		Keyframe: true, // M10: all key frames
+		Keyframe: true, // M11 baseline: all frames are independent key frames
 	}
 	e.packets = append(e.packets, pkt)
 	e.frameNum++

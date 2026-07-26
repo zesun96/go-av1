@@ -25,7 +25,7 @@ func main() {
 	crf := flag.Int("crf", 30, "constant rate factor (0-63)")
 	flag.Parse()
 
-	fmt.Fprintf(os.Stderr, "go-av1enc %s (M10 intra-only encoder)\n", av1.Version)
+	fmt.Fprintf(os.Stderr, "go-av1enc %s (M11 conforming intra baseline)\n", av1.Version)
 
 	if *in == "" || *out == "" {
 		fmt.Fprintln(os.Stderr, "usage: go-av1enc -i <input.y4m> -o <output.ivf> [--crf 30]")
@@ -94,7 +94,7 @@ func main() {
 			U:        frame.Cb,
 			V:        frame.Cr,
 			StrideY:  hdr.Width,
-			StrideUV: hdr.Width / 2,
+			StrideUV: (hdr.Width + 1) / 2,
 			Width:    hdr.Width,
 			Height:   hdr.Height,
 			BitDepth: hdr.BitDepth,

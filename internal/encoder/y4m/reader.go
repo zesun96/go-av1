@@ -98,15 +98,15 @@ func NewReader(r io.Reader) (*Reader, error) {
 	var chromaSize int
 	switch hdr.ChromaSS {
 	case "420":
-		chromaSize = lumaSize / 2 // two chroma planes, each 1/4 of luma
+		chromaSize = 2 * ((hdr.Width + 1) / 2) * ((hdr.Height + 1) / 2) * bpp
 	case "422":
-		chromaSize = lumaSize // two chroma planes, each 1/2 of luma
+		chromaSize = 2 * ((hdr.Width + 1) / 2) * hdr.Height * bpp
 	case "444":
 		chromaSize = lumaSize * 2 // two chroma planes, each full
 	case "mono":
 		chromaSize = 0
 	default:
-		chromaSize = lumaSize / 2
+		chromaSize = 2 * ((hdr.Width + 1) / 2) * ((hdr.Height + 1) / 2) * bpp
 	}
 
 	rd := &Reader{

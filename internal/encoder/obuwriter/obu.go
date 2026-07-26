@@ -25,6 +25,7 @@ type SeqParams struct {
 	Height     int
 	BitDepth   int // 8, 10, or 12
 	ChromaSS   int // 0=mono, 1=420, 2=422, 3=444
+	Use128SB   bool
 	FrameRateN int
 	FrameRateD int
 }
@@ -84,8 +85,12 @@ func WriteSequenceHeader(p *SeqParams) []byte {
 	// frame_id_numbers_present_flag = 0
 	bw.PutBit(0)
 
-	// use_128x128_superblock = 0 (use 64x64 SB)
-	bw.PutBit(0)
+	// use_128x128_superblock
+	if p.Use128SB {
+		bw.PutBit(1)
+	} else {
+		bw.PutBit(0)
+	}
 	// enable_filter_intra = 0
 	bw.PutBit(0)
 	// enable_intra_edge_filter = 0
@@ -222,12 +227,28 @@ func writeUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex int) 
 	//   For 176x144: sbw=3, sbh=3.
 	//   uniform_tile_spacing_flag = 1  (dav1d line 625)
 	bw.PutBit(1)
-	// uniform tile loop: write 0 to stop at log2_cols = min_log2_cols = 0.
+	sbSize := 64
+	if p.Use128SB {
+		sbSize = 128
+	}
+	sbw := (p.Width + sbSize - 1) / sbSize
+	sbh := (p.Height + sbSize - 1) / sbSize
+	minLog2Cols := tileLog2(4096/sbSize, sbw)
+	maxLog2Cols := tileLog2(1, minInt(sbw, 64))
+	maxLog2Rows := tileLog2(1, minInt(sbh, 64))
+	maxTileAreaSB := 4096 * 2304 / (sbSize * sbSize)
+	minLog2Tiles := maxInt(tileLog2(maxTileAreaSB, sbw*sbh), minLog2Cols)
+	// uniform tile loop: write 0 to stop at log2_cols = min_log2_cols.
 	// (loop reads bits while log2_cols < max_log2_cols; one read of 0 exits)
 	// For sbw=3: min_log2_cols=0, max_log2_cols=2; min=0 so loop reads one bit → write 0.
-	bw.PutBit(0)
+	if minLog2Cols < maxLog2Cols {
+		bw.PutBit(0)
+	}
 	// uniform row loop: write 0 to stop at log2_rows = min_log2_rows = 0.
-	bw.PutBit(0)
+	minLog2Rows := maxInt(minLog2Tiles-minLog2Cols, 0)
+	if minLog2Rows < maxLog2Rows {
+		bw.PutBit(0)
+	}
 	// log2_cols=0, log2_rows=0 → tiling.update + n_bytes NOT present.
 
 	// quantization_params() (dav1d line 692)
@@ -330,6 +351,28 @@ func bitsNeeded(val int) int {
 		return 1
 	}
 	return n
+}
+
+func tileLog2(size, target int) int {
+	k := 0
+	for size<<k < target {
+		k++
+	}
+	return k
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // appendLeb128 appends a LEB128-encoded uint32 to buf.
