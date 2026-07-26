@@ -33,6 +33,10 @@ type EncoderOptions struct {
 
 	// CRF is the constant-rate-factor when TargetBitrateKbps is zero.
 	CRF int
+
+	// EnableOBMC lets the mode decision use overlapped block motion
+	// compensation. It is disabled by default because it costs extra search.
+	EnableOBMC bool
 }
 
 // EncodedPacket is one OBU temporal unit produced by Encoder.
@@ -78,6 +82,7 @@ func NewEncoder(opts EncoderOptions) (Encoder, error) {
 		FrameRateDen: opts.FrameRateDen,
 		BitDepth:     opts.BitDepth,
 		CRF:          opts.CRF,
+		EnableOBMC:   opts.EnableOBMC,
 	})
 	if err != nil {
 		return nil, err

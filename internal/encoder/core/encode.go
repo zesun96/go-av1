@@ -15,18 +15,19 @@ import (
 
 // FrameEncoder encodes a single frame.
 type FrameEncoder struct {
-	Width    int
-	Height   int
-	QIndex   int
-	BitDepth int
-	ref      [3][]byte
-	refs     [8][3][]byte
-	refMgr   reference.Manager
-	refIdx   [7]uint8
-	refSlot  int
-	ref2     [3][]byte
-	refSlot2 int
-	compound bool
+	Width      int
+	Height     int
+	QIndex     int
+	BitDepth   int
+	ref        [3][]byte
+	refs       [8][3][]byte
+	refMgr     reference.Manager
+	refIdx     [7]uint8
+	refSlot    int
+	ref2       [3][]byte
+	refSlot2   int
+	compound   bool
+	EnableOBMC bool
 }
 
 // EncodeShowExisting displays reference slot zero. Every key frame emitted by
@@ -78,7 +79,7 @@ func (fe *FrameEncoder) EncodeInterFrame(yPlane, cbPlane, crPlane []byte) []byte
 	return obuwriter.BuildInterTemporalUnitWithParams(seqParams, fe.QIndex, tileData,
 		obuwriter.InterFrameParams{
 			RefIdx: plan.RefIdx, RefreshFlags: plan.RefreshFlags,
-			EnableCompound: fe.compound,
+			EnableCompound: fe.compound, EnableOBMC: fe.EnableOBMC,
 		})
 }
 
@@ -322,12 +323,27 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	}
 	var planes []*interPlaneEncode
 	useCompound := false
+	useOBMC := false
+	obmcPresent, obmcBS := false, 0
 	if coded {
 		planes = append(planes, fe.analyzeInterPlane(st, 0, bx, by, 8, transform.TX8x8, mv.X, mv.Y))
 		if blockHasChroma(bx, by, bw, bh) {
 			planes = append(planes,
 				fe.analyzeInterPlane(st, 1, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y),
 				fe.analyzeInterPlane(st, 2, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y))
+		}
+		if fe.EnableOBMC {
+			obmcPresent, obmcBS = tile.EncoderOBMCContext(fs, bx, by, bw, bh, fe.refSlot)
+			if obmcPresent {
+				pred := tile.EncoderOBMCPrediction(
+					planes[0].pred, fs, fe.refs, fe.Width, fe.Height, bx, by, bw, bh)
+				obmcPlane := fe.analyzeInterPlanePrediction(
+					st, 0, bx, by, 8, transform.TX8x8, pred)
+				if interPredictionSSE(st, obmcPlane) < interPredictionSSE(st, planes[0]) {
+					planes[0] = obmcPlane
+					useOBMC = true
+				}
+			}
 		}
 		if fe.compound {
 			compoundPlanes := []*interPlaneEncode{
@@ -341,6 +357,7 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 			if interPredictionSSE(st, compoundPlanes[0]) < interPredictionSSE(st, planes[0]) {
 				planes = compoundPlanes
 				useCompound = true
+				useOBMC = false
 			}
 		}
 	}
@@ -388,6 +405,9 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 		default:
 			ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
 			ec.BoolAdapt(0, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
+		}
+		if fe.EnableOBMC && obmcPresent {
+			ec.BoolAdapt(boolSymbol(useOBMC), ctx.OBMCCDF[obmcBS][:])
 		}
 	}
 

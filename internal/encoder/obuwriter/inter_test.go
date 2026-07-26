@@ -53,8 +53,10 @@ func TestWriteInterFrameHeaderCarriesReferencePlan(t *testing.T) {
 		t.Fatalf("ParseSequenceHeader: %v", err)
 	}
 	fp := InterFrameParams{
-		RefIdx:       [7]uint8{3, 2, 1, 0, 7, 6, 5},
-		RefreshFlags: 1 << 4,
+		RefIdx:         [7]uint8{3, 2, 1, 0, 7, 6, 5},
+		RefreshFlags:   1 << 4,
+		EnableCompound: true,
+		EnableOBMC:     true,
 	}
 	var frame header.FrameHeader
 	if err := obu.ParseFrameHeader(
@@ -70,5 +72,9 @@ func TestWriteInterFrameHeaderCarriesReferencePlan(t *testing.T) {
 		if frame.Refidx[i] != int8(want) {
 			t.Fatalf("refidx[%d]=%d, want %d", i, frame.Refidx[i], want)
 		}
+	}
+	if frame.SwitchableCompRefs == 0 || frame.SwitchableMotionMode == 0 {
+		t.Fatalf("optional inter tools: compound=%d obmc=%d",
+			frame.SwitchableCompRefs, frame.SwitchableMotionMode)
 	}
 }

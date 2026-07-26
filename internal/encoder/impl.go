@@ -32,6 +32,7 @@ type Options struct {
 	FrameRateDen int
 	BitDepth     int
 	CRF          int
+	EnableOBMC   bool
 }
 
 // ErrAgain is returned when no packet is available.
@@ -77,10 +78,11 @@ func NewImpl(opts Options) (*Impl, error) {
 	}
 
 	fe := &core.FrameEncoder{
-		Width:    opts.Width,
-		Height:   opts.Height,
-		QIndex:   qindex,
-		BitDepth: 0, // 8-bit -> hbd index 0
+		Width:      opts.Width,
+		Height:     opts.Height,
+		QIndex:     qindex,
+		BitDepth:   0, // 8-bit -> hbd index 0
+		EnableOBMC: opts.EnableOBMC,
 	}
 
 	return &Impl{

@@ -131,3 +131,63 @@ func EncoderCompoundPrediction(ref0 []byte, stride0, width0, height0 int,
 	}
 	return out
 }
+
+// EncoderOBMCContext reports whether an 8x8-or-larger single-reference block
+// carries motion_mode syntax and returns the OBMC CDF block-size context.
+func EncoderOBMCContext(fs *FrameState, bx, by, bw, bh, refSlot int) (bool, int) {
+	bs := bsizeFromDim(bw, bh)
+	if bs < 0 || minInt((bw+3)>>2, (bh+3)>>2) < 2 {
+		return false, 0
+	}
+	overlap, _ := motionModeNeighbours(fs, bx, by, bw, bh, refSlot)
+	return overlap, bs
+}
+
+// EncoderOBMCPrediction applies the decoder's luma OBMC blend to an existing
+// single-reference prediction. The current encoder uses 8x8 coding blocks, for
+// which AV1 does not apply chroma OBMC.
+func EncoderOBMCPrediction(base []byte, fs *FrameState, refs [8][3][]byte,
+	width, height, bx, by, bw, bh int,
+) []byte {
+	out := append([]byte(nil), base...)
+	if fs == nil || fs.MVFrame == nil || len(out) < bw*bh || bw <= 0 || bh <= 0 {
+		return out
+	}
+	bw4, bh4 := (bw+3)>>2, (bh+3)>>2
+	if by > fs.TileY0 {
+		for i, x4 := 0, 0; x4 < bw4 && i < minInt(int(BlockDimensions[bsizeFromDim(bw, bh)][2]), 4); {
+			blk, ok := fs.BlockState(bx+(x4+1)*4, by-4)
+			if !ok || blk.Intra || int(blk.RefSlot) < 0 || int(blk.RefSlot) >= len(refs) ||
+				len(refs[blk.RefSlot][0]) == 0 {
+				x4 += 2
+				continue
+			}
+			step4 := clampInt(int(BlockDimensions[blk.Bs][0]), 2, 16)
+			ow4, oh4 := minInt(step4, bw4), minInt(bh4, 16)>>1
+			predH := ((oh4*3 + 3) >> 2) * 4
+			pred := EncoderInterPrediction(refs[blk.RefSlot][0], width, width, height,
+				bx+x4*4, by, ow4*4, predH, int(blk.MV[1]), int(blk.MV[0]), 0, 0)
+			blendOBMCH(out, bw, bw, bh, x4*4, 0, pred, ow4*4, oh4*4)
+			i++
+			x4 += step4
+		}
+	}
+	if bx > fs.TileX0 {
+		for i, y4 := 0, 0; y4 < bh4 && i < minInt(int(BlockDimensions[bsizeFromDim(bw, bh)][3]), 4); {
+			blk, ok := fs.BlockState(bx-4, by+(y4+1)*4)
+			if !ok || blk.Intra || int(blk.RefSlot) < 0 || int(blk.RefSlot) >= len(refs) ||
+				len(refs[blk.RefSlot][0]) == 0 {
+				y4 += 2
+				continue
+			}
+			step4 := clampInt(int(BlockDimensions[blk.Bs][1]), 2, 16)
+			ow4, oh4 := minInt(bw4, 16)>>1, minInt(step4, bh4)
+			pred := EncoderInterPrediction(refs[blk.RefSlot][0], width, width, height,
+				bx, by+y4*4, ow4*4, oh4*4, int(blk.MV[1]), int(blk.MV[0]), 0, 0)
+			blendOBMCV(out, bw, bw, bh, 0, y4*4, pred, ow4*4, oh4*4)
+			i++
+			y4 += step4
+		}
+	}
+	return out
+}

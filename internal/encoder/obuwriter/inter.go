@@ -7,6 +7,7 @@ type InterFrameParams struct {
 	RefIdx         [7]uint8
 	RefreshFlags   uint8
 	EnableCompound bool
+	EnableOBMC     bool
 }
 
 func defaultInterFrameParams() InterFrameParams {
@@ -48,7 +49,11 @@ func writeInterUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex 
 	bw.PutBit(1) // allow_high_precision_mv
 	bw.PutBit(0) // interpolation_filter is fixed
 	bw.PutBits(0, 2)
-	bw.PutBit(0) // is_motion_mode_switchable
+	if fp.EnableOBMC {
+		bw.PutBit(1) // is_motion_mode_switchable
+	} else {
+		bw.PutBit(0)
+	}
 
 	bw.PutBit(0) // disable_frame_end_update_cdf
 	writeSingleTileInfo(bw, p)

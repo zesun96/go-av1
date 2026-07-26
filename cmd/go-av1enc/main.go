@@ -23,6 +23,7 @@ func main() {
 	in := flag.String("i", "", "input Y4M file")
 	out := flag.String("o", "", "output IVF file")
 	crf := flag.Int("crf", 30, "constant rate factor (0-63)")
+	obmc := flag.Bool("obmc", false, "enable overlapped block motion compensation")
 	flag.Parse()
 
 	fmt.Fprintf(os.Stderr, "go-av1enc %s (M12 inter baseline)\n", av1.Version)
@@ -59,6 +60,7 @@ func main() {
 		FrameRateDen: hdr.FrameRate[1],
 		BitDepth:     hdr.BitDepth,
 		CRF:          *crf,
+		EnableOBMC:   *obmc,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: encoder init: %v\n", err)
