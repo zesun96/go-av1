@@ -7,8 +7,9 @@ import (
 
 // PictureFunc is invoked once per decoded picture by DecodeReader.
 //
-// Returning false stops iteration. The picture must be Released by the
-// callee, either before returning or asynchronously.
+// Returning false stops iteration. DecodeReader releases the picture after
+// the callback returns. Call Retain in the callback only when the picture must
+// outlive that callback, and later balance it with Release.
 type PictureFunc func(p *Picture, err error) bool
 
 // DecodeReader decodes all pictures in r and invokes fn for each one.

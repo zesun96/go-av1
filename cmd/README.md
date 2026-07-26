@@ -6,6 +6,7 @@ Each subdirectory is a standalone `main` package.
 | Directory | Binary | Status |
 |---|---|---|
 | [`go-av1d`](go-av1d/) | `go-av1d` | Active |
+| [`av1-benchcmp`](av1-benchcmp/) | `av1-benchcmp` | Developer tool |
 | [`go-av1enc`](go-av1enc/) | `go-av1enc` | Planned |
 | [`webrtc-av1d`](webrtc-av1d/) | `webrtc-av1d` | Active |
 
@@ -13,7 +14,7 @@ Each subdirectory is a standalone `main` package.
 
 ## go-av1d
 
-AV1 file decoder. Reads an IVF or Annex-B bitstream, decodes every frame with
+AV1 file decoder. Reads an IVF bitstream, decodes every frame with
 the go-av1 pipeline, and writes raw planar output as Y4M.
 
 ### Install
@@ -32,7 +33,7 @@ go-av1d -i <input> [-o <output>] [-threads <n>]
 |---|---|---|
 | `-i` | *(required)* | Input AV1 file (IVF) |
 | `-o` | *(discard)* | Output Y4M file; use `-` for stdout |
-| `-threads` | `0` (NumCPU) | Decoder worker threads |
+| `-threads` | `0` (NumCPU) | Reserved decoder worker count; scheduling is not implemented yet |
 
 ### Examples
 
@@ -46,6 +47,29 @@ go-av1d -i clip.ivf -o - | ffplay -i -
 # Discard output, just measure decode speed
 go-av1d -i clip.ivf
 ```
+
+---
+
+## av1-benchcmp
+
+Developer tool for repeated end-to-end wall-time comparison of prebuilt
+`go-av1d` and dav1d executables. It alternates decoder order, records raw
+samples, and writes JSON and Markdown reports.
+
+Build `go-av1d` and release-mode dav1d before running it. Correctness must be
+checked separately with `cmd/av1-conformance`.
+
+```sh
+go run ./cmd/av1-benchcmp \
+  -input clip.ivf \
+  -go-decoder ./go-av1d \
+  -dav1d /path/to/dav1d \
+  -threads 1 -warmup 2 -runs 7 \
+  -json benchmark.json -markdown benchmark.md
+```
+
+See [`../docs/PERFORMANCE.md`](../docs/PERFORMANCE.md) for the controlled
+baseline and complete Windows reproduction steps.
 
 ---
 

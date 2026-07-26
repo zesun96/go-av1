@@ -18,6 +18,7 @@ import (
 )
 
 func main() {
+	version := flag.Bool("version", false, "print version and exit")
 	in := flag.String("i", "", "input AV1 file (IVF)")
 	out := flag.String("o", "", "output Y4M file (- for stdout, empty = discard)")
 	outputFrame := flag.Int("output-frame", -1, "only write this zero-based output frame (-1 = all)")
@@ -30,6 +31,11 @@ func main() {
 	outputInvisible := flag.Bool("output-invisible", false, "also output hidden reference frames")
 	limit := flag.Int("limit", 0, "stop after decoding this many frames (0 = all)")
 	flag.Parse()
+
+	if *version {
+		fmt.Printf("go-av1d %s\n", av1.Version)
+		return
+	}
 
 	fmt.Fprintf(os.Stderr, "go-av1d %s (M6 pipeline)\n", av1.Version)
 

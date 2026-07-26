@@ -2,19 +2,32 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/zesun96/go-av1.svg)](https://pkg.go.dev/github.com/zesun96/go-av1) [![Go Report Card](https://goreportcard.com/badge/github.com/zesun96/go-av1)](https://goreportcard.com/report/github.com/zesun96/go-av1) [![License: BSD-2-Clause](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
 
-A pure-Go AV1 video codec. No cgo, no system libraries — just `go get`.
+A pure-Go AV1 video codec. No cgo and no required system libraries.
 
-> Status: early development. The public API is stable in shape but every
-> constructor currently returns `av1.ErrNotImplemented`. See
-> [`docs/ROADMAP.md`](docs/ROADMAP.md) for milestones.
+> Status: active development. The decoder currently targets AV1 Profile 0,
+> 8-bit, 4:2:0 streams. The API is usable, but unsupported AV1 profiles,
+> pixel formats, and bit depths return `av1.ErrUnsupported`.
 
 ## Features
 
-- Pure Go decoder targeting AV1 Profile 0 (Main), 8-bit, 4:2:0.
+- Pure Go AV1 Profile 0 decoder for 8-bit, 4:2:0 video.
 - Streaming `SendData` / `GetPicture` API plus an `io.Reader` convenience helper.
 - Reference-counted picture pool to keep GC pressure low.
-- Optional `amd64` / `arm64` SIMD fast paths (planned, opt-out via `-tags purego`).
-- Encoder support is on the roadmap.
+- Deblocking, CDEF, loop restoration, intra/inter prediction, compound
+  prediction, warped motion, and dynamic frame dimensions.
+- 174 applicable 8-bit AOM conformance vectors match dav1d at the native
+  visible-plane level.
+- Optional `amd64` / `arm64` SIMD fast paths are planned.
+- Experimental encoder implementation under active development.
+
+Not currently supported:
+
+- 10-bit and 12-bit sample storage and reconstruction;
+- Profile 1/2 formats, including 4:2:2 and 4:4:4 output;
+- every AV1 scalability and operating-point configuration.
+
+High-bit-depth support is planned as an additive API extension; existing
+8-bit `Picture.Y`, `Picture.U`, and `Picture.V` fields will remain `[]byte`.
 
 ## Installation
 
@@ -37,19 +50,13 @@ import (
 )
 
 func main() {
-    dec, err := av1.NewDecoder(av1.DecoderOptions{})
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer dec.Close()
-
-    err = av1.DecodeReader(os.Stdin, func(pic *av1.Picture, err error) bool {
+    err := av1.DecodeReader(os.Stdin, func(pic *av1.Picture, err error) bool {
         if err != nil {
             log.Print(err)
             return false
         }
-        defer pic.Release()
-        // pic.Y / pic.U / pic.V hold the planar samples.
+        // pic.Y, pic.U, and pic.V contain 8-bit planar samples. DecodeReader
+        // releases pic after this callback returns.
         return true
     })
     if err != nil {
@@ -62,16 +69,19 @@ func main() {
 
 | Tool | Description | Install |
 |---|---|---|
-| [`go-av1d`](cmd/go-av1d) | AV1 decoder — IVF/Annex-B → Y4M | `go install github.com/zesun96/go-av1/cmd/go-av1d@latest` |
-| [`go-av1enc`](cmd/go-av1enc) | AV1 encoder — Y4M → IVF *(planned)* | `go install github.com/zesun96/go-av1/cmd/go-av1enc@latest` |
-| [`webrtc-av1d`](cmd/webrtc-av1d) | WebRTC receiver — browser AV1 → IVF + decode | see [cmd/webrtc-av1d](cmd/webrtc-av1d/README.md) |
+| [`go-av1d`](cmd/go-av1d) | AV1 decoder: IVF to Y4M | `go install github.com/zesun96/go-av1/cmd/go-av1d@latest` |
+| [`av1-benchcmp`](cmd/av1-benchcmp) | Repeated go-av1 versus dav1d performance comparison | developer tool |
+| [`go-av1enc`](cmd/go-av1enc) | Experimental AV1 encoder: Y4M to IVF | `go install github.com/zesun96/go-av1/cmd/go-av1enc@latest` |
+| [`webrtc-av1d`](cmd/webrtc-av1d) | Browser AV1 WebRTC receiver, recorder, and decoder | see [cmd/webrtc-av1d](cmd/webrtc-av1d/README.md) |
 
 See [`cmd/README.md`](cmd/README.md) for full usage details.
 
 ## Documentation
 
-- [Design](docs/DESIGN.md) — architecture, concurrency, memory model, API.
-- [Roadmap](docs/ROADMAP.md) — milestones and exit criteria.
+- [Design](docs/DESIGN.md) - architecture, concurrency, memory model, and API.
+- [Roadmap](docs/ROADMAP.md) - milestones and exit criteria.
+- [Performance comparison](docs/PERFORMANCE.md) - local go-av1 versus dav1d
+  baseline and reproduction steps.
 - API reference: <https://pkg.go.dev/github.com/zesun96/go-av1/pkg/av1>.
 
 ## Contributing

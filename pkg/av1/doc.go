@@ -4,12 +4,7 @@
 // Send-Data / Get-Picture state machine, plus higher-level convenience
 // helpers built on top of io.Reader.
 //
-// Two stages are planned:
-//
-//   - Phase 1 (current scaffold): a Profile 0 / Main, 8-bit, 4:2:0 decoder
-//     aligned with dav1d's default capability set.
-//   - Phase 2: an encoder taking inspiration from SVT-AV1.
-//
-// At milestone M0 every constructor returns ErrNotImplemented. The shape of
-// the API is frozen so internal packages can be filled in incrementally.
+// The current decoder targets Profile 0, 8-bit, 4:2:0 streams. Syntactically
+// valid streams that require unsupported profiles, pixel formats, or bit
+// depths return ErrUnsupported. The encoder remains experimental.
 package av1
