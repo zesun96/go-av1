@@ -273,6 +273,76 @@ func TestEncodeDecodeChangedInterFrameSizes(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeTranslatedInterFrame(t *testing.T) {
+	const width, height = 64, 64
+	base := make([]byte, width*height)
+	state := uint32(17)
+	for i := range base {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		base[i] = byte(state)
+	}
+	translated := make([]byte, len(base))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			sx, sy := x+2, y-1
+			if sx >= width {
+				sx = width - 1
+			}
+			if sy < 0 {
+				sy = 0
+			}
+			translated[y*width+x] = base[sy*width+sx]
+		}
+	}
+	uv := bytes.Repeat([]byte{128}, width*height/4)
+	enc, err := encoder.NewImpl(encoder.Options{
+		Width: width, Height: height, BitDepth: 8, CRF: 10,
+	})
+	if err != nil {
+		t.Fatalf("NewImpl: %v", err)
+	}
+	for _, y := range [][]byte{base, translated} {
+		if err := enc.SendPicture(&encoder.RawPicture{
+			Y: y, U: uv, V: uv, Width: width, Height: height,
+		}); err != nil {
+			t.Fatalf("SendPicture: %v", err)
+		}
+	}
+	dec, err := av1.NewDecoder(av1.DecoderOptions{})
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	defer dec.Close()
+	for frame := 0; frame < 2; frame++ {
+		pkt, err := enc.ReceivePacket()
+		if err != nil {
+			t.Fatalf("ReceivePacket %d: %v", frame, err)
+		}
+		if err := dec.SendData(pkt.Data); err != nil {
+			t.Fatalf("SendData %d: %v", frame, err)
+		}
+		pic, err := dec.GetPicture()
+		if err != nil {
+			t.Fatalf("GetPicture %d: %v", frame, err)
+		}
+		if frame == 1 {
+			var sse uint64
+			for row := 0; row < height; row++ {
+				for col := 0; col < width; col++ {
+					diff := int(pic.Y[row*pic.StrideY+col]) - int(translated[row*width+col])
+					sse += uint64(diff * diff)
+				}
+			}
+			if mse := float64(sse) / float64(width*height); mse > 2500 {
+				t.Fatalf("translated inter reconstruction MSE %.2f is too high", mse)
+			}
+		}
+		pic.Release()
+	}
+}
+
 // TestEncodeDecodeRoundTripSizes guards the M11 exit criterion: packets from
 // the encoder must be consumable by the strict decoder, including partial
 // superblocks at the right and bottom frame edges.

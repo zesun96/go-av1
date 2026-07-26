@@ -4,6 +4,7 @@ package core
 import (
 	"github.com/zesun96/go-av1/internal/encoder/bitwriter"
 	"github.com/zesun96/go-av1/internal/encoder/entropy"
+	"github.com/zesun96/go-av1/internal/encoder/me"
 	"github.com/zesun96/go-av1/internal/encoder/obuwriter"
 	encodertx "github.com/zesun96/go-av1/internal/encoder/tx"
 	intrapred "github.com/zesun96/go-av1/internal/predict/intra"
@@ -278,18 +279,53 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	ec.BoolAdapt(0, ctx.RefCDF[0][ic.Ref][:])  // forward reference group
 	ec.BoolAdapt(0, ctx.RefCDF[2][ic.Ref3][:]) // LAST/LAST2 group
 	ec.BoolAdapt(0, ctx.RefCDF[3][ic.Ref4][:]) // LAST_FRAME
-	ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
-	ec.BoolAdapt(0, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
+
+	mv := me.MV{}
+	if coded && bx+8 <= fe.Width && by+8 <= fe.Height {
+		result, err := me.Search(me.Config{
+			Source: st.src[0], Reference: fe.ref[0],
+			SourceStride: fe.Width, ReferenceStride: fe.Width,
+			Width: fe.Width, Height: fe.Height,
+			X: bx, Y: by, BlockWidth: 8, BlockHeight: 8,
+			SearchRange: 4,
+		})
+		if err == nil {
+			mv = result.MV
+		}
+	}
+	interMode := tile.InterModeGlobalMV
+	baseX, baseY := 0, 0
+	deltaX, deltaY := 0, 0
+	switch {
+	case ic.CandidateCount > 0 && mv.X == ic.BaseMVX && mv.Y == ic.BaseMVY:
+		interMode = tile.InterModeNearestMV
+		baseX, baseY = ic.BaseMVX, ic.BaseMVY
+		ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
+		ec.BoolAdapt(1, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
+		ec.BoolAdapt(0, ctx.RefMVModeCDF[ic.RefMV][:])
+	case mv.X != 0 || mv.Y != 0:
+		interMode = tile.InterModeNewMV
+		baseX, baseY = ic.BaseMVX, ic.BaseMVY
+		deltaX, deltaY = mv.X-baseX, mv.Y-baseY
+		ec.BoolAdapt(0, ctx.NewMVModeCDF[ic.NewMV][:])
+		if ic.CandidateCount > 1 {
+			ec.BoolAdapt(0, ctx.DRLBitCDF[ic.DRL0][:])
+		}
+		entropy.EncodeMVResidual(ec, ctx, deltaX, deltaY, true)
+	default:
+		ec.BoolAdapt(1, ctx.NewMVModeCDF[ic.NewMV][:])
+		ec.BoolAdapt(0, ctx.GlobalMVModeCDF[ic.GlobalMV][:])
+	}
 
 	maxTx := uint8(transform.TX8x8)
 	uvtx := uint8(transform.TX4x4)
 	fs.SetTxCtx(bx, by, bw, bh, maxTx, false, skip)
 	fs.SetInterTxIntraCtx(bx, by, bw, bh)
 	if coded {
-		fe.encodeInterPlane(ec, ctx, fs, st, 0, bx, by, 8, transform.TX8x8)
+		fe.encodeInterPlane(ec, ctx, fs, st, 0, bx, by, 8, transform.TX8x8, mv.X, mv.Y)
 		if blockHasChroma(bx, by, bw, bh) {
-			fe.encodeInterPlane(ec, ctx, fs, st, 1, bx/2, by/2, 4, transform.TX4x4)
-			fe.encodeInterPlane(ec, ctx, fs, st, 2, bx/2, by/2, 4, transform.TX4x4)
+			fe.encodeInterPlane(ec, ctx, fs, st, 1, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y)
+			fe.encodeInterPlane(ec, ctx, fs, st, 2, bx/2, by/2, 4, transform.TX4x4, mv.X, mv.Y)
 		}
 	} else {
 		fs.SetCoefCtxBlock(0, bx, by, bw, bh, 0x40)
@@ -301,9 +337,12 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 
 	blk := tile.Av1Block{
 		Intra: false, Skip: skip,
-		InterMode: tile.InterModeGlobalMV,
+		InterMode: uint8(interMode),
 		RefSlot:   0, RefFrame: 1, RefOrder: 0,
 		Tx: maxTx, MaxYTx: maxTx, Uvtx: uvtx,
+		BaseMV:  [2]int16{int16(baseY), int16(baseX)},
+		DeltaMV: [2]int16{int16(deltaY), int16(deltaX)},
+		MV:      [2]int16{int16(mv.Y), int16(mv.X)},
 	}
 	blk.Bl, blk.Bs = tile.EncoderBlockGeometry(bw, bh)
 	if blockHasChroma(bx, by, bw, bh) {
@@ -313,16 +352,20 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 }
 
 func (fe *FrameEncoder) encodeInterPlane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
-	fs *tile.FrameState, st *tileEncodeState, plane, bx, by, size int, tx uint8,
+	fs *tile.FrameState, st *tileEncodeState, plane, bx, by, size int, tx uint8, mvX, mvY int,
 ) {
-	pred := make([]byte, size*size)
+	ss := 0
+	if plane > 0 {
+		ss = 1
+	}
+	pred := tile.EncoderInterPrediction(fe.ref[plane], st.w[plane], st.w[plane], st.h[plane],
+		bx, by, size, size, mvX, mvY, ss, ss)
 	residual := make([]int16, size*size)
 	for y := 0; y < size; y++ {
 		srcY := min(by+y, st.h[plane]-1)
 		for x := 0; x < size; x++ {
 			srcX := min(bx+x, st.w[plane]-1)
 			i := y*size + x
-			pred[i] = fe.ref[plane][srcY*st.w[plane]+srcX]
 			residual[i] = int16(int(st.src[plane][srcY*st.w[plane]+srcX]) - int(pred[i]))
 		}
 	}
