@@ -44,6 +44,32 @@ func TestChooseLumaMode(t *testing.T) {
 			t.Fatalf("mode=%d, want DCPred", got)
 		}
 	})
+
+	for _, tc := range []struct {
+		name string
+		mode int
+	}{
+		{"smooth", tile.SmoothPred},
+		{"paeth", tile.PaethPred},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testTileState(width, height)
+			for x := 0; x < 8; x++ {
+				st.recon[0][7*width+8+x] = byte(20 + x*27)
+			}
+			for y := 0; y < 8; y++ {
+				st.recon[0][(8+y)*width+7] = byte(230 - y*23)
+			}
+			st.recon[0][7*width+7] = 117
+			want := intraPredBlock(st.recon[0], width, height, 8, 8, 8, 8, tc.mode)
+			for y := 0; y < 8; y++ {
+				copy(st.src[0][(8+y)*width+8:(8+y)*width+16], want[y*8:y*8+8])
+			}
+			if got := fe.chooseLumaMode(st, 8, 8, 8); got != tc.mode {
+				t.Fatalf("mode=%d, want %d", got, tc.mode)
+			}
+		})
+	}
 }
 
 func testTileState(width, height int) *tileEncodeState {

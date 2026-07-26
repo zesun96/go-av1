@@ -6,6 +6,7 @@ import (
 	"github.com/zesun96/go-av1/internal/encoder/entropy"
 	"github.com/zesun96/go-av1/internal/encoder/obuwriter"
 	encodertx "github.com/zesun96/go-av1/internal/encoder/tx"
+	intrapred "github.com/zesun96/go-av1/internal/predict/intra"
 	"github.com/zesun96/go-av1/internal/tile"
 	"github.com/zesun96/go-av1/internal/transform"
 )
@@ -284,6 +285,10 @@ func (fe *FrameEncoder) chooseLumaMode(st *tileEncodeState, bx, by, size int) in
 	if bx > 0 {
 		modes = append(modes, tile.HorPred)
 	}
+	if bx > 0 && by > 0 {
+		modes = append(modes,
+			tile.SmoothPred, tile.SmoothVPred, tile.SmoothHPred, tile.PaethPred)
+	}
 	bestMode := tile.DCPred
 	bestSSE := int64(^uint64(0) >> 1)
 	for _, mode := range modes {
@@ -308,6 +313,32 @@ func (fe *FrameEncoder) chooseLumaMode(st *tileEncodeState, bx, by, size int) in
 func intraPredBlock(recon []byte, width, height, bx, by, bw, bh, mode int) []byte {
 	out := make([]byte, bw*bh)
 	switch mode {
+	case tile.SmoothPred, tile.SmoothVPred, tile.SmoothHPred, tile.PaethPred:
+		maxDim := max(bw, bh)
+		tl := 2 * maxDim
+		edge := make([]byte, 4*maxDim+2)
+		for i := range edge {
+			edge[i] = 128
+		}
+		edge[tl] = recon[(by-1)*width+bx-1]
+		for x := 0; x < bw; x++ {
+			srcX := min(bx+x, width-1)
+			edge[tl+1+x] = recon[(by-1)*width+srcX]
+		}
+		for y := 0; y < bh; y++ {
+			srcY := min(by+y, height-1)
+			edge[tl-1-y] = recon[srcY*width+bx-1]
+		}
+		switch mode {
+		case tile.SmoothPred:
+			intrapred.PredSmooth(out, bw, edge, tl, bw, bh)
+		case tile.SmoothVPred:
+			intrapred.PredSmoothV(out, bw, edge, tl, bw, bh)
+		case tile.SmoothHPred:
+			intrapred.PredSmoothH(out, bw, edge, tl, bw, bh)
+		default:
+			intrapred.PredPaeth(out, bw, edge, tl, bw, bh)
+		}
 	case tile.VertPred:
 		for y := 0; y < bh; y++ {
 			for x := 0; x < bw; x++ {
