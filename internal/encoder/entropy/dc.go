@@ -16,9 +16,15 @@ import (
 func EncodeDCOnly(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
 	tx uint8, plane, bx, by, blockW, blockH, level int,
 ) uint8 {
+	return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockW, blockH, tile.DCPred, level)
+}
+
+func encodeDCOnlyMode(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	tx uint8, plane, bx, by, blockW, blockH, yMode, level int,
+) uint8 {
 	td := transform.TxfmDimensions[tx]
 	skipCtx := fs.CoefSkipCtx(plane, bx, by, blockW, blockH, tx)
-	ec.Bool(boolSymbol(level == 0), uint32(ctx.CoefSkipFull[td.Ctx][skipCtx][0]))
+	ec.BoolAdapt(boolSymbol(level == 0), ctx.CoefSkipFull[td.Ctx][skipCtx][:])
 	if level == 0 {
 		fs.SetCoefCtxBlock(plane, bx, by, blockW, blockH, 0x40)
 		return 0x40
@@ -34,25 +40,25 @@ func EncodeDCOnly(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameSt
 	// chroma DCT_DCT is inferred from the chroma prediction mode.
 	if plane == 0 && int(td.Max)+1 < 4 {
 		txClass := min(2, int(td.Min))
-		ec.Symbol(1, ctx.TxTypeIntra2CDF[txClass][tile.DCPred][:], len(tile.TxTypeIntra2Set))
+		ec.SymbolAdaptDav1d(1, ctx.TxTypeIntra2CDF[txClass][yMode][:], len(tile.TxTypeIntra2Set)-1)
 	}
 
 	// EOB position zero means exactly one coefficient (DC).
 	switch min(6, min(3, int(td.Lw))+min(3, int(td.Lh))) {
 	case 0:
-		ec.Symbol(0, ctx.EobBin16Full[chroma][0][:], 5)
+		ec.SymbolAdaptDav1d(0, ctx.EobBin16Full[chroma][0][:], 4)
 	case 1:
-		ec.Symbol(0, ctx.EobBin32Full[chroma][0][:], 6)
+		ec.SymbolAdaptDav1d(0, ctx.EobBin32Full[chroma][0][:], 5)
 	case 2:
-		ec.Symbol(0, ctx.EobBin64Full[chroma][0][:], 7)
+		ec.SymbolAdaptDav1d(0, ctx.EobBin64Full[chroma][0][:], 6)
 	case 3:
-		ec.Symbol(0, ctx.EobBin128Full[chroma][0][:], 8)
+		ec.SymbolAdaptDav1d(0, ctx.EobBin128Full[chroma][0][:], 7)
 	case 4:
-		ec.Symbol(0, ctx.EobBin256Full[chroma][0][:], 9)
+		ec.SymbolAdaptDav1d(0, ctx.EobBin256Full[chroma][0][:], 8)
 	case 5:
-		ec.Symbol(0, ctx.EobBin512Full[chroma][:], 10)
+		ec.SymbolAdaptDav1d(0, ctx.EobBin512Full[chroma][:], 9)
 	default:
-		ec.Symbol(0, ctx.EobBin1024Full[chroma][:], 11)
+		ec.SymbolAdaptDav1d(0, ctx.EobBin1024Full[chroma][:], 10)
 	}
 
 	magnitude := level
@@ -63,14 +69,14 @@ func EncodeDCOnly(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameSt
 	if base > 2 {
 		base = 2
 	}
-	ec.Symbol(uint32(base), ctx.EobBaseTokFull[td.Ctx][chroma][0][:], 3)
+	ec.SymbolAdaptDav1d(uint32(base), ctx.EobBaseTokFull[td.Ctx][chroma][0][:], 2)
 	escape := false
 	if magnitude >= 3 {
 		escape = encodeHiToken(ec, ctx.BrTokFull[min(3, int(td.Ctx))][chroma][0][:], magnitude)
 	}
 
 	signCtx := fs.DCSignCtx(plane, bx, by, tx)
-	ec.Bool(boolSymbol(level < 0), uint32(ctx.DCSignCDF[chroma][signCtx][0]))
+	ec.BoolAdapt(boolSymbol(level < 0), ctx.DCSignCDF[chroma][signCtx][:])
 	// AV1 writes Golomb residuals after coefficient signs, not adjacent to
 	// the high-token escape symbol.
 	if escape {
@@ -100,7 +106,7 @@ func encodeHiToken(ec *bitwriter.MSACEncoder, cdf []uint16, magnitude int) bool 
 		if sym > 3 {
 			sym = 3
 		}
-		ec.Symbol(uint32(sym), cdf, 4)
+		ec.SymbolAdaptDav1d(uint32(sym), cdf, 3)
 		if sym < 3 {
 			return false
 		}

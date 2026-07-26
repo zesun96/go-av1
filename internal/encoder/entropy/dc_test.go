@@ -21,7 +21,7 @@ func TestEncodeDCOnlyRoundTrip(t *testing.T) {
 
 			decCtx := tile.NewTileCtxForQIdx(120)
 			decFS := tile.NewFrameState(64, 64)
-			m := bitstream.NewMSAC(ec.Flush(), true)
+			m := bitstream.NewMSAC(ec.Flush(), false)
 			td := transform.TxfmDimensions[transform.TX64x64]
 			skipCtx := decFS.CoefSkipCtx(0, 0, 0, 64, 64, transform.TX64x64)
 			skip := m.Bool(uint32(decCtx.CoefSkipFull[td.Ctx][skipCtx][0]))

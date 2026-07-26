@@ -32,7 +32,7 @@ func TestEncodeDCT8DCAC1RoundTrip(t *testing.T) {
 
 			decCtx := tile.NewTileCtxForQIdx(120)
 			decFS := tile.NewFrameState(64, 64)
-			m := bitstream.NewMSAC(ec.Flush(), true)
+			m := bitstream.NewMSAC(ec.Flush(), false)
 			td := transform.TxfmDimensions[transform.TX8x8]
 			skipCtx := decFS.CoefSkipCtx(0, 0, 0, 8, 8, transform.TX8x8)
 			if got := m.Bool(uint32(decCtx.CoefSkipFull[td.Ctx][skipCtx][0])); got != 0 {

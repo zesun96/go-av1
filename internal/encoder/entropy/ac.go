@@ -19,17 +19,17 @@ func EncodeDCT8DCAC1(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 	const tx = transform.TX8x8
 	td := transform.TxfmDimensions[tx]
 	skipCtx := fs.CoefSkipCtx(plane, bx, by, 8, 8, tx)
-	ec.Bool(0, uint32(ctx.CoefSkipFull[td.Ctx][skipCtx][0]))
+	ec.BoolAdapt(0, ctx.CoefSkipFull[td.Ctx][skipCtx][:])
 
 	// reduced_txtp_set=1: DCT_DCT is symbol 1 for small luma transforms.
-	ec.Symbol(1, ctx.TxTypeIntra2CDF[int(td.Min)][tile.DCPred][:], len(tile.TxTypeIntra2Set))
+	ec.SymbolAdaptDav1d(1, ctx.TxTypeIntra2CDF[int(td.Min)][tile.DCPred][:], len(tile.TxTypeIntra2Set)-1)
 
 	// EOB bin 1 means scan position 1 is the final non-zero coefficient.
-	ec.Symbol(1, ctx.EobBin64Full[0][0][:], 7)
+	ec.SymbolAdaptDav1d(1, ctx.EobBin64Full[0][0][:], 6)
 
 	acMag := absLevel(acLevel)
 	acBase := min(2, acMag-1)
-	ec.Symbol(uint32(acBase), ctx.EobBaseTokFull[td.Ctx][0][1][:], 3)
+	ec.SymbolAdaptDav1d(uint32(acBase), ctx.EobBaseTokFull[td.Ctx][0][1][:], 2)
 	acEscape := false
 	acToken := acMag
 	if acMag >= 3 {
@@ -41,7 +41,7 @@ func EncodeDCT8DCAC1(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 
 	dcMag := absLevel(dcLevel)
 	dcBase := min(3, dcMag)
-	ec.Symbol(uint32(dcBase), ctx.BaseTokFull[td.Ctx][0][0][:], 4)
+	ec.SymbolAdaptDav1d(uint32(dcBase), ctx.BaseTokFull[td.Ctx][0][0][:], 3)
 	dcEscape := false
 	if dcMag >= 3 {
 		// The first AC token is one of the three neighbours used by the
@@ -55,7 +55,7 @@ func EncodeDCT8DCAC1(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 
 	if dcLevel != 0 {
 		signCtx := fs.DCSignCtx(plane, bx, by, tx)
-		ec.Bool(boolSymbol(dcLevel < 0), uint32(ctx.DCSignCDF[0][signCtx][0]))
+		ec.BoolAdapt(boolSymbol(dcLevel < 0), ctx.DCSignCDF[0][signCtx][:])
 		if dcEscape {
 			encodeGolomb(ec, dcMag-15)
 		}

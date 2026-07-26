@@ -152,6 +152,47 @@ func (e *MSACEncoder) SymbolAdapt(val uint32, cdf []uint16, n int) {
 	}
 }
 
+// SymbolAdaptDav1d encodes and updates dav1d's native compact CDF layout.
+// nSymbols is the maximum symbol value; cdf[nSymbols] doubles as the
+// adaptation counter and the final near-zero CDF entry.
+func (e *MSACEncoder) SymbolAdaptDav1d(val uint32, cdf []uint16, nSymbols int) {
+	if nSymbols < 1 || nSymbols > 15 || len(cdf) <= nSymbols || val > uint32(nSymbols) {
+		panic("bitwriter: invalid native adaptive MSAC symbol or CDF")
+	}
+	fl := uint32(32768)
+	if val > 0 {
+		fl = uint32(cdf[val-1])
+	}
+	fh := uint32(cdf[val])
+	r := e.rng
+	n32 := uint32(nSymbols)
+	var u uint32
+	if fl < 32768 {
+		u = ((r>>8)*(fl>>msacProbShift))>>(7-msacProbShift) +
+			msacMinProb*(n32-(val-1))
+	} else {
+		u = r
+	}
+	v := ((r>>8)*(fh>>msacProbShift))>>(7-msacProbShift) +
+		msacMinProb*(n32-val)
+	e.normalize(e.low+uint64(r-u), u-v)
+
+	count := uint32(cdf[nSymbols])
+	rate := 4 + (count >> 4)
+	if nSymbols > 2 {
+		rate++
+	}
+	for i := uint32(0); i < val; i++ {
+		cdf[i] += uint16((32768 - uint32(cdf[i])) >> rate)
+	}
+	for i := val; i < uint32(nSymbols); i++ {
+		cdf[i] -= uint16(uint32(cdf[i]) >> rate)
+	}
+	if count < 32 {
+		cdf[nSymbols] = uint16(count + 1)
+	}
+}
+
 // BoolAdapt encodes a boolean and updates its two-entry CDF.
 func (e *MSACEncoder) BoolAdapt(val uint32, cdf []uint16) {
 	e.Bool(val, uint32(cdf[0]))

@@ -2,7 +2,7 @@
 //
 // For the minimum viable encoder (M10):
 //   - Sequence Header OBU (seq_profile=0, 8-bit, mono_chrome=0, 4:2:0)
-//   - Frame OBU (KEY_FRAME, show_frame=1, disable_cdf_update=1)
+//   - Frame OBU (KEY_FRAME, show_frame=1, adaptive CDF updates)
 //   - Tile Data inside Frame OBU
 package obuwriter
 
@@ -196,8 +196,8 @@ func writeUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex int) 
 	bw.PutBit(1)
 	// error_resilient_mode: KEY_FRAME+show_frame=1 → inferred = 1, NOT written.
 
-	// disable_cdf_update = 1  (dav1d line 457)
-	bw.PutBit(1)
+	// disable_cdf_update = 0: tile symbols adapt their CDFs in coding order.
+	bw.PutBit(0)
 
 	// allow_screen_content_tools: seq.screen_content_tools==ADAPTIVE(2)
 	// so this is read from the bitstream (dav1d line 458-459).
@@ -221,6 +221,9 @@ func writeUncompressedHeader(bw *bitwriter.BitWriter, p *SeqParams, qindex int) 
 	bw.PutBit(0)
 
 	// allow_intrabc: not present (allow_screen_content_tools=0).
+
+	// disable_frame_end_update_cdf = 0 (stored as !refresh_context).
+	bw.PutBit(0)
 
 	// tile_info():
 	//   sbw = ceil(width / 64), sbh = ceil(height / 64)

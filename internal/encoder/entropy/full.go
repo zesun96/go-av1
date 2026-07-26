@@ -12,9 +12,9 @@ import (
 // remaining coefficients in reverse scan order, followed by signs and
 // Golomb residuals in forward non-zero order.
 func EncodeDCT8(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
-	bx, by int, coeff []int32,
+	bx, by, yMode int, coeff []int32,
 ) uint8 {
-	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, 0, bx, by, coeff)
+	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, 0, bx, by, yMode, coeff)
 }
 
 // EncodeDCT4 writes a complete TX4x4 DCT_DCT coefficient block. It is used
@@ -22,11 +22,11 @@ func EncodeDCT8(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameStat
 func EncodeDCT4(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
 	plane, bx, by int, coeff []int32,
 ) uint8 {
-	return encodeDCTSquare(ec, ctx, fs, transform.TX4x4, plane, bx, by, coeff)
+	return encodeDCTSquare(ec, ctx, fs, transform.TX4x4, plane, bx, by, tile.DCPred, coeff)
 }
 
 func encodeDCTSquare(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
-	tx uint8, plane, bx, by int, coeff []int32,
+	tx uint8, plane, bx, by, yMode int, coeff []int32,
 ) uint8 {
 	td := transform.TxfmDimensions[tx]
 	blockSize := int(td.W) * 4
@@ -45,18 +45,18 @@ func encodeDCTSquare(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 		}
 	}
 	if eob < 0 {
-		return EncodeDCOnly(ec, ctx, fs, tx, plane, bx, by, blockSize, blockSize, 0)
+		return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockSize, blockSize, yMode, 0)
 	}
 	if eob == 0 {
-		return EncodeDCOnly(ec, ctx, fs, tx, plane, bx, by, blockSize, blockSize, int(coeff[0]))
+		return encodeDCOnlyMode(ec, ctx, fs, tx, plane, bx, by, blockSize, blockSize, yMode, int(coeff[0]))
 	}
 
 	skipCtx := fs.CoefSkipCtx(plane, bx, by, blockSize, blockSize, tx)
-	ec.Bool(0, uint32(ctx.CoefSkipFull[td.Ctx][skipCtx][0]))
+	ec.BoolAdapt(0, ctx.CoefSkipFull[td.Ctx][skipCtx][:])
 	if plane == 0 {
 		// reduced_txtp_set=1: DCT_DCT is symbol 1. Chroma inherits DCT_DCT
 		// from its DC prediction mode and does not signal a transform type.
-		ec.Symbol(1, ctx.TxTypeIntra2CDF[int(td.Min)][tile.DCPred][:], len(tile.TxTypeIntra2Set))
+		ec.SymbolAdaptDav1d(1, ctx.TxTypeIntra2CDF[int(td.Min)][yMode][:], len(tile.TxTypeIntra2Set)-1)
 	}
 	encodeSquareEOB(ec, ctx, td, chroma, eob)
 
@@ -81,7 +81,7 @@ func encodeDCTSquare(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 		bctx = 3
 	}
 	base := min(2, mag-1)
-	ec.Symbol(uint32(base), ctx.EobBaseTokFull[td.Ctx][chroma][bctx][:], 3)
+	ec.SymbolAdaptDav1d(uint32(base), ctx.EobBaseTokFull[td.Ctx][chroma][bctx][:], 2)
 	tok := mag
 	if mag >= 3 {
 		hctx := 7
@@ -103,7 +103,7 @@ func encodeDCTSquare(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 		magnitudes[pos] = mag
 		loCtx, hiMag := encoderLoCtx2D(levels, packed, stride, ctxOff, x, y)
 		base = min(3, mag)
-		ec.Symbol(uint32(base), ctx.BaseTokFull[td.Ctx][chroma][loCtx][:], 4)
+		ec.SymbolAdaptDav1d(uint32(base), ctx.BaseTokFull[td.Ctx][chroma][loCtx][:], 3)
 		if mag >= 3 {
 			hctx := 7
 			if (x | y) > 1 {
@@ -124,7 +124,7 @@ func encodeDCTSquare(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 
 	dcMag := absLevel(int(coeff[0]))
 	magnitudes[0] = dcMag
-	ec.Symbol(uint32(min(3, dcMag)), ctx.BaseTokFull[td.Ctx][chroma][0][:], 4)
+	ec.SymbolAdaptDav1d(uint32(min(3, dcMag)), ctx.BaseTokFull[td.Ctx][chroma][0][:], 3)
 	if dcMag >= 3 {
 		neighbourMag := (int(levels[1]) + int(levels[stride]) + int(levels[stride+1])) & 63
 		hctx := 6
@@ -136,7 +136,7 @@ func encodeDCTSquare(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fram
 
 	if dcMag != 0 {
 		signCtx := fs.DCSignCtx(plane, bx, by, tx)
-		ec.Bool(boolSymbol(coeff[0] < 0), uint32(ctx.DCSignCDF[chroma][signCtx][0]))
+		ec.BoolAdapt(boolSymbol(coeff[0] < 0), ctx.DCSignCDF[chroma][signCtx][:])
 		if escapes[0] {
 			encodeGolomb(ec, dcMag-15)
 		}
@@ -179,16 +179,16 @@ func encodeSquareEOB(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, td transform.
 		}
 	}
 	if td.Lw == 0 {
-		ec.Symbol(uint32(bin), ctx.EobBin16Full[chroma][0][:], 5)
+		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin16Full[chroma][0][:], 4)
 	} else {
-		ec.Symbol(uint32(bin), ctx.EobBin64Full[chroma][0][:], 7)
+		ec.SymbolAdaptDav1d(uint32(bin), ctx.EobBin64Full[chroma][0][:], 6)
 	}
 	if bin <= 1 {
 		return
 	}
 	extraBits := bin - 2
 	hi := (eob >> uint(extraBits)) & 1
-	ec.Bool(uint32(hi), uint32(ctx.EobHiBitFull[td.Ctx][chroma][extraBits][0]))
+	ec.BoolAdapt(uint32(hi), ctx.EobHiBitFull[td.Ctx][chroma][extraBits][:])
 	if extraBits > 0 {
 		ec.Bools(uint32(eob&((1<<uint(extraBits))-1)), extraBits)
 	}

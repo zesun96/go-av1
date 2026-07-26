@@ -125,7 +125,7 @@ func (fe *FrameEncoder) encodePartition(ec *bitwriter.MSACEncoder, ctx *tile.Til
 	}
 
 	if bl < tile.BL8X8 {
-		ec.Symbol(tile.PartitionSplit, cdf, n)
+		ec.SymbolAdaptDav1d(tile.PartitionSplit, cdf, n-1)
 		fe.encodePartition(ec, ctx, fs, st, bx, by, bl+1)
 		fe.encodePartition(ec, ctx, fs, st, bx+half, by, bl+1)
 		fe.encodePartition(ec, ctx, fs, st, bx, by+half, bl+1)
@@ -133,7 +133,7 @@ func (fe *FrameEncoder) encodePartition(ec *bitwriter.MSACEncoder, ctx *tile.Til
 		return
 	}
 
-	ec.Symbol(tile.PartitionNone, cdf, n)
+	ec.SymbolAdaptDav1d(tile.PartitionNone, cdf, n-1)
 	fe.encodeBlock(ec, ctx, fs, st, bx, by, size, size)
 	fs.SetPartition(bx, by, bl, tile.PartitionNone, size)
 }
@@ -147,11 +147,17 @@ func (fe *FrameEncoder) encodeBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx
 	// skipped strip at non-multiple-of-eight dimensions.
 	coded := bw == 8 && bh == 8
 	skipCtx := fs.SkipCtx(bx, by)
-	ec.Bool(boolSymbol(!coded), uint32(ctx.SkipCDF[skipCtx][0]))
+	ec.BoolAdapt(boolSymbol(!coded), ctx.SkipCDF[skipCtx][:])
 
+	yMode := fe.chooseLumaMode(st, bx, by, 8)
 	topMode := fs.TopModeCtx(bx, by)
 	leftMode := fs.LeftModeCtx(bx, by)
-	ec.Symbol(tile.DCPred, ctx.KFYModeCDF[topMode][leftMode][:], tile.NIntraPredModes)
+	ec.SymbolAdaptDav1d(uint32(yMode), ctx.KFYModeCDF[topMode][leftMode][:], tile.NIntraPredModes-1)
+	if yMode >= tile.VertPred && yMode <= tile.VertLeftPred {
+		// 8x8 directional modes signal an angle delta. The initial search
+		// uses the canonical angle, represented by delta symbol 3.
+		ec.SymbolAdaptDav1d(3, ctx.AngleDeltaCDF[yMode-tile.VertPred][:], 6)
+	}
 
 	if blockHasChroma(bx, by, bw, bh) {
 		cfl := 0
@@ -160,15 +166,15 @@ func (fe *FrameEncoder) encodeBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx
 			cfl = 1
 			nUV++
 		}
-		ec.Symbol(tile.DCPred, ctx.UVModeCDF[cfl][tile.DCPred][:], nUV)
+		ec.SymbolAdaptDav1d(tile.DCPred, ctx.UVModeCDF[cfl][yMode][:], nUV-1)
 	}
 
 	if coded {
 		fs.SetIntraTxCtx(bx, by, bw, bh, transform.TX8x8)
-		fe.encodePlaneDC(ec, ctx, fs, st, 0, bx, by, 8, 8, transform.TX8x8)
+		fe.encodePlaneDC(ec, ctx, fs, st, 0, bx, by, 8, 8, transform.TX8x8, yMode)
 		if blockHasChroma(bx, by, bw, bh) {
-			fe.encodePlaneDC(ec, ctx, fs, st, 1, bx/2, by/2, 4, 4, transform.TX4x4)
-			fe.encodePlaneDC(ec, ctx, fs, st, 2, bx/2, by/2, 4, 4, transform.TX4x4)
+			fe.encodePlaneDC(ec, ctx, fs, st, 1, bx/2, by/2, 4, 4, transform.TX4x4, tile.DCPred)
+			fe.encodePlaneDC(ec, ctx, fs, st, 2, bx/2, by/2, 4, 4, transform.TX4x4, tile.DCPred)
 		}
 	} else {
 		fs.SetCoefCtxBlock(0, bx, by, bw, bh, 0x40)
@@ -182,16 +188,17 @@ func (fe *FrameEncoder) encodeBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx
 	fs.SetBlockState(bx, by, bw, bh, tile.Av1Block{
 		Intra:  true,
 		Skip:   !coded,
-		YMode:  tile.DCPred,
+		YMode:  uint8(yMode),
 		UvMode: tile.DCPred,
 	})
-	fs.SetBlock(bx, by, bw, bh, !coded, tile.DCPred)
+	fs.SetBlock(bx, by, bw, bh, !coded, yMode)
 }
 
 func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
-	fs *tile.FrameState, st *tileEncodeState, plane, bx, by, bw, bh int, tx uint8,
+	fs *tile.FrameState, st *tileEncodeState, plane, bx, by, bw, bh int, tx uint8, mode int,
 ) {
-	pred := dcPredict(st.recon[plane], st.w[plane], st.h[plane], bx, by, bw, bh)
+	predBlock := intraPredBlock(st.recon[plane], st.w[plane], st.h[plane], bx, by, bw, bh, mode)
+	pred := int(predBlock[0])
 	mean := blockMean(st.src[plane], st.w[plane], st.h[plane], bx, by, bw, bh, pred)
 	if (plane == 0 && tx == transform.TX8x8) || (plane > 0 && tx == transform.TX4x4) {
 		size := bw
@@ -200,7 +207,7 @@ func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileC
 			srcY := min(by+y, st.h[plane]-1)
 			for x := 0; x < size; x++ {
 				srcX := min(bx+x, st.w[plane]-1)
-				residual[y*size+x] = int16(int(st.src[plane][srcY*st.w[plane]+srcX]) - pred)
+				residual[y*size+x] = int16(int(st.src[plane][srcY*st.w[plane]+srcX]) - int(predBlock[y*size+x]))
 			}
 		}
 		coeff := make([]int32, size*size)
@@ -211,12 +218,12 @@ func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileC
 		}
 		encodertx.Quantize(coeff, fe.QIndex, fe.BitDepth)
 		if plane == 0 {
-			entropy.EncodeDCT8(ec, ctx, fs, bx, by, coeff)
+			entropy.EncodeDCT8(ec, ctx, fs, bx, by, mode, coeff)
 		} else {
 			entropy.EncodeDCT4(ec, ctx, fs, plane, bx, by, coeff)
 		}
 		reconstructDCTBlock(st.recon[plane], st.w[plane], st.h[plane],
-			bx, by, size, pred, coeff, tx, fe.QIndex, fe.BitDepth)
+			bx, by, size, predBlock, coeff, tx, fe.QIndex, fe.BitDepth)
 		return
 	}
 	diff := mean - pred
@@ -239,7 +246,7 @@ func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileC
 	fillBlock(st.recon[plane], st.w[plane], st.h[plane], bx, by, bw, bh, byte(mean))
 }
 
-func reconstructDCTBlock(dst []byte, width, height, bx, by, size, pred int,
+func reconstructDCTBlock(dst []byte, width, height, bx, by, size int, pred []byte,
 	qcoeff []int32, tx uint8, qindex, hbd int,
 ) {
 	coeff := append([]int32(nil), qcoeff...)
@@ -250,10 +257,7 @@ func reconstructDCTBlock(dst []byte, width, height, bx, by, size, pred int,
 			packed[x*size+y] = coeff[y*size+x]
 		}
 	}
-	block := make([]byte, size*size)
-	for i := range block {
-		block[i] = byte(pred)
-	}
+	block := append([]byte(nil), pred...)
 	shift := 0
 	if tx == transform.TX8x8 {
 		shift = 1
@@ -263,6 +267,62 @@ func reconstructDCTBlock(dst []byte, width, height, bx, by, size, pred int,
 		n := min(size, width-bx)
 		copy(dst[(by+y)*width+bx:(by+y)*width+bx+n], block[y*size:y*size+n])
 	}
+}
+
+func (fe *FrameEncoder) chooseLumaMode(st *tileEncodeState, bx, by, size int) int {
+	modes := []int{tile.DCPred}
+	if by > 0 {
+		modes = append(modes, tile.VertPred)
+	}
+	if bx > 0 {
+		modes = append(modes, tile.HorPred)
+	}
+	bestMode := tile.DCPred
+	bestSSE := int64(^uint64(0) >> 1)
+	for _, mode := range modes {
+		pred := intraPredBlock(st.recon[0], st.w[0], st.h[0], bx, by, size, size, mode)
+		var sse int64
+		for y := 0; y < size; y++ {
+			srcY := min(by+y, st.h[0]-1)
+			for x := 0; x < size; x++ {
+				srcX := min(bx+x, st.w[0]-1)
+				diff := int(st.src[0][srcY*st.w[0]+srcX]) - int(pred[y*size+x])
+				sse += int64(diff * diff)
+			}
+		}
+		if sse < bestSSE {
+			bestSSE = sse
+			bestMode = mode
+		}
+	}
+	return bestMode
+}
+
+func intraPredBlock(recon []byte, width, height, bx, by, bw, bh, mode int) []byte {
+	out := make([]byte, bw*bh)
+	switch mode {
+	case tile.VertPred:
+		for y := 0; y < bh; y++ {
+			for x := 0; x < bw; x++ {
+				srcX := min(bx+x, width-1)
+				out[y*bw+x] = recon[(by-1)*width+srcX]
+			}
+		}
+	case tile.HorPred:
+		for y := 0; y < bh; y++ {
+			srcY := min(by+y, height-1)
+			value := recon[srcY*width+bx-1]
+			for x := 0; x < bw; x++ {
+				out[y*bw+x] = value
+			}
+		}
+	default:
+		value := byte(dcPredict(recon, width, height, bx, by, bw, bh))
+		for i := range out {
+			out[i] = value
+		}
+	}
+	return out
 }
 
 func dcPredict(recon []byte, width, height, bx, by, bw, bh int) int {
