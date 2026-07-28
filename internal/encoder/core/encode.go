@@ -350,6 +350,7 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	largeBlock := bw == 16 && bh == 16
 	coded := bw == 8 && bh == 8 || largeBlock
 	mv := me.MV{}
+	mv2 := me.MV{}
 	refSlot, refFrame, refOrder := fe.refSlot, 1, 0
 	var planes []*interPlaneEncode
 	if largeBlock {
@@ -387,6 +388,7 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	}
 	useCompound := false
 	useOBMC := false
+	compoundNew := false
 	obmcPresent, obmcBS := false, 0
 	if coded && !largeBlock {
 		bestCost := 0.0
@@ -449,19 +451,15 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 			}
 		}
 		if fe.compound {
-			compoundPlanes := []*interPlaneEncode{
-				fe.analyzeCompoundInterPlane(st, 0, bx, by, 8, transform.TX8x8),
-			}
-			if blockHasChroma(bx, by, bw, bh) {
-				compoundPlanes = append(compoundPlanes,
-					fe.analyzeCompoundInterPlane(st, 1, bx/2, by/2, 4, transform.TX4x4),
-					fe.analyzeCompoundInterPlane(st, 2, bx/2, by/2, 4, transform.TX4x4))
-			}
-			if cost := interPlanesRDOCost(st, compoundPlanes, 7, fe.QIndex, fe.BitDepth); cost < bestCost {
+			compoundMV0, compoundMV1, compoundPlanes, newMVMode, cost :=
+				fe.refineCompoundCandidate(st, bx, by, bw)
+			if cost < bestCost {
 				planes = compoundPlanes
 				bestCost = cost
 				useCompound = true
 				useOBMC = false
+				mv, mv2 = compoundMV0, compoundMV1
+				compoundNew = newMVMode
 			}
 		}
 	}
@@ -478,15 +476,26 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	interMode := tile.InterModeGlobalMV
 	baseX, baseY := 0, 0
 	deltaX, deltaY := 0, 0
+	compoundCtx := tile.EncoderCompoundContexts{}
 	if fe.compound {
-		cc := tile.CompoundEncoderContexts(fs, fe.refIdx, bx, by, bw, bh)
-		ec.BoolAdapt(boolSymbol(useCompound), ctx.CompCDF[cc.Flag][:])
+		compoundCtx = tile.CompoundEncoderContexts(fs, fe.refIdx, bx, by, bw, bh)
+		ec.BoolAdapt(boolSymbol(useCompound), ctx.CompCDF[compoundCtx.Flag][:])
 		if useCompound {
-			ec.BoolAdapt(0, ctx.CompDirCDF[cc.Dir][:])         // unidirectional
-			ec.BoolAdapt(0, ctx.CompUniRefCDF[0][cc.Ref][:])   // forward pair
-			ec.BoolAdapt(0, ctx.CompUniRefCDF[1][cc.UniP1][:]) // LAST + LAST2
-			ec.SymbolAdaptDav1d(6, ctx.CompInterModeCDF[cc.Mode][:], 7)
-			mv = me.MV{}
+			ec.BoolAdapt(0, ctx.CompDirCDF[compoundCtx.Dir][:])         // unidirectional
+			ec.BoolAdapt(0, ctx.CompUniRefCDF[0][compoundCtx.Ref][:])   // forward pair
+			ec.BoolAdapt(0, ctx.CompUniRefCDF[1][compoundCtx.UniP1][:]) // LAST + LAST2
+			if compoundNew {
+				ec.SymbolAdaptDav1d(7, ctx.CompInterModeCDF[compoundCtx.Mode][:], 7)
+				ec.BoolAdapt(0, ctx.DRLBitCDF[compoundCtx.DRL0][:])
+				baseX, baseY = compoundCtx.BaseX[0], compoundCtx.BaseY[0]
+				deltaX, deltaY = mv.X-baseX, mv.Y-baseY
+				entropy.EncodeMVResidual(ec, ctx, deltaX, deltaY, true)
+				entropy.EncodeMVResidual(ec, ctx,
+					mv2.X-compoundCtx.BaseX[1], mv2.Y-compoundCtx.BaseY[1], true)
+			} else {
+				ec.SymbolAdaptDav1d(6, ctx.CompInterModeCDF[compoundCtx.Mode][:], 7)
+				mv, mv2 = me.MV{}, me.MV{}
+			}
 			refSlot, refFrame, refOrder = fe.refSlot, 1, 0
 		}
 	}
@@ -570,10 +579,14 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	if useCompound {
 		blk.Compound = true
 		blk.InterMode = 6
+		if compoundNew {
+			blk.InterMode = 7
+		}
 		blk.RefSlot2 = int8(fe.refSlot2)
 		blk.RefFrame2 = 2
 		blk.RefOrder2 = 1
 		blk.CompType = 2
+		blk.MV2 = [2]int16{int16(mv2.Y), int16(mv2.X)}
 	}
 	blk.Bl, blk.Bs = tile.EncoderBlockGeometry(bw, bh)
 	if blockHasChroma(bx, by, bw, bh) {
@@ -650,17 +663,94 @@ func (fe *FrameEncoder) analyzeInterPlaneFrom(st *tileEncodeState, refs [3][]byt
 }
 
 func (fe *FrameEncoder) analyzeCompoundInterPlane(st *tileEncodeState,
-	plane, bx, by, size int, tx uint8,
+	plane, bx, by, size int, tx uint8, mv0, mv1 me.MV,
 ) *interPlaneEncode {
 	ss := 0
 	if plane > 0 {
 		ss = 1
 	}
-	pred := tile.EncoderCompoundPrediction(
+	pred := tile.EncoderCompoundPredictionMV(
 		fe.ref[plane], st.w[plane], st.w[plane], st.h[plane],
 		fe.ref2[plane], st.w[plane], st.w[plane], st.h[plane],
-		bx, by, size, size, ss, ss)
+		bx, by, size, size, mv0.X, mv0.Y, mv1.X, mv1.Y, ss, ss)
 	return fe.analyzeInterPlanePrediction(st, plane, bx, by, size, tx, pred)
+}
+
+func (fe *FrameEncoder) refineCompoundCandidate(st *tileEncodeState,
+	bx, by, size int,
+) (me.MV, me.MV, []*interPlaneEncode, bool, float64) {
+	search := func(ref []byte) me.MV {
+		searchRange := fe.SearchRange
+		if searchRange <= 0 {
+			searchRange = 4
+		}
+		cfg := me.Config{
+			Source: st.src[0], Reference: ref,
+			SourceStride: fe.Width, ReferenceStride: fe.Width,
+			Width: fe.Width, Height: fe.Height,
+			X: bx, Y: by, BlockWidth: size, BlockHeight: size,
+			SearchRange: searchRange, IntegerOnly: fe.IntegerMEOnly,
+		}
+		var result me.Result
+		var err error
+		if fe.HierarchicalME {
+			result, err = me.SearchHierarchical(cfg)
+		} else {
+			result, err = me.Search(cfg)
+		}
+		if err != nil {
+			return me.MV{}
+		}
+		return result.MV
+	}
+	mv0, mv1 := search(fe.ref[0]), search(fe.ref2[0])
+	build := func(a, b me.MV) ([]*interPlaneEncode, float64) {
+		planes := []*interPlaneEncode{
+			fe.analyzeCompoundInterPlane(st, 0, bx, by, size,
+				transform.TX8x8, a, b),
+		}
+		if blockHasChroma(bx, by, size, size) {
+			planes = append(planes,
+				fe.analyzeCompoundInterPlane(st, 1, bx/2, by/2, size/2,
+					transform.TX4x4, a, b),
+				fe.analyzeCompoundInterPlane(st, 2, bx/2, by/2, size/2,
+					transform.TX4x4, a, b))
+		}
+		syntaxBits := 11 + motionSyntaxBits(a) + motionSyntaxBits(b)
+		return planes, interPlanesRDOCost(
+			st, planes, syntaxBits, fe.QIndex, fe.BitDepth)
+	}
+	bestPlanes, bestCost := build(mv0, mv1)
+	offsets := []int{-2, -1, 0, 1, 2}
+	if fe.IntegerMEOnly {
+		offsets = []int{0}
+	}
+	for pass := 0; pass < 2; pass++ {
+		seed := [2]me.MV{mv0, mv1}[pass]
+		for _, dy := range offsets {
+			for _, dx := range offsets {
+				candidate := me.MV{X: seed.X + dx, Y: seed.Y + dy}
+				a, b := mv0, mv1
+				if pass == 0 {
+					a = candidate
+				} else {
+					b = candidate
+				}
+				planes, cost := build(a, b)
+				if cost < bestCost {
+					mv0, mv1, bestPlanes, bestCost = a, b, planes, cost
+				}
+			}
+		}
+	}
+	globalPlanes, globalCost := build(me.MV{}, me.MV{})
+	// GLOBAL_GLOBAL has no DRL or MV residuals.
+	globalCost = interPlanesRDOCost(
+		st, globalPlanes, 7, fe.QIndex, fe.BitDepth)
+	if globalCost <= bestCost {
+		return me.MV{}, me.MV{}, globalPlanes, false, globalCost
+	}
+	return mv0, mv1, bestPlanes, true, bestCost
 }
 
 func (fe *FrameEncoder) analyzeSkipInterPlane(st *tileEncodeState,

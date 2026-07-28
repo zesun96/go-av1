@@ -34,6 +34,9 @@ type EncoderCompoundContexts struct {
 	Ref   int
 	UniP1 int
 	Mode  int
+	DRL0  int
+	BaseX [2]int
+	BaseY [2]int
 }
 
 // EnableEncoderMVContexts initializes the reference-MV grids used by inter
@@ -103,13 +106,63 @@ func CompoundEncoderContexts(fs *FrameState, refIdx [7]uint8,
 	for i := range fhdr.Refidx {
 		fhdr.Refidx[i] = int8(refIdx[i] & 7)
 	}
-	return EncoderCompoundContexts{
+	out := EncoderCompoundContexts{
 		Flag:  compoundFlagContext(fs, bx, by),
 		Dir:   compoundDirContext(fs, fhdr, bx, by),
 		Ref:   refCtx(fs, fhdr, bx, by),
 		UniP1: uniP1Context(fs, fhdr, bx, by),
 		Mode:  compoundInterModeContext(fs, fhdr, 1, 2, bx, by, bw, bh),
 	}
+	slots := [2]int{int(refIdx[0] & 7), int(refIdx[1] & 7)}
+	counts := [2]int{}
+	stacks := [2][8]interCandidate{}
+	for i := range counts {
+		counts[i], stacks[i] = singleRefInterCandidates(
+			fs, fhdr, nil, slots[i], i+1, bx, by, bw, bh)
+	}
+	var pairs refmvs.SearchResult
+	if fs != nil && fs.MVFrame != nil {
+		pairs = refmvs.Find(refmvs.SearchConfig{
+			Frame: fs.MVFrame, Ref: 1, Ref2: 2,
+			TargetSlot: slots[0], TargetSlot2: slots[1],
+			Bx4: bx >> 2, By4: by >> 2,
+			Bw4: (bw + 3) >> 2, Bh4: (bh + 3) >> 2,
+			TileX0: fs.TileX0 >> 2, TileY0: fs.TileY0 >> 2,
+			TileX1: fs.TileX1 >> 2, TileY1: fs.TileY1 >> 2,
+			TopRightKnown:     fs.RefMVTopRightKnown,
+			TopRightAvailable: fs.RefMVTopRightAvailable,
+			BlockDims:         refMVBlockDims[:],
+		})
+	}
+	baseCount := pairs.Count
+	for pairs.Count < 2 {
+		n := pairs.Count
+		extIdx := n - baseCount
+		var pair refmvs.MVPair
+		for i := range pair {
+			if counts[i] > extIdx {
+				pair[i] = stacks[i][extIdx].mv
+			} else if counts[i] > 0 {
+				pair[i] = stacks[i][counts[i]-1].mv
+			}
+		}
+		pairs.Candidates[n] = refmvs.Candidate{MV: pair, Weight: 2}
+		pairs.Count++
+	}
+	if pairs.Count > 0 {
+		for i := range out.BaseX {
+			out.BaseX[i] = int(pairs.Candidates[0].MV[i].X)
+			out.BaseY[i] = int(pairs.Candidates[0].MV[i].Y)
+		}
+	}
+	if pairs.Count > 1 {
+		weights := make([]int, pairs.Count)
+		for i := range weights {
+			weights[i] = pairs.Candidates[i].Weight
+		}
+		out.DRL0 = refmvs.DRLContext(weights, 0)
+	}
+	return out
 }
 
 // EncoderBlockGeometry returns the block level and block-size enum used by the
@@ -134,17 +187,26 @@ func EncoderCompoundPrediction(ref0 []byte, stride0, width0, height0 int,
 	ref1 []byte, stride1, width1, height1 int,
 	bx, by, bw, bh, ssHor, ssVer int,
 ) []byte {
+	return EncoderCompoundPredictionMV(ref0, stride0, width0, height0,
+		ref1, stride1, width1, height1, bx, by, bw, bh,
+		0, 0, 0, 0, ssHor, ssVer)
+}
+
+// EncoderCompoundPredictionMV builds an equal-weight compound prediction with
+// independent regular 8-tap translational motion vectors.
+func EncoderCompoundPredictionMV(ref0 []byte, stride0, width0, height0 int,
+	ref1 []byte, stride1, width1, height1 int,
+	bx, by, bw, bh, mv0X, mv0Y, mv1X, mv1Y, ssHor, ssVer int,
+) []byte {
+	pred0 := makeInterPredictionPlane(ref0, stride0, width0, height0,
+		bx, by, bw, bh, refmvs.MV{X: int16(mv0X), Y: int16(mv0Y)},
+		header.FilterMode8TapRegular, header.FilterMode8TapRegular, ssHor, ssVer)
+	pred1 := makeInterPredictionPlane(ref1, stride1, width1, height1,
+		bx, by, bw, bh, refmvs.MV{X: int16(mv1X), Y: int16(mv1Y)},
+		header.FilterMode8TapRegular, header.FilterMode8TapRegular, ssHor, ssVer)
 	out := make([]byte, bw*bh)
-	for y := 0; y < bh; y++ {
-		y0 := minInt(maxInt(by+y, 0), height0-1)
-		y1 := minInt(maxInt(by+y, 0), height1-1)
-		for x := 0; x < bw; x++ {
-			x0 := minInt(maxInt(bx+x, 0), width0-1)
-			x1 := minInt(maxInt(bx+x, 0), width1-1)
-			a := int(ref0[y0*stride0+x0])
-			b := int(ref1[y1*stride1+x1])
-			out[y*bw+x] = byte((a + b + 1) >> 1)
-		}
+	for i := range out {
+		out[i] = byte((int(pred0[i]) + int(pred1[i]) + 1) >> 1)
 	}
 	return out
 }

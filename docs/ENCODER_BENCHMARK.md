@@ -34,12 +34,13 @@ The first checked result uses a six-frame 64x64 `testsrc2` YUV420 sequence at
 | go-av1 | 48 | 8.2 | 26.55 |
 | SVT-AV1 | 48 | 7.2 | 29.16 |
 
-The measured go-av1 BD-rate relative to SVT-AV1 preset 12 is **+33.50%**.
+The measured go-av1 BD-rate relative to SVT-AV1 preset 12 is **+33.49%**.
 Therefore the roadmap goal of approximately +25% is not yet met.
 
-The next quality work is motion-compensated compound prediction and a
-multi-sequence benchmark corpus. Preset 12 currently enables hierarchical
-motion estimation, regular 8-tap reconstruction-domain sub-pixel refinement,
-all seven single-reference types, rotating references, conservative 8x8/16x16
-intra/inter partition RDO, compound prediction, calibrated deblocking, and
-lambda-based mode RDO. OBMC remains an explicit opt-in.
+The next quality work is larger inter partition coverage and a multi-sequence
+benchmark corpus. Preset 12 currently enables hierarchical motion estimation,
+regular 8-tap reconstruction-domain sub-pixel refinement, all seven
+single-reference types, rotating references, conservative 8x8/16x16
+intra/inter partition RDO, GLOBAL_GLOBAL and NEW_NEWMV compound prediction,
+calibrated deblocking, and lambda-based mode RDO. OBMC remains an explicit
+opt-in.
