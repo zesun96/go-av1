@@ -3,8 +3,70 @@ package tile
 import (
 	"testing"
 
+	"github.com/zesun96/go-av1/internal/bitstream"
 	"github.com/zesun96/go-av1/internal/refmvs"
 )
+
+func TestDisabledBlockTraceHasZeroAllocations(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	m := bitstream.NewMSAC([]byte{0xff, 0xff, 0xff, 0xff}, false)
+	if got := testing.AllocsPerRun(1000, func() {
+		traceInterModeDone(m, fs, 0, 0, InterModeNearestMV, 0, 0, 0, 0)
+	}); got != 0 {
+		t.Fatalf("disabled block trace allocations = %v, want 0", got)
+	}
+}
+
+func TestCoefficientScratchReuseClearsActiveFootprint(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	coeff, levels := fs.coefficientScratch(32*32, 34*32)
+	for i := range coeff {
+		coeff[i] = int32(i + 1)
+	}
+	for i := range levels {
+		levels[i] = uint8(i%255 + 1)
+	}
+
+	smallCoeff, smallLevels := fs.coefficientScratch(16, 32)
+	if &smallCoeff[0] != &coeff[0] || &smallLevels[0] != &levels[0] {
+		t.Fatal("coefficient scratch was reallocated")
+	}
+	for i, value := range smallCoeff {
+		if value != 0 {
+			t.Fatalf("small coefficient scratch[%d] = %d, want 0", i, value)
+		}
+	}
+	for i, value := range smallLevels {
+		if value != 0 {
+			t.Fatalf("small levels scratch[%d] = %d, want 0", i, value)
+		}
+	}
+	if coeff[16] == 0 || levels[32] == 0 {
+		t.Fatal("scratch clear extended beyond the active transform footprint")
+	}
+
+	coeff, levels = fs.coefficientScratch(32*32, 34*32)
+	for i, value := range coeff {
+		if value != 0 {
+			t.Fatalf("largest coefficient scratch[%d] = %d, want 0", i, value)
+		}
+	}
+	for i, value := range levels {
+		if value != 0 {
+			t.Fatalf("largest levels scratch[%d] = %d, want 0", i, value)
+		}
+	}
+}
+
+func TestCoefficientScratchHasZeroSteadyStateAllocations(t *testing.T) {
+	fs := NewFrameState(64, 64)
+	fs.coefficientScratch(32*32, 34*32)
+	if got := testing.AllocsPerRun(1000, func() {
+		fs.coefficientScratch(32*32, 34*32)
+	}); got != 0 {
+		t.Fatalf("steady-state scratch allocations = %v, want 0", got)
+	}
+}
 
 func TestNewFrameStateIncludesFinalCodedFourByFourRow(t *testing.T) {
 	fs := NewFrameState(1510, 1012)

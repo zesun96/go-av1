@@ -21,6 +21,11 @@ import (
 // Rows are indexed top→bottom, columns left→right.
 type FrameState struct {
 	Tracef func(string, ...any)
+	// Diagnostic environment options are sampled once when the tile group is
+	// initialized. They must not trigger environment lookups in block loops.
+	traceModeTrial  bool
+	traceRefMVTrial bool
+	traceDRLTrial   bool
 	// AboveSkip[col4] — skip flag of the block above column col4 (4-px units).
 	AboveSkip []uint8
 	// LeftSkip[row4] — skip flag of the block to the left of row row4.
@@ -95,6 +100,12 @@ type FrameState struct {
 	RefMVTopRightKnown     bool
 	RefMVTopRightAvailable bool
 
+	// Coefficient decoding owns one scratch arena per tile FrameState. A
+	// decoded transform is reconstructed before the next transform starts,
+	// so these buffers can be reused without pooling or synchronization.
+	coeffScratch  []int32
+	levelsScratch []uint8
+
 	// Frame dimensions in 4-px units.
 	Width  int
 	Height int
@@ -129,6 +140,20 @@ func (fs *FrameState) tracef(format string, args ...any) {
 	if fs != nil && fs.Tracef != nil {
 		fs.Tracef(format, args...)
 	}
+}
+
+func (fs *FrameState) coefficientScratch(coeffLen, levelsLen int) ([]int32, []uint8) {
+	if cap(fs.coeffScratch) < coeffLen {
+		fs.coeffScratch = make([]int32, coeffLen)
+	}
+	if cap(fs.levelsScratch) < levelsLen {
+		fs.levelsScratch = make([]uint8, levelsLen)
+	}
+	coeff := fs.coeffScratch[:coeffLen]
+	levels := fs.levelsScratch[:levelsLen]
+	clear(coeff)
+	clear(levels)
+	return coeff, levels
 }
 
 // NewFrameState allocates a FrameState for a frame of size (w×h) luma pixels.
@@ -237,7 +262,13 @@ func (fs *FrameState) SetSubsampling(ssHor, ssVer uint8) {
 	ch := (fs.Height + (1 << ssVer) - 1) >> ssVer
 	fs.CW4 = (cw + 3) >> 2
 	fs.CH4 = (ch + 3) >> 2
-	fs.ChromaBlockGrid = make([]Av1Block, fs.CW4*fs.CH4)
+	chromaLen := fs.CW4 * fs.CH4
+	if cap(fs.ChromaBlockGrid) < chromaLen {
+		fs.ChromaBlockGrid = make([]Av1Block, chromaLen)
+	} else {
+		fs.ChromaBlockGrid = fs.ChromaBlockGrid[:chromaLen]
+		clear(fs.ChromaBlockGrid)
+	}
 }
 
 func filledUint8(n int, v uint8) []uint8 {

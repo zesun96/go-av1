@@ -39,7 +39,12 @@ func DecodeTileGroupWithContext(
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" || os.Getenv("GOAV1_TRACE_FRAMES") != "" {
+	traceSymbols := os.Getenv("GOAV1_TRACE_SYMBOLS") != ""
+	traceFrames := os.Getenv("GOAV1_TRACE_FRAMES") != ""
+	traceModeTrial := os.Getenv("GOAV1_TRACE_MODE_TRIAL") != ""
+	traceRefMVTrial := os.Getenv("GOAV1_TRACE_REFMV_TRIAL") != ""
+	traceDRLTrial := os.Getenv("GOAV1_TRACE_DRL_TRIAL") != ""
+	if traceSymbols || traceFrames {
 		logf("sym frame offset=%d type=%d show=%d refresh=%02x primary=%d refidx=%v size=%d/%dx%d comp_refs=%d cdf_update=%d refresh_cdf=%d tile_update=%d qidx=%d qm=%d qmy=%d qmu=%d qmv=%d",
 			fhdr.FrameOffset, fhdr.FrameType, fhdr.ShowFrame, fhdr.RefreshFrameFlags,
 			fhdr.PrimaryRefFrame, fhdr.Refidx, fhdr.Width[0], fhdr.Width[1], fhdr.Height,
@@ -94,15 +99,22 @@ func DecodeTileGroupWithContext(
 		}
 	}
 	var updateCtx *TileCtx
+	singleTileFrame := fhdr.Tiling.Cols == 1 && fhdr.Tiling.Rows == 1
 	for _, td := range tiles {
 		// Tile entropy and neighbour state is independent. Full-frame indexing
 		// is retained so block coordinates remain absolute, but no above/left
 		// context may leak across a tile boundary.
-		fs := NewFrameState(fb.Width, fb.Height)
-		if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
+		fs := fb.FilterState
+		if !singleTileFrame {
+			fs = NewFrameState(fb.Width, fb.Height)
+			fs.SetSubsampling(seq.SsHor, seq.SsVer)
+		}
+		if traceSymbols {
 			fs.Tracef = logf
 		}
-		fs.SetSubsampling(seq.SsHor, seq.SsVer)
+		fs.traceModeTrial = traceModeTrial
+		fs.traceRefMVTrial = traceRefMVTrial
+		fs.traceDRLTrial = traceDRLTrial
 		sbSize := 64
 		if seq.SB128 {
 			sbSize = 128
@@ -129,19 +141,21 @@ func DecodeTileGroupWithContext(
 		if err2 := DecodeTileWithContext(td, fhdr, seq, fb, fs, tileCtx, logf); err2 != nil {
 			return nil, fmt.Errorf("tile row=%d col=%d: %w", td.Row, td.Col, err2)
 		}
-		fb.FilterState.MergeFilterState(fs)
+		if fs != fb.FilterState {
+			fb.FilterState.MergeFilterState(fs)
+		}
 		absoluteTile := int(td.Row)*int(fhdr.Tiling.Cols) + int(td.Col)
 		if absoluteTile == int(fhdr.Tiling.Update) {
 			updateCtx = tileCtx
-			if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
+			if traceSymbols {
 				logf("sym cdf_update_tile=%d comp_0=%v", absoluteTile, tileCtx.CompCDF[0])
 			}
 		}
-		if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" {
+		if traceSymbols {
 			logf("sym tile_cdf tile=%d palette_size_y0=%v", absoluteTile, tileCtx.PaletteSizeCDF[0][0])
 		}
 	}
-	if os.Getenv("GOAV1_TRACE_SYMBOLS") != "" && updateCtx != nil {
+	if traceSymbols && updateCtx != nil {
 		logf("sym cdf_out partition64_0=%v skip_0=%v comp_0=%v", updateCtx.Partition64CDF[0], updateCtx.SkipCDF[0], updateCtx.CompCDF[0])
 	}
 	chromaDbg.dump(logf)

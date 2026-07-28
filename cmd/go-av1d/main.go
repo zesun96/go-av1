@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/zesun96/go-av1/pkg/av1"
@@ -30,6 +31,7 @@ func main() {
 	traceFrame := flag.Int("trace-frame", -1, "only trace this zero-based IVF frame (-1 = all)")
 	outputInvisible := flag.Bool("output-invisible", false, "also output hidden reference frames")
 	limit := flag.Int("limit", 0, "stop after decoding this many frames (0 = all)")
+	memstats := flag.Bool("memstats", false, "report decode allocation totals")
 	flag.Parse()
 
 	if *version {
@@ -122,6 +124,10 @@ func main() {
 	frameCount := 0
 	inputFrame := 0
 	outputStarted := false
+	var memBefore runtime.MemStats
+	if *memstats {
+		runtime.ReadMemStats(&memBefore)
+	}
 	for {
 		if *limit > 0 && frameCount >= *limit {
 			break
@@ -173,6 +179,20 @@ func main() {
 	_ = dec.Flush()
 
 	fmt.Fprintf(os.Stderr, "decoded %d frames\n", frameCount)
+	if *memstats {
+		var memAfter runtime.MemStats
+		runtime.ReadMemStats(&memAfter)
+		totalAlloc := memAfter.TotalAlloc - memBefore.TotalAlloc
+		mallocs := memAfter.Mallocs - memBefore.Mallocs
+		var bytesPerFrame, mallocsPerFrame uint64
+		if frameCount > 0 {
+			bytesPerFrame = totalAlloc / uint64(frameCount)
+			mallocsPerFrame = mallocs / uint64(frameCount)
+		}
+		fmt.Fprintf(os.Stderr,
+			"memstats: total_alloc_bytes=%d mallocs=%d bytes_per_frame=%d mallocs_per_frame=%d\n",
+			totalAlloc, mallocs, bytesPerFrame, mallocsPerFrame)
+	}
 }
 
 func writeFrameMD5(w io.Writer, pic *av1.Picture, frame int) {

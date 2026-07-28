@@ -53,6 +53,43 @@ multi-thread scaling because go-av1's decoder scheduling is still
 single-threaded; its `Threads` option does not yet provide dav1d-style frame or
 tile parallelism.
 
+## Optimization Progress
+
+On 2026-07-28, the first allocation-focused implementation reused coefficient
+scratch per tile, guarded every tile trace payload at the call site, cached
+debug environment settings outside block loops, reused the durable frame state
+for single-tile frames, and avoided replacing an already correctly sized
+chroma grid.
+
+Using the same 120-packet WebRTC input, one thread, all filters, two warmups,
+and seven measured runs:
+
+| Decoder state | Median | Packets/s | dav1d median | Wall-time ratio |
+|---|---:|---:|---:|---:|
+| Original baseline | 10.522s | 11.40 | 0.319s | 32.99x |
+| Coefficient scratch and single-state slice | 5.094s | 23.56 | 0.245s | 20.83x |
+| All tile trace guards | 3.914s | 30.66 | 0.240s | 16.29x |
+
+The absolute go-av1 median fell by 62.8 percent relative to the recorded
+baseline and by 23.2 percent relative to the preceding scratch/state slice.
+The dav1d result also moved between measurement sessions, so the go-av1
+absolute time and throughput are the primary before/after indicators.
+
+The new `-memstats` measurement reported:
+
+```text
+total_alloc_bytes=9722571072
+mallocs=3264568
+bytes_per_frame=81021425
+mallocs_per_frame=27204
+```
+
+Compared with the original profile's approximate 16.0 GB and 50.6 million
+objects, cumulative allocation fell by about 39 percent and object count by
+about 94 percent. The scalar throughput gate of 30 packets/s is now met on
+this input, but the allocation target remains unmet. Frame-state ownership and
+remaining block/prediction temporaries are continuing work.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:
@@ -177,6 +214,28 @@ The report must contain:
 ```
 
 Do not publish performance numbers when this comparison fails.
+
+## Reproduce Allocation Result
+
+The decoder CLI can report cumulative allocations for the decode loop without
+changing normal decoder behavior:
+
+```powershell
+$env:GOMAXPROCS = '1'
+
+go run ./cmd/go-av1d `
+  -i cmd/webrtc-av1d/output.ivf `
+  -limit 120 `
+  -threads 1 `
+  -memstats
+```
+
+The `memstats` line reports total allocated bytes and objects, plus per-output
+frame averages. It includes IVF packet reads and decoder output handling inside
+the measured loop, but excludes decoder and demuxer construction. Run a
+correctness comparison first and use the same input, packet limit, filters,
+film-grain setting, thread count, Go version, and `GOMAXPROCS` when comparing
+results.
 
 ## Reproduce WebRTC Result
 
