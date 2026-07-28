@@ -17,12 +17,26 @@ func EncodeDCT8(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameStat
 	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, 0, bx, by, yMode, true, coeff)
 }
 
+// EncodeDCT16 writes a complete intra luma TX16x16 DCT_DCT coefficient block.
+func EncodeDCT16(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	bx, by, yMode int, coeff []int32,
+) uint8 {
+	return encodeDCTSquare(ec, ctx, fs, transform.TX16x16, 0, bx, by, yMode, true, coeff)
+}
+
 // EncodeDCT4 writes a complete TX4x4 DCT_DCT coefficient block. It is used
 // for the two 4:2:0 chroma planes of an 8x8 luma coding block.
 func EncodeDCT4(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
 	plane, bx, by int, coeff []int32,
 ) uint8 {
 	return encodeDCTSquare(ec, ctx, fs, transform.TX4x4, plane, bx, by, tile.DCPred, true, coeff)
+}
+
+// EncodeDCT8Plane writes a complete intra chroma TX8x8 DCT_DCT block.
+func EncodeDCT8Plane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	plane, bx, by int, coeff []int32,
+) uint8 {
+	return encodeDCTSquare(ec, ctx, fs, transform.TX8x8, plane, bx, by, tile.DCPred, true, coeff)
 }
 
 // EncodeInterDCT8 writes an inter luma TX8x8 DCT_DCT coefficient block.

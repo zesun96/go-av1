@@ -72,6 +72,17 @@ func TestChooseLumaMode(t *testing.T) {
 	}
 }
 
+func TestShouldUseLargeIntraBlock(t *testing.T) {
+	const width, height = 16, 16
+	fe := &FrameEncoder{
+		Width: width, Height: height, QIndex: 32, BitDepth: 0,
+	}
+	st := testTileState(width, height)
+	if !fe.shouldUseLargeIntraBlock(st, 0, 0, 16) {
+		t.Fatal("flat 16x16 block should avoid four redundant 8x8 partitions")
+	}
+}
+
 func testTileState(width, height int) *tileEncodeState {
 	st := &tileEncodeState{
 		w: [3]int{width, width / 2, width / 2},

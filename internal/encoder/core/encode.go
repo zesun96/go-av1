@@ -99,8 +99,11 @@ type tileEncodeState struct {
 }
 
 type largeInterCandidate struct {
-	mv     me.MV
-	planes []*interPlaneEncode
+	mv       me.MV
+	planes   []*interPlaneEncode
+	refSlot  int
+	refFrame int
+	refOrder int
 }
 
 // encodeKeyTile writes the syntax consumed by decode_partition() and
@@ -249,10 +252,12 @@ func (fe *FrameEncoder) encodePartition(ec *bitwriter.MSACEncoder, ctx *tile.Til
 	}
 
 	if bl < tile.BL8X8 {
-		if inter && bl == tile.BL16X16 && size == 16 &&
-			fe.shouldUseLargeInterBlock(st, bx, by, size) {
+		if bl == tile.BL16X16 && size == 16 &&
+			((inter && fe.shouldUseLargeInterBlock(st, bx, by, size)) ||
+				(!inter && bx+size <= fe.Width && by+size <= fe.Height &&
+					fe.shouldUseLargeIntraBlock(st, bx, by, size))) {
 			ec.SymbolAdaptDav1d(tile.PartitionNone, cdf, n-1)
-			fe.encodeLeaf(ec, ctx, fs, st, bx, by, size, size, true)
+			fe.encodeLeaf(ec, ctx, fs, st, bx, by, size, size, inter)
 			fs.SetPartition(bx, by, bl, tile.PartitionNone, size)
 			return
 		}
@@ -286,11 +291,11 @@ func (fe *FrameEncoder) encodeBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx
 	// reconstructs on the rounded coded grid and crops to the visible size,
 	// so encode it with replicated edge samples instead of leaving a gray
 	// skipped strip at non-multiple-of-eight dimensions.
-	coded := bw == 8 && bh == 8
+	coded := bw == bh && (bw == 8 || bw == 16)
 	skipCtx := fs.SkipCtx(bx, by)
 	ec.BoolAdapt(boolSymbol(!coded), ctx.SkipCDF[skipCtx][:])
 
-	yMode := fe.chooseLumaMode(st, bx, by, 8)
+	yMode := fe.chooseLumaMode(st, bx, by, bw)
 	topMode := fs.TopModeCtx(bx, by)
 	leftMode := fs.LeftModeCtx(bx, by)
 	ec.SymbolAdaptDav1d(uint32(yMode), ctx.KFYModeCDF[topMode][leftMode][:], tile.NIntraPredModes-1)
@@ -311,11 +316,15 @@ func (fe *FrameEncoder) encodeBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx
 	}
 
 	if coded {
-		fs.SetIntraTxCtx(bx, by, bw, bh, transform.TX8x8)
-		fe.encodePlaneDC(ec, ctx, fs, st, 0, bx, by, 8, 8, transform.TX8x8, yMode)
+		yTx, uvTx := uint8(transform.TX8x8), uint8(transform.TX4x4)
+		if bw == 16 {
+			yTx, uvTx = transform.TX16x16, transform.TX8x8
+		}
+		fs.SetIntraTxCtx(bx, by, bw, bh, yTx)
+		fe.encodePlaneDC(ec, ctx, fs, st, 0, bx, by, bw, bh, yTx, yMode)
 		if blockHasChroma(bx, by, bw, bh) {
-			fe.encodePlaneDC(ec, ctx, fs, st, 1, bx/2, by/2, 4, 4, transform.TX4x4, tile.DCPred)
-			fe.encodePlaneDC(ec, ctx, fs, st, 2, bx/2, by/2, 4, 4, transform.TX4x4, tile.DCPred)
+			fe.encodePlaneDC(ec, ctx, fs, st, 1, bx/2, by/2, bw/2, bh/2, uvTx, tile.DCPred)
+			fe.encodePlaneDC(ec, ctx, fs, st, 2, bx/2, by/2, bw/2, bh/2, uvTx, tile.DCPred)
 		}
 	} else {
 		fs.SetCoefCtxBlock(0, bx, by, bw, bh, 0x40)
@@ -341,6 +350,7 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	largeBlock := bw == 16 && bh == 16
 	coded := bw == 8 && bh == 8 || largeBlock
 	mv := me.MV{}
+	refSlot, refFrame, refOrder := fe.refSlot, 1, 0
 	var planes []*interPlaneEncode
 	if largeBlock {
 		candidate, ok := st.large[[2]int{bx, by}]
@@ -349,6 +359,9 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 		}
 		mv = candidate.mv
 		planes = candidate.planes
+		refSlot = candidate.refSlot
+		refFrame = candidate.refFrame
+		refOrder = candidate.refOrder
 	} else if coded && bx+bw <= fe.Width && by+bh <= fe.Height {
 		searchRange := fe.SearchRange
 		if searchRange <= 0 {
@@ -376,15 +389,51 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	useOBMC := false
 	obmcPresent, obmcBS := false, 0
 	if coded && !largeBlock {
-		planes = append(planes, fe.analyzeInterPlane(st, 0, bx, by, bw, transform.TX8x8, mv.X, mv.Y))
-		if blockHasChroma(bx, by, bw, bh) {
-			planes = append(planes,
-				fe.analyzeInterPlane(st, 1, bx/2, by/2, bw/2, transform.TX4x4, mv.X, mv.Y),
-				fe.analyzeInterPlane(st, 2, bx/2, by/2, bw/2, transform.TX4x4, mv.X, mv.Y))
+		bestCost := 0.0
+		mv, planes, bestCost = fe.refineInterCandidate(
+			st, fe.ref, bx, by, bw, mv, 4)
+		seenSlots := map[int]bool{fe.refSlot: true}
+		for candidateOrder := 1; candidateOrder <= 6; candidateOrder++ {
+			candidateSlot := int(fe.refIdx[candidateOrder])
+			if seenSlots[candidateSlot] || len(fe.refs[candidateSlot][0]) == 0 {
+				continue
+			}
+			seenSlots[candidateSlot] = true
+			searchRange := fe.SearchRange
+			if searchRange <= 0 {
+				searchRange = 4
+			}
+			candidateConfig := me.Config{
+				Source: st.src[0], Reference: fe.refs[candidateSlot][0],
+				SourceStride: fe.Width, ReferenceStride: fe.Width,
+				Width: fe.Width, Height: fe.Height,
+				X: bx, Y: by, BlockWidth: bw, BlockHeight: bh,
+				SearchRange: searchRange, IntegerOnly: fe.IntegerMEOnly,
+			}
+			var candidateResult me.Result
+			var err error
+			if fe.HierarchicalME {
+				candidateResult, err = me.SearchHierarchical(candidateConfig)
+			} else {
+				candidateResult, err = me.Search(candidateConfig)
+			}
+			if err != nil {
+				continue
+			}
+			candidateRefs := fe.refs[candidateSlot]
+			refinedMV, candidatePlanes, cost := fe.refineInterCandidate(
+				st, candidateRefs, bx, by, bw, candidateResult.MV, 4)
+			if cost < bestCost {
+				planes = candidatePlanes
+				bestCost = cost
+				mv = refinedMV
+				refSlot = candidateSlot
+				refFrame = candidateOrder + 1
+				refOrder = candidateOrder
+			}
 		}
-		bestCost := interPlanesRDOCost(st, planes, 3, fe.QIndex, fe.BitDepth)
 		if fe.EnableOBMC {
-			obmcPresent, obmcBS = tile.EncoderOBMCContext(fs, bx, by, bw, bh, fe.refSlot)
+			obmcPresent, obmcBS = tile.EncoderOBMCContext(fs, bx, by, bw, bh, refSlot)
 			if obmcPresent {
 				pred := tile.EncoderOBMCPrediction(
 					planes[0].pred, fs, fe.refs, fe.Width, fe.Height, bx, by, bw, bh)
@@ -417,13 +466,14 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 		}
 	}
 	if fe.EnableOBMC && largeBlock {
-		obmcPresent, obmcBS = tile.EncoderOBMCContext(fs, bx, by, bw, bh, fe.refSlot)
+		obmcPresent, obmcBS = tile.EncoderOBMCContext(fs, bx, by, bw, bh, refSlot)
 	}
 	skip := !coded || interPlanesAllZero(planes)
 	skipCtx := fs.SkipCtx(bx, by)
 	ec.BoolAdapt(boolSymbol(skip), ctx.SkipCDF[skipCtx][:])
 
-	ic := tile.SingleRefEncoderContextsForSlot(fs, fe.refIdx, fe.refSlot, bx, by, bw, bh)
+	ic := tile.SingleRefEncoderContextsForReference(
+		fs, fe.refIdx, refSlot, refFrame, bx, by, bw, bh)
 	ec.BoolAdapt(1, ctx.IntraCDF[ic.Intra][:]) // inter
 	interMode := tile.InterModeGlobalMV
 	baseX, baseY := 0, 0
@@ -437,12 +487,27 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 			ec.BoolAdapt(0, ctx.CompUniRefCDF[1][cc.UniP1][:]) // LAST + LAST2
 			ec.SymbolAdaptDav1d(6, ctx.CompInterModeCDF[cc.Mode][:], 7)
 			mv = me.MV{}
+			refSlot, refFrame, refOrder = fe.refSlot, 1, 0
 		}
 	}
 	if !useCompound {
-		ec.BoolAdapt(0, ctx.RefCDF[0][ic.Ref][:])  // forward reference group
-		ec.BoolAdapt(0, ctx.RefCDF[2][ic.Ref3][:]) // LAST/LAST2 group
-		ec.BoolAdapt(0, ctx.RefCDF[3][ic.Ref4][:]) // LAST_FRAME
+		backwardGroup := refOrder >= 4
+		ec.BoolAdapt(boolSymbol(backwardGroup), ctx.RefCDF[0][ic.Ref][:])
+		if backwardGroup {
+			altref := refOrder == 6
+			ec.BoolAdapt(boolSymbol(altref), ctx.RefCDF[1][ic.Ref2][:])
+			if !altref {
+				ec.BoolAdapt(boolSymbol(refOrder == 5), ctx.RefCDF[5][ic.Ref6][:])
+			}
+		} else {
+			olderGroup := refOrder >= 2
+			ec.BoolAdapt(boolSymbol(olderGroup), ctx.RefCDF[2][ic.Ref3][:])
+			if olderGroup {
+				ec.BoolAdapt(boolSymbol(refOrder == 3), ctx.RefCDF[4][ic.Ref5][:])
+			} else {
+				ec.BoolAdapt(boolSymbol(refOrder == 1), ctx.RefCDF[3][ic.Ref4][:])
+			}
+		}
 
 		switch {
 		case ic.CandidateCount > 0 && mv.X == ic.BaseMVX && mv.Y == ic.BaseMVY:
@@ -496,7 +561,7 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	blk := tile.Av1Block{
 		Intra: false, Skip: skip,
 		InterMode: uint8(interMode),
-		RefSlot:   int8(fe.refSlot), RefFrame: 1, RefOrder: 0,
+		RefSlot:   int8(refSlot), RefFrame: int8(refFrame), RefOrder: int8(refOrder),
 		Tx: maxTx, MaxYTx: maxTx, Uvtx: uvtx,
 		BaseMV:  [2]int16{int16(baseY), int16(baseX)},
 		DeltaMV: [2]int16{int16(deltaY), int16(deltaX)},
@@ -517,6 +582,44 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	fs.CommitInterBlock(bx, by, bw, bh, blk, 1, blockHasChroma(bx, by, bw, bh))
 }
 
+func (fe *FrameEncoder) refineInterCandidate(st *tileEncodeState, refs [3][]byte,
+	bx, by, size int, seed me.MV, baseSyntaxBits float64,
+) (me.MV, []*interPlaneEncode, float64) {
+	offsets := []int{-4, -3, -2, -1, 0, 1, 2, 3, 4}
+	if fe.IntegerMEOnly {
+		offsets = []int{0}
+	}
+	bestMV := seed
+	var bestPlanes []*interPlaneEncode
+	bestCost := math.Inf(1)
+	yTx, uvTx := uint8(transform.TX8x8), uint8(transform.TX4x4)
+	if size == 16 {
+		yTx, uvTx = transform.TX16x16, transform.TX8x8
+	}
+	for _, dy := range offsets {
+		for _, dx := range offsets {
+			mv := me.MV{X: seed.X + dx, Y: seed.Y + dy}
+			planes := []*interPlaneEncode{
+				fe.analyzeInterPlaneFrom(st, refs, 0, bx, by, size,
+					yTx, mv.X, mv.Y),
+			}
+			if blockHasChroma(bx, by, size, size) {
+				planes = append(planes,
+					fe.analyzeInterPlaneFrom(st, refs, 1, bx/2, by/2, size/2,
+						uvTx, mv.X, mv.Y),
+					fe.analyzeInterPlaneFrom(st, refs, 2, bx/2, by/2, size/2,
+						uvTx, mv.X, mv.Y))
+			}
+			cost := interPlanesRDOCost(st, planes,
+				baseSyntaxBits+motionSyntaxBits(mv), fe.QIndex, fe.BitDepth)
+			if cost < bestCost {
+				bestMV, bestPlanes, bestCost = mv, planes, cost
+			}
+		}
+	}
+	return bestMV, bestPlanes, bestCost
+}
+
 type interPlaneEncode struct {
 	plane int
 	bx    int
@@ -530,11 +633,18 @@ type interPlaneEncode struct {
 func (fe *FrameEncoder) analyzeInterPlane(st *tileEncodeState,
 	plane, bx, by, size int, tx uint8, mvX, mvY int,
 ) *interPlaneEncode {
+	return fe.analyzeInterPlaneFrom(
+		st, fe.ref, plane, bx, by, size, tx, mvX, mvY)
+}
+
+func (fe *FrameEncoder) analyzeInterPlaneFrom(st *tileEncodeState, refs [3][]byte,
+	plane, bx, by, size int, tx uint8, mvX, mvY int,
+) *interPlaneEncode {
 	ss := 0
 	if plane > 0 {
 		ss = 1
 	}
-	pred := tile.EncoderInterPrediction(fe.ref[plane], st.w[plane], st.w[plane], st.h[plane],
+	pred := tile.EncoderInterPrediction(refs[plane], st.w[plane], st.w[plane], st.h[plane],
 		bx, by, size, size, mvX, mvY, ss, ss)
 	return fe.analyzeInterPlanePrediction(st, plane, bx, by, size, tx, pred)
 }
@@ -575,69 +685,143 @@ func (fe *FrameEncoder) shouldUseLargeInterBlock(st *tileEncodeState, bx, by, si
 	if searchRange <= 0 {
 		searchRange = 4
 	}
-	cfg := me.Config{
+	baseConfig := me.Config{
 		Source: st.src[0], Reference: fe.ref[0],
 		SourceStride: fe.Width, ReferenceStride: fe.Width,
 		Width: fe.Width, Height: fe.Height,
 		X: bx, Y: by, BlockWidth: size, BlockHeight: size,
 		SearchRange: searchRange, IntegerOnly: fe.IntegerMEOnly,
 	}
-	var result me.Result
-	var err error
-	if fe.HierarchicalME {
-		result, err = me.SearchHierarchical(cfg)
-	} else {
-		result, err = me.Search(cfg)
+	search := func(cfg me.Config) (me.Result, error) {
+		if fe.HierarchicalME {
+			return me.SearchHierarchical(cfg)
+		}
+		return me.Search(cfg)
 	}
-	if err != nil {
+	referenceOrders := make([]int, 0, 4)
+	seenSlots := make(map[int]bool)
+	for order := 0; order <= 6; order++ {
+		slot := int(fe.refIdx[order])
+		if seenSlots[slot] || len(fe.refs[slot][0]) == 0 {
+			continue
+		}
+		seenSlots[slot] = true
+		referenceOrders = append(referenceOrders, order)
+	}
+
+	sharedCost := math.Inf(1)
+	var bestShared largeInterCandidate
+	for _, order := range referenceOrders {
+		slot := int(fe.refIdx[order])
+		cfg := baseConfig
+		cfg.Reference = fe.refs[slot][0]
+		result, err := search(cfg)
+		if err != nil {
+			continue
+		}
+		refs := fe.refs[slot]
+		refinedMV, planes, cost := fe.refineInterCandidate(
+			st, refs, bx, by, size, result.MV, 5)
+		if cost < sharedCost {
+			sharedCost = cost
+			bestShared = largeInterCandidate{
+				mv: refinedMV, planes: planes,
+				refSlot: slot, refFrame: order + 1, refOrder: order,
+			}
+		}
+	}
+	if math.IsInf(sharedCost, 1) {
 		return false
 	}
-	shared := []*interPlaneEncode{
-		fe.analyzeInterPlane(st, 0, bx, by, size, transform.TX16x16, result.MV.X, result.MV.Y),
-	}
-	if blockHasChroma(bx, by, size, size) {
-		shared = append(shared,
-			fe.analyzeInterPlane(st, 1, bx/2, by/2, size/2, transform.TX8x8, result.MV.X, result.MV.Y),
-			fe.analyzeInterPlane(st, 2, bx/2, by/2, size/2, transform.TX8x8, result.MV.X, result.MV.Y))
-	}
-	sharedCost := interPlanesRDOCost(st, shared, motionSyntaxBits(result.MV)+4,
-		fe.QIndex, fe.BitDepth)
 
 	splitCost := 0.0
 	for subY := by; subY < by+size; subY += 8 {
 		for subX := bx; subX < bx+size; subX += 8 {
-			subCfg := cfg
-			subCfg.X, subCfg.Y = subX, subY
-			subCfg.BlockWidth, subCfg.BlockHeight = 8, 8
-			var subResult me.Result
-			if fe.HierarchicalME {
-				subResult, err = me.SearchHierarchical(subCfg)
-			} else {
-				subResult, err = me.Search(subCfg)
+			bestSubCost := math.Inf(1)
+			for _, order := range referenceOrders {
+				slot := int(fe.refIdx[order])
+				subCfg := baseConfig
+				subCfg.Reference = fe.refs[slot][0]
+				subCfg.X, subCfg.Y = subX, subY
+				subCfg.BlockWidth, subCfg.BlockHeight = 8, 8
+				subResult, err := search(subCfg)
+				if err != nil {
+					continue
+				}
+				refs := fe.refs[slot]
+				_, _, cost := fe.refineInterCandidate(
+					st, refs, subX, subY, 8, subResult.MV, 4)
+				if cost < bestSubCost {
+					bestSubCost = cost
+				}
 			}
-			if err != nil {
+			if math.IsInf(bestSubCost, 1) {
 				return false
 			}
-			subPlanes := []*interPlaneEncode{
-				fe.analyzeInterPlane(st, 0, subX, subY, 8,
-					transform.TX8x8, subResult.MV.X, subResult.MV.Y),
-			}
-			if blockHasChroma(subX, subY, 8, 8) {
-				subPlanes = append(subPlanes,
-					fe.analyzeInterPlane(st, 1, subX/2, subY/2, 4,
-						transform.TX4x4, subResult.MV.X, subResult.MV.Y),
-					fe.analyzeInterPlane(st, 2, subX/2, subY/2, 4,
-						transform.TX4x4, subResult.MV.X, subResult.MV.Y))
-			}
-			splitCost += interPlanesRDOCost(st, subPlanes,
-				motionSyntaxBits(subResult.MV)+4, fe.QIndex, fe.BitDepth)
+			splitCost += bestSubCost
 		}
 	}
 	if sharedCost >= splitCost {
 		return false
 	}
-	st.large[[2]int{bx, by}] = largeInterCandidate{mv: result.MV, planes: shared}
+	st.large[[2]int{bx, by}] = bestShared
 	return true
+}
+
+func (fe *FrameEncoder) shouldUseLargeIntraBlock(st *tileEncodeState, bx, by, size int) bool {
+	if size != 16 || bx+size > fe.Width || by+size > fe.Height {
+		return false
+	}
+	shared := fe.analyzeIntraBlock(st, bx, by, size)
+	sharedCost := interPlanesRDOCost(st, shared, 4, fe.QIndex, fe.BitDepth)
+
+	// The lower and right 8x8 candidates depend on the already reconstructed
+	// neighbours. Simulate the split in coding order so its RDO comparison
+	// sees the same edges that the real encoder will use.
+	sim := &tileEncodeState{src: st.src, w: st.w, h: st.h}
+	for plane := range sim.recon {
+		sim.recon[plane] = append([]byte(nil), st.recon[plane]...)
+	}
+	splitCost := rdo.Lambda(fe.QIndex, fe.BitDepth)
+	for subY := by; subY < by+size; subY += 8 {
+		for subX := bx; subX < bx+size; subX += 8 {
+			planes := fe.analyzeIntraBlock(sim, subX, subY, 8)
+			splitCost += interPlanesRDOCost(sim, planes, 3, fe.QIndex, fe.BitDepth)
+			for _, plane := range planes {
+				reconstructDCTBlock(sim.recon[plane.plane], sim.w[plane.plane],
+					sim.h[plane.plane], plane.bx, plane.by, plane.size,
+					plane.pred, plane.coeff, plane.tx, fe.QIndex, fe.BitDepth)
+			}
+		}
+	}
+	// Partition-rate estimates are deliberately approximate; require a clear
+	// win before replacing four independently predicted 8x8 blocks.
+	return sharedCost < splitCost*0.90
+}
+
+func (fe *FrameEncoder) analyzeIntraBlock(st *tileEncodeState,
+	bx, by, size int,
+) []*interPlaneEncode {
+	yMode := fe.chooseLumaMode(st, bx, by, size)
+	yTx, uvTx := uint8(transform.TX8x8), uint8(transform.TX4x4)
+	if size == 16 {
+		yTx, uvTx = transform.TX16x16, transform.TX8x8
+	}
+	yPred := intraPredBlock(st.recon[0], st.w[0], st.h[0],
+		bx, by, size, size, yMode)
+	planes := []*interPlaneEncode{
+		fe.analyzeInterPlanePrediction(st, 0, bx, by, size, yTx, yPred),
+	}
+	if blockHasChroma(bx, by, size, size) {
+		chromaSize := size / 2
+		for plane := 1; plane <= 2; plane++ {
+			pred := intraPredBlock(st.recon[plane], st.w[plane], st.h[plane],
+				bx/2, by/2, chromaSize, chromaSize, tile.DCPred)
+			planes = append(planes, fe.analyzeInterPlanePrediction(st, plane,
+				bx/2, by/2, chromaSize, uvTx, pred))
+		}
+	}
+	return planes
 }
 
 func motionSyntaxBits(mv me.MV) float64 {
@@ -765,7 +949,8 @@ func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileC
 	predBlock := intraPredBlock(st.recon[plane], st.w[plane], st.h[plane], bx, by, bw, bh, mode)
 	pred := int(predBlock[0])
 	mean := blockMean(st.src[plane], st.w[plane], st.h[plane], bx, by, bw, bh, pred)
-	if (plane == 0 && tx == transform.TX8x8) || (plane > 0 && tx == transform.TX4x4) {
+	if (plane == 0 && (tx == transform.TX8x8 || tx == transform.TX16x16)) ||
+		(plane > 0 && (tx == transform.TX4x4 || tx == transform.TX8x8)) {
 		size := bw
 		residual := make([]int16, size*size)
 		for y := 0; y < size; y++ {
@@ -776,16 +961,27 @@ func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileC
 			}
 		}
 		coeff := make([]int32, size*size)
-		if size == 8 {
+		switch size {
+		case 16:
+			encodertx.FwdDCT16x16(coeff, residual, size)
+		case 8:
 			encodertx.FwdDCT8x8(coeff, residual, size)
-		} else {
+		default:
 			encodertx.FwdDCT4x4(coeff, residual, size)
 		}
 		encodertx.Quantize(coeff, fe.QIndex, fe.BitDepth)
 		if plane == 0 {
-			entropy.EncodeDCT8(ec, ctx, fs, bx, by, mode, coeff)
+			if tx == transform.TX16x16 {
+				entropy.EncodeDCT16(ec, ctx, fs, bx, by, mode, coeff)
+			} else {
+				entropy.EncodeDCT8(ec, ctx, fs, bx, by, mode, coeff)
+			}
 		} else {
-			entropy.EncodeDCT4(ec, ctx, fs, plane, bx, by, coeff)
+			if tx == transform.TX8x8 {
+				entropy.EncodeDCT8Plane(ec, ctx, fs, plane, bx, by, coeff)
+			} else {
+				entropy.EncodeDCT4(ec, ctx, fs, plane, bx, by, coeff)
+			}
 		}
 		reconstructDCTBlock(st.recon[plane], st.w[plane], st.h[plane],
 			bx, by, size, predBlock, coeff, tx, fe.QIndex, fe.BitDepth)
@@ -871,7 +1067,11 @@ func (fe *FrameEncoder) chooseLumaMode(st *tileEncodeState, bx, by, size int) in
 			}
 		}
 		coeff := make([]int32, size*size)
-		encodertx.FwdDCT8x8(coeff, residual, size)
+		if size == 16 {
+			encodertx.FwdDCT16x16(coeff, residual, size)
+		} else {
+			encodertx.FwdDCT8x8(coeff, residual, size)
+		}
 		encodertx.Quantize(coeff, fe.QIndex, fe.BitDepth)
 		syntaxBits := 1.0
 		if mode != tile.DCPred {

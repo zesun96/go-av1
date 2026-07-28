@@ -25,20 +25,21 @@ The first checked result uses a six-frame 64x64 `testsrc2` YUV420 sequence at
 
 | Encoder | CRF | Rate (kbps) | PSNR (dB) |
 |---|---:|---:|---:|
-| go-av1 | 12 | 34.6 | 43.96 |
+| go-av1 | 12 | 31.2 | 44.55 |
 | SVT-AV1 | 12 | 32.3 | 45.48 |
-| go-av1 | 24 | 26.2 | 38.88 |
+| go-av1 | 24 | 23.6 | 39.42 |
 | SVT-AV1 | 24 | 19.5 | 40.59 |
-| go-av1 | 36 | 17.1 | 32.72 |
+| go-av1 | 36 | 15.1 | 33.16 |
 | SVT-AV1 | 36 | 12.3 | 34.70 |
-| go-av1 | 48 | 9.8 | 26.32 |
+| go-av1 | 48 | 8.2 | 26.55 |
 | SVT-AV1 | 48 | 7.2 | 29.16 |
 
-The measured go-av1 BD-rate relative to SVT-AV1 preset 12 is **+55.95%**.
+The measured go-av1 BD-rate relative to SVT-AV1 preset 12 is **+33.50%**.
 Therefore the roadmap goal of approximately +25% is not yet met.
 
-The next quality work is multi-reference single prediction and a multi-sequence
-benchmark corpus. Preset 12 currently enables hierarchical motion estimation,
-eighth-pixel refinement, rotating references, 8x8/16x16 reconstruction-domain
-inter RDO, compound prediction, calibrated deblocking, and lambda-based mode
-RDO. OBMC remains an explicit opt-in.
+The next quality work is motion-compensated compound prediction and a
+multi-sequence benchmark corpus. Preset 12 currently enables hierarchical
+motion estimation, regular 8-tap reconstruction-domain sub-pixel refinement,
+all seven single-reference types, rotating references, conservative 8x8/16x16
+intra/inter partition RDO, compound prediction, calibrated deblocking, and
+lambda-based mode RDO. OBMC remains an explicit opt-in.

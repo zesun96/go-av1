@@ -12,8 +12,11 @@ import (
 type EncoderSingleRefContexts struct {
 	Intra          int
 	Ref            int
+	Ref2           int
 	Ref3           int
 	Ref4           int
+	Ref5           int
+	Ref6           int
 	NewMV          int
 	GlobalMV       int
 	RefMV          int
@@ -52,21 +55,35 @@ func SingleRefEncoderContexts(fs *FrameState, bx, by, bw, bh int) EncoderSingleR
 func SingleRefEncoderContextsForSlot(fs *FrameState, refIdx [7]uint8, refSlot,
 	bx, by, bw, bh int,
 ) EncoderSingleRefContexts {
+	return SingleRefEncoderContextsForReference(
+		fs, refIdx, refSlot, 1, bx, by, bw, bh)
+}
+
+// SingleRefEncoderContextsForReference derives contexts for an explicit AV1
+// reference type (LAST_FRAME=1, LAST2_FRAME=2, and so on).
+func SingleRefEncoderContextsForReference(fs *FrameState, refIdx [7]uint8,
+	refSlot, refFrame, bx, by, bw, bh int,
+) EncoderSingleRefContexts {
 	fhdr := &header.FrameHeader{}
 	for i := range fhdr.Refidx {
 		fhdr.Refidx[i] = int8(refIdx[i] & 7)
 	}
-	newMV, globalMV, refMV := singleRefModeContexts(fs, fhdr, nil, refSlot, 1, bx, by, bw, bh)
+	newMV, globalMV, refMV := singleRefModeContexts(
+		fs, fhdr, nil, refSlot, refFrame, bx, by, bw, bh)
 	out := EncoderSingleRefContexts{
 		Intra:    intraCtx(fs, bx, by),
 		Ref:      refCtx(fs, fhdr, bx, by),
+		Ref2:     ref2Ctx(fs, fhdr, bx, by),
 		Ref3:     ref3Ctx(fs, fhdr, bx, by),
 		Ref4:     ref4Ctx(fs, fhdr, bx, by),
+		Ref5:     ref5Ctx(fs, fhdr, bx, by),
+		Ref6:     ref6Ctx(fs, fhdr, bx, by),
 		NewMV:    newMV,
 		GlobalMV: globalMV,
 		RefMV:    refMV,
 	}
-	count, stack := singleRefInterCandidates(fs, fhdr, nil, refSlot, 1, bx, by, bw, bh)
+	count, stack := singleRefInterCandidates(
+		fs, fhdr, nil, refSlot, refFrame, bx, by, bw, bh)
 	out.CandidateCount = count
 	if out.CandidateCount > 0 {
 		out.BaseMVY = int(stack[0].mv.Y)
