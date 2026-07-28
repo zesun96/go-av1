@@ -44,59 +44,107 @@ type report struct {
 	FFmpeg    string   `json:"ffmpeg"`
 }
 
+type suiteReport struct {
+	Preset     int      `json:"preset"`
+	CRFs       []int    `json:"crfs"`
+	Sequences  []report `json:"sequences"`
+	MeanBDRate float64  `json:"mean_go_bd_rate_percent"`
+	Generated  string   `json:"generated"`
+	FFmpeg     string   `json:"ffmpeg"`
+}
+
 var psnrPattern = regexp.MustCompile(`average:([0-9]+(?:\.[0-9]+)?)`)
 
 func main() {
-	input := flag.String("i", "", "input Y4M sequence")
+	input := flag.String("i", "", "input Y4M sequence, or comma-separated sequence list")
 	outDir := flag.String("out", "encoder-benchmark", "output directory")
 	ffmpeg := flag.String("ffmpeg", "ffmpeg", "ffmpeg executable with libsvtav1")
 	preset := flag.Int("preset", 12, "go-av1 and SVT-AV1 preset")
 	crfText := flag.String("crfs", "12,24,36,48", "comma-separated CRF sweep (at least four)")
+	reuse := flag.Bool("reuse", false, "reuse a matching report.json when present")
 	flag.Parse()
-	if *input == "" {
+	inputs := parseInputs(*input)
+	if len(inputs) == 0 {
 		fatal(errors.New("usage: av1-encbench -i input.y4m [-out directory]"))
 	}
 	crfs, err := parseCRFs(*crfText)
 	if err != nil {
 		fatal(err)
 	}
-	meta, err := inspectY4M(*input)
-	if err != nil {
-		fatal(err)
-	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fatal(err)
 	}
+	suite := suiteReport{
+		Preset: *preset, CRFs: crfs,
+		Generated: time.Now().UTC().Format(time.RFC3339), FFmpeg: *ffmpeg,
+	}
+	for _, inputPath := range inputs {
+		sequenceOut := *outDir
+		if len(inputs) > 1 {
+			sequenceOut = filepath.Join(*outDir, sequenceName(inputPath))
+		}
+		rep, err := runBenchmark(inputPath, sequenceOut, *ffmpeg, *preset, crfs, *reuse)
+		if err != nil {
+			fatal(err)
+		}
+		suite.Sequences = append(suite.Sequences, rep)
+		suite.MeanBDRate += rep.BDRate
+		fmt.Printf("%s: go-av1 BD-rate relative to SVT-AV1 preset %d: %+.2f%%\n",
+			inputPath, *preset, rep.BDRate)
+	}
+	suite.MeanBDRate /= float64(len(suite.Sequences))
+	if len(suite.Sequences) > 1 {
+		if err := writeSuiteReports(*outDir, suite); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("suite mean BD-rate relative to SVT-AV1 preset %d: %+.2f%%\n",
+			*preset, suite.MeanBDRate)
+	}
+}
+
+func runBenchmark(input, outDir, ffmpeg string, preset int, crfs []int, reuse bool) (report, error) {
+	if reuse {
+		if rep, ok := reusableReport(outDir, input, preset, crfs); ok {
+			return rep, nil
+		}
+	}
+	meta, err := inspectY4M(input)
+	if err != nil {
+		return report{}, err
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return report{}, err
+	}
 	duration := float64(meta.frames*meta.fpsDen) / float64(meta.fpsNum)
 	rep := report{
-		Input: *input, Width: meta.width, Height: meta.height, Frames: meta.frames,
-		Preset: *preset, CRFs: crfs, Generated: time.Now().UTC().Format(time.RFC3339),
-		FFmpeg: *ffmpeg,
+		Input: input, Width: meta.width, Height: meta.height, Frames: meta.frames,
+		Preset: preset, CRFs: crfs, Generated: time.Now().UTC().Format(time.RFC3339),
+		FFmpeg: ffmpeg,
 	}
 	goCurve, svtCurve := make([]benchmark.Point, 0, len(crfs)), make([]benchmark.Point, 0, len(crfs))
 	for _, crf := range crfs {
-		goPath := filepath.Join(*outDir, fmt.Sprintf("go-p%d-crf%d.ivf", *preset, crf))
+		goPath := filepath.Join(outDir, fmt.Sprintf("go-p%d-crf%d.ivf", preset, crf))
 		start := time.Now()
-		if err := encodeGo(*input, goPath, *preset, crf); err != nil {
-			fatal(err)
+		if err := encodeGo(input, goPath, preset, crf); err != nil {
+			return report{}, err
 		}
-		goResult, err := measure(*ffmpeg, *input, goPath, "go-av1", *preset, crf, duration, time.Since(start))
+		goResult, err := measure(ffmpeg, input, goPath, "go-av1", preset, crf, duration, time.Since(start))
 		if err != nil {
-			fatal(err)
+			return report{}, err
 		}
 		rep.Results = append(rep.Results, goResult)
 		goCurve = append(goCurve, benchmark.Point{RateKbps: goResult.RateKbps, PSNR: goResult.PSNR})
 
-		svtPath := filepath.Join(*outDir, fmt.Sprintf("svt-p%d-crf%d.ivf", *preset, crf))
+		svtPath := filepath.Join(outDir, fmt.Sprintf("svt-p%d-crf%d.ivf", preset, crf))
 		start = time.Now()
-		if output, err := exec.Command(*ffmpeg, "-hide_banner", "-loglevel", "error",
-			"-i", *input, "-an", "-c:v", "libsvtav1", "-preset", strconv.Itoa(*preset),
+		if output, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error",
+			"-i", input, "-an", "-c:v", "libsvtav1", "-preset", strconv.Itoa(preset),
 			"-crf", strconv.Itoa(crf), "-f", "ivf", "-y", svtPath).CombinedOutput(); err != nil {
-			fatal(fmt.Errorf("SVT-AV1 CRF %d: %w\n%s", crf, err, output))
+			return report{}, fmt.Errorf("SVT-AV1 CRF %d: %w\n%s", crf, err, output)
 		}
-		svtResult, err := measure(*ffmpeg, *input, svtPath, "SVT-AV1", *preset, crf, duration, time.Since(start))
+		svtResult, err := measure(ffmpeg, input, svtPath, "SVT-AV1", preset, crf, duration, time.Since(start))
 		if err != nil {
-			fatal(err)
+			return report{}, err
 		}
 		rep.Results = append(rep.Results, svtResult)
 		svtCurve = append(svtCurve, benchmark.Point{RateKbps: svtResult.RateKbps, PSNR: svtResult.PSNR})
@@ -105,12 +153,49 @@ func main() {
 	}
 	rep.BDRate, err = benchmark.BDRate(svtCurve, goCurve)
 	if err != nil {
-		fatal(err)
+		return report{}, err
 	}
-	if err := writeReports(*outDir, rep); err != nil {
-		fatal(err)
+	if err := writeReports(outDir, rep); err != nil {
+		return report{}, err
 	}
-	fmt.Printf("go-av1 BD-rate relative to SVT-AV1 preset %d: %+.2f%%\n", *preset, rep.BDRate)
+	return rep, nil
+}
+
+func reusableReport(outDir, input string, preset int, crfs []int) (report, bool) {
+	data, err := os.ReadFile(filepath.Join(outDir, "report.json"))
+	if err != nil {
+		return report{}, false
+	}
+	var rep report
+	if json.Unmarshal(data, &rep) != nil || rep.Input != input || rep.Preset != preset ||
+		len(rep.CRFs) != len(crfs) {
+		return report{}, false
+	}
+	for i := range crfs {
+		if rep.CRFs[i] != crfs[i] {
+			return report{}, false
+		}
+	}
+	return rep, true
+}
+
+func parseInputs(value string) []string {
+	var out []string
+	for _, field := range strings.Split(value, ",") {
+		if path := strings.TrimSpace(field); path != "" {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+func sequenceName(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name = regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(name, "-")
+	if name == "" {
+		return "sequence"
+	}
+	return name
 }
 
 type y4mMeta struct {
@@ -259,6 +344,29 @@ func writeReports(outDir string, rep report) error {
 			row.Encoder, row.CRF, row.RateKbps, row.PSNR, row.Seconds)
 	}
 	return os.WriteFile(filepath.Join(outDir, "report.md"), []byte(md.String()), 0o644)
+}
+
+func writeSuiteReports(outDir string, suite suiteReport) error {
+	data, err := json.MarshalIndent(suite, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "suite-report.json"), append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	var md strings.Builder
+	fmt.Fprintln(&md, "# Encoder suite comparison")
+	fmt.Fprintln(&md)
+	fmt.Fprintf(&md, "- Preset: %d\n", suite.Preset)
+	fmt.Fprintf(&md, "- Arithmetic mean go-av1 BD-rate relative to SVT-AV1: **%+.2f%%**\n\n",
+		suite.MeanBDRate)
+	fmt.Fprintln(&md, "| Sequence | Size | Frames | BD-rate |")
+	fmt.Fprintln(&md, "|---|---:|---:|---:|")
+	for _, sequence := range suite.Sequences {
+		fmt.Fprintf(&md, "| %s | %dx%d | %d | %+.2f%% |\n",
+			sequence.Input, sequence.Width, sequence.Height, sequence.Frames, sequence.BDRate)
+	}
+	return os.WriteFile(filepath.Join(outDir, "suite-report.md"), []byte(md.String()), 0o644)
 }
 
 func fatal(err error) {

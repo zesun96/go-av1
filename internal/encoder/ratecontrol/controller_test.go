@@ -1,6 +1,9 @@
 package ratecontrol
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestCQPStaysFixed(t *testing.T) {
 	rc, err := New(Config{
@@ -46,5 +49,36 @@ func TestCBRLowersQuantizerWhenUndershooting(t *testing.T) {
 	}
 	if got := rc.QIndex(); got >= 120 {
 		t.Fatalf("qindex=%d, want a decrease", got)
+	}
+}
+
+func TestRateControlClosedLoopConverges(t *testing.T) {
+	for _, mode := range []Mode{ModeVBR, ModeCBR} {
+		t.Run(map[Mode]string{ModeVBR: "vbr", ModeCBR: "cbr"}[mode], func(t *testing.T) {
+			rc, err := New(Config{
+				Mode: mode, TargetKbps: 300,
+				FrameRateNum: 30, FrameRateDen: 1, InitialQIndex: 80,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const targetBits = 10_000.0
+			total := 0
+			for frame := 0; frame < 180; frame++ {
+				// Deterministic monotonic stand-in for an encoder: every
+				// 32 qindex steps change frame size by approximately 2x.
+				bits := int(targetBits * math.Exp2(float64(100-rc.QIndex())/32))
+				total += bits
+				rc.Update(bits, frame == 0)
+				if math.Abs(rc.bufferBits) > rc.bufferCap {
+					t.Fatalf("buffer %.0f exceeds cap %.0f", rc.bufferBits, rc.bufferCap)
+				}
+			}
+			average := float64(total) / 180
+			if errRatio := math.Abs(average-targetBits) / targetBits; errRatio > 0.10 {
+				t.Fatalf("average %.0f bits, target %.0f (error %.1f%%)",
+					average, targetBits, errRatio*100)
+			}
+		})
 	}
 }
