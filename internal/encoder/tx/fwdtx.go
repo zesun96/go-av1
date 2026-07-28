@@ -141,23 +141,37 @@ func FwdDCT4x4(dst []int32, src []int16, srcStride int) {
 // by AV1 quantization. The orthonormal DCT is scaled by eight, matching the
 // existing integer 4x4 and 8x8 kernels.
 func FwdDCT16x16(dst []int32, src []int16, srcStride int) {
-	const n = 16
-	var basis [n][n]float64
+	fwdDCTSquare(dst, src, srcStride, 16)
+}
+
+// FwdDCT32x32 computes a TX_32X32 DCT_DCT in the coefficient scale consumed
+// by AV1 quantization.
+func FwdDCT32x32(dst []int32, src []int16, srcStride int) {
+	fwdDCTSquareScaled(dst, src, srcStride, 32, 4)
+}
+
+func fwdDCTSquare(dst []int32, src []int16, srcStride, n int) {
+	fwdDCTSquareScaled(dst, src, srcStride, n, 8)
+}
+
+func fwdDCTSquareScaled(dst []int32, src []int16, srcStride, n int, scaleFactor float64) {
+	basis := make([]float64, n*n)
 	for k := 0; k < n; k++ {
-		scale := math.Sqrt(2.0 / n)
+		scale := math.Sqrt(2.0 / float64(n))
 		if k == 0 {
-			scale = math.Sqrt(1.0 / n)
+			scale = math.Sqrt(1.0 / float64(n))
 		}
 		for x := 0; x < n; x++ {
-			basis[k][x] = scale * math.Cos(math.Pi*float64((2*x+1)*k)/(2*n))
+			basis[k*n+x] = scale * math.Cos(
+				math.Pi*float64((2*x+1)*k)/float64(2*n))
 		}
 	}
-	var tmp [n * n]float64
+	tmp := make([]float64, n*n)
 	for y := 0; y < n; y++ {
 		for u := 0; u < n; u++ {
 			var sum float64
 			for x := 0; x < n; x++ {
-				sum += float64(src[y*srcStride+x]) * basis[u][x]
+				sum += float64(src[y*srcStride+x]) * basis[u*n+x]
 			}
 			tmp[y*n+u] = sum
 		}
@@ -166,9 +180,9 @@ func FwdDCT16x16(dst []int32, src []int16, srcStride int) {
 		for u := 0; u < n; u++ {
 			var sum float64
 			for y := 0; y < n; y++ {
-				sum += tmp[y*n+u] * basis[v][y]
+				sum += tmp[y*n+u] * basis[v*n+y]
 			}
-			dst[v*n+u] = int32(math.Round(sum * 8))
+			dst[v*n+u] = int32(math.Round(sum * scaleFactor))
 		}
 	}
 }

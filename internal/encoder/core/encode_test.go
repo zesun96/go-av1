@@ -83,6 +83,32 @@ func TestShouldUseLargeIntraBlock(t *testing.T) {
 	}
 }
 
+func TestShouldUseSkip32InterBlock(t *testing.T) {
+	const width, height = 32, 32
+	fe := &FrameEncoder{
+		Width: width, Height: height, QIndex: 32, BitDepth: 0,
+		SearchRange: 4,
+	}
+	st := testTileState(width, height)
+	st.large = make(map[[2]int]largeInterCandidate)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			st.src[0][y*width+x] = byte((x*13 + y*29 + x*y) & 255)
+		}
+	}
+	for plane := range fe.refs[0] {
+		fe.refs[0][plane] = append([]byte(nil), st.src[plane]...)
+	}
+	fe.ref = fe.refs[0]
+	if !fe.shouldUseLargeInterBlock(st, 0, 0, 32) {
+		t.Fatal("exact-reference 32x32 block should avoid four child partitions")
+	}
+	candidate, ok := st.large[[2]int{0, 0}]
+	if !ok || !interPlanesAllZero(candidate.planes) {
+		t.Fatal("32x32 skip candidate was not cached as an all-zero residual")
+	}
+}
+
 func testTileState(width, height int) *tileEncodeState {
 	st := &tileEncodeState{
 		w: [3]int{width, width / 2, width / 2},

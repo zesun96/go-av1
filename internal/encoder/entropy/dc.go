@@ -38,7 +38,11 @@ func encodeDCOnlyMode(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fra
 	// reduced_txtp_set=1. TX32 and TX64 infer DCT_DCT. Small luma
 	// transforms signal DCT_DCT as symbol 1 in the reduced intra set;
 	// chroma DCT_DCT is inferred from the chroma prediction mode.
-	if plane == 0 && int(td.Max)+1 < 4 {
+	inferredClass := int(td.Max)
+	if intra {
+		inferredClass++
+	}
+	if plane == 0 && inferredClass < 4 {
 		if intra {
 			txClass := min(2, int(td.Min))
 			ec.SymbolAdaptDav1d(1, ctx.TxTypeIntra2CDF[txClass][yMode][:], len(tile.TxTypeIntra2Set)-1)

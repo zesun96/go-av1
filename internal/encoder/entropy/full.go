@@ -60,6 +60,20 @@ func EncodeInterDCT16(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.Fra
 	return encodeDCTSquare(ec, ctx, fs, transform.TX16x16, 0, bx, by, tile.DCPred, false, coeff)
 }
 
+// EncodeInterDCT32 writes an inter luma TX32x32 DCT_DCT coefficient block.
+func EncodeInterDCT32(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	bx, by int, coeff []int32,
+) uint8 {
+	return encodeDCTSquare(ec, ctx, fs, transform.TX32x32, 0, bx, by, tile.DCPred, false, coeff)
+}
+
+// EncodeInterDCT16Plane writes a TX16x16 inter block for an explicit plane.
+func EncodeInterDCT16Plane(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
+	plane, bx, by int, coeff []int32,
+) uint8 {
+	return encodeDCTSquare(ec, ctx, fs, transform.TX16x16, plane, bx, by, tile.DCPred, false, coeff)
+}
+
 // EncodeInterDCT4 writes an inter chroma TX4x4 DCT_DCT coefficient block.
 func EncodeInterDCT4(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx, fs *tile.FrameState,
 	plane, bx, by int, coeff []int32,

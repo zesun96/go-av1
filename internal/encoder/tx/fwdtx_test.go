@@ -53,6 +53,31 @@ func TestFwdDCT16x16MatchesInverseScale(t *testing.T) {
 	assertResidualClose(t, dst, src[:], 3)
 }
 
+func TestFwdDCT32x32MatchesInverseScale(t *testing.T) {
+	const size = 32
+	src := make([]int16, size*size)
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			src[y*size+x] = int16((x-15)*2 + y - 15)
+		}
+	}
+	rowMajor := make([]int32, size*size)
+	encodertx.FwdDCT32x32(rowMajor, src, size)
+	coeff := make([]int32, size*size)
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			coeff[x*size+y] = rowMajor[y*size+x]
+		}
+	}
+	dst := make([]byte, size*size)
+	for i := range dst {
+		dst[i] = 128
+	}
+	transform.InvTxfmAdd(dst, size, coeff, size*size-1,
+		transform.TX32x32, 2, transform.DCT_DCT, 8)
+	assertResidualClose(t, dst, src, 4)
+}
+
 func TestFwdDCT4x4MatchesInverseScale(t *testing.T) {
 	var src [16]int16
 	for y := 0; y < 4; y++ {

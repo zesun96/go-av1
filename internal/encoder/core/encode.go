@@ -252,9 +252,9 @@ func (fe *FrameEncoder) encodePartition(ec *bitwriter.MSACEncoder, ctx *tile.Til
 	}
 
 	if bl < tile.BL8X8 {
-		if bl == tile.BL16X16 && size == 16 &&
+		if (bl == tile.BL16X16 || bl == tile.BL32X32) &&
 			((inter && fe.shouldUseLargeInterBlock(st, bx, by, size)) ||
-				(!inter && bx+size <= fe.Width && by+size <= fe.Height &&
+				(!inter && size == 16 && bx+size <= fe.Width && by+size <= fe.Height &&
 					fe.shouldUseLargeIntraBlock(st, bx, by, size))) {
 			ec.SymbolAdaptDav1d(tile.PartitionNone, cdf, n-1)
 			fe.encodeLeaf(ec, ctx, fs, st, bx, by, size, size, inter)
@@ -347,7 +347,7 @@ func (fe *FrameEncoder) encodeBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx
 func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.TileCtx,
 	fs *tile.FrameState, st *tileEncodeState, bx, by, bw, bh int,
 ) {
-	largeBlock := bw == 16 && bh == 16
+	largeBlock := bw == bh && (bw == 16 || bw == 32)
 	coded := bw == 8 && bh == 8 || largeBlock
 	mv := me.MV{}
 	mv2 := me.MV{}
@@ -545,9 +545,12 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 
 	maxTx := uint8(transform.TX8x8)
 	uvtx := uint8(transform.TX4x4)
-	if largeBlock {
+	if bw == 16 {
 		maxTx = transform.TX16x16
 		uvtx = transform.TX8x8
+	} else if bw == 32 {
+		maxTx = transform.TX32x32
+		uvtx = transform.TX16x16
 	}
 	fs.SetTxCtx(bx, by, bw, bh, maxTx, false, skip)
 	fs.SetInterTxIntraCtx(bx, by, bw, bh)
@@ -599,6 +602,9 @@ func (fe *FrameEncoder) refineInterCandidate(st *tileEncodeState, refs [3][]byte
 	bx, by, size int, seed me.MV, baseSyntaxBits float64,
 ) (me.MV, []*interPlaneEncode, float64) {
 	offsets := []int{-4, -3, -2, -1, 0, 1, 2, 3, 4}
+	if size == 32 {
+		offsets = []int{-2, -1, 0, 1, 2}
+	}
 	if fe.IntegerMEOnly {
 		offsets = []int{0}
 	}
@@ -608,6 +614,8 @@ func (fe *FrameEncoder) refineInterCandidate(st *tileEncodeState, refs [3][]byte
 	yTx, uvTx := uint8(transform.TX8x8), uint8(transform.TX4x4)
 	if size == 16 {
 		yTx, uvTx = transform.TX16x16, transform.TX8x8
+	} else if size == 32 {
+		yTx, uvTx = transform.TX32x32, transform.TX16x16
 	}
 	for _, dy := range offsets {
 		for _, dx := range offsets {
@@ -768,7 +776,7 @@ func (fe *FrameEncoder) analyzeSkipInterPlane(st *tileEncodeState,
 }
 
 func (fe *FrameEncoder) shouldUseLargeInterBlock(st *tileEncodeState, bx, by, size int) bool {
-	if size != 16 || bx+size > fe.Width || by+size > fe.Height {
+	if (size != 16 && size != 32) || bx+size > fe.Width || by+size > fe.Height {
 		return false
 	}
 	searchRange := fe.SearchRange
@@ -823,24 +831,24 @@ func (fe *FrameEncoder) shouldUseLargeInterBlock(st *tileEncodeState, bx, by, si
 	if math.IsInf(sharedCost, 1) {
 		return false
 	}
-
+	splitSize := size / 2
 	splitCost := 0.0
-	for subY := by; subY < by+size; subY += 8 {
-		for subX := bx; subX < bx+size; subX += 8 {
+	for subY := by; subY < by+size; subY += splitSize {
+		for subX := bx; subX < bx+size; subX += splitSize {
 			bestSubCost := math.Inf(1)
 			for _, order := range referenceOrders {
 				slot := int(fe.refIdx[order])
 				subCfg := baseConfig
 				subCfg.Reference = fe.refs[slot][0]
 				subCfg.X, subCfg.Y = subX, subY
-				subCfg.BlockWidth, subCfg.BlockHeight = 8, 8
+				subCfg.BlockWidth, subCfg.BlockHeight = splitSize, splitSize
 				subResult, err := search(subCfg)
 				if err != nil {
 					continue
 				}
 				refs := fe.refs[slot]
 				_, _, cost := fe.refineInterCandidate(
-					st, refs, subX, subY, 8, subResult.MV, 4)
+					st, refs, subX, subY, splitSize, subResult.MV, 4)
 				if cost < bestSubCost {
 					bestSubCost = cost
 				}
@@ -851,7 +859,11 @@ func (fe *FrameEncoder) shouldUseLargeInterBlock(st *tileEncodeState, bx, by, si
 			splitCost += bestSubCost
 		}
 	}
-	if sharedCost >= splitCost {
+	threshold := 1.0
+	if size == 32 && !interPlanesAllZero(bestShared.planes) {
+		threshold = 0.70
+	}
+	if sharedCost >= splitCost*threshold {
 		return false
 	}
 	st.large[[2]int{bx, by}] = bestShared
@@ -935,6 +947,8 @@ func (fe *FrameEncoder) analyzeInterPlanePrediction(st *tileEncodeState,
 	}
 	coeff := make([]int32, size*size)
 	switch size {
+	case 32:
+		encodertx.FwdDCT32x32(coeff, residual, size)
 	case 16:
 		encodertx.FwdDCT16x16(coeff, residual, size)
 	case 8:
@@ -942,7 +956,7 @@ func (fe *FrameEncoder) analyzeInterPlanePrediction(st *tileEncodeState,
 	default:
 		encodertx.FwdDCT4x4(coeff, residual, size)
 	}
-	encodertx.Quantize(coeff, fe.QIndex, fe.BitDepth)
+	encodertx.QuantizeTx(coeff, fe.QIndex, fe.BitDepth, tx)
 	return &interPlaneEncode{
 		plane: plane, bx: bx, by: by, size: size, tx: tx,
 		pred: pred, coeff: coeff,
@@ -996,13 +1010,17 @@ func (fe *FrameEncoder) encodeInterPlane(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 	fs *tile.FrameState, st *tileEncodeState, plane *interPlaneEncode,
 ) {
 	if plane.plane == 0 {
-		if plane.tx == transform.TX16x16 {
+		if plane.tx == transform.TX32x32 {
+			entropy.EncodeInterDCT32(ec, ctx, fs, plane.bx, plane.by, plane.coeff)
+		} else if plane.tx == transform.TX16x16 {
 			entropy.EncodeInterDCT16(ec, ctx, fs, plane.bx, plane.by, plane.coeff)
 		} else {
 			entropy.EncodeInterDCT8(ec, ctx, fs, plane.bx, plane.by, plane.coeff)
 		}
 	} else {
-		if plane.tx == transform.TX8x8 {
+		if plane.tx == transform.TX16x16 {
+			entropy.EncodeInterDCT16Plane(ec, ctx, fs, plane.plane, plane.bx, plane.by, plane.coeff)
+		} else if plane.tx == transform.TX8x8 {
 			entropy.EncodeInterDCT8Plane(ec, ctx, fs, plane.plane, plane.bx, plane.by, plane.coeff)
 		} else {
 			entropy.EncodeInterDCT4(ec, ctx, fs, plane.plane, plane.bx, plane.by, plane.coeff)
@@ -1059,7 +1077,7 @@ func (fe *FrameEncoder) encodePlaneDC(ec *bitwriter.MSACEncoder, ctx *tile.TileC
 		default:
 			encodertx.FwdDCT4x4(coeff, residual, size)
 		}
-		encodertx.Quantize(coeff, fe.QIndex, fe.BitDepth)
+		encodertx.QuantizeTx(coeff, fe.QIndex, fe.BitDepth, tx)
 		if plane == 0 {
 			if tx == transform.TX16x16 {
 				entropy.EncodeDCT16(ec, ctx, fs, bx, by, mode, coeff)
@@ -1111,7 +1129,7 @@ func reconstructDCTPixels(pred []byte, qcoeff []int32, size int,
 	tx uint8, qindex, hbd int,
 ) []byte {
 	coeff := append([]int32(nil), qcoeff...)
-	encodertx.Dequantize(coeff, qindex, hbd)
+	encodertx.DequantizeTx(coeff, qindex, hbd, tx)
 	packed := make([]int32, size*size)
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
@@ -1122,7 +1140,7 @@ func reconstructDCTPixels(pred []byte, qcoeff []int32, size int,
 	shift := 0
 	if tx == transform.TX8x8 {
 		shift = 1
-	} else if tx == transform.TX16x16 {
+	} else if tx == transform.TX16x16 || tx == transform.TX32x32 {
 		shift = 2
 	}
 	transform.InvTxfmAdd(block, size, packed, size*size-1, tx, shift, transform.DCT_DCT, 8)

@@ -14,11 +14,15 @@ import "github.com/zesun96/go-av1/internal/transform"
 //
 // Returns the index of the last non-zero coefficient (eob), or -1 if all zero.
 func Quantize(coeffs []int32, qindex int, hbd int) int {
+	return QuantizeTx(coeffs, qindex, hbd, transform.TX8x8)
+}
+
+// QuantizeTx applies the transform-size dequant shift used by AV1 for
+// TX32-and-larger coefficient domains.
+func QuantizeTx(coeffs []int32, qindex int, hbd int, tx uint8) int {
 	dcDequant := int(transform.DqTbl[hbd][qindex][0])
 	acDequant := int(transform.DqTbl[hbd][qindex][1])
-
-	// dqShift for TX_8X8 (ctx=2 in TxfmDimensions): max(0, 2-2) = 0
-	const dqShift = 0
+	dqShift := max(0, int(transform.TxfmDimensions[tx].Ctx)-2)
 
 	eob := -1
 	for i := range coeffs {
@@ -40,7 +44,7 @@ func Quantize(coeffs []int32, qindex int, hbd int) int {
 
 		// Forward quantization: qcoeff = (level + dq/2) / dq
 		// This is a simple round-to-nearest division.
-		qcoeff := (level + dq/2) / dq
+		qcoeff := (level*(1<<dqShift) + dq/2) / dq
 		if qcoeff > 0 {
 			coeffs[i] = sign * int32(qcoeff)
 			eob = i
@@ -54,10 +58,14 @@ func Quantize(coeffs []int32, qindex int, hbd int) int {
 // Dequantize applies inverse quantization (for reconstruction loop).
 // This reconstructs the approximate coefficients from quantized levels.
 func Dequantize(coeffs []int32, qindex int, hbd int) {
+	DequantizeTx(coeffs, qindex, hbd, transform.TX8x8)
+}
+
+// DequantizeTx mirrors the transform-size shift in the decoder.
+func DequantizeTx(coeffs []int32, qindex int, hbd int, tx uint8) {
 	dcDequant := int(transform.DqTbl[hbd][qindex][0])
 	acDequant := int(transform.DqTbl[hbd][qindex][1])
-
-	const dqShift = 0
+	dqShift := max(0, int(transform.TxfmDimensions[tx].Ctx)-2)
 
 	for i := range coeffs {
 		if coeffs[i] == 0 {
