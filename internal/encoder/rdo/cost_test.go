@@ -19,3 +19,10 @@ func TestCostPenalizesCoefficientRate(t *testing.T) {
 		t.Fatalf("dense cost=%f zero cost=%f", dense, zero)
 	}
 }
+
+func TestAllZeroCoeffRateDoesNotScaleWithTransformArea(t *testing.T) {
+	if small, large := EstimateCoeffBits(make([]int32, 16)),
+		EstimateCoeffBits(make([]int32, 1024)); small != large {
+		t.Fatalf("all-zero TX4 cost=%f TX32 cost=%f", small, large)
+	}
+}

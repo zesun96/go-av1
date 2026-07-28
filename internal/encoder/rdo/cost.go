@@ -13,19 +13,30 @@ func Lambda(qindex, bitDepth int) float64 {
 	qindex = clamp(qindex, 1, 255)
 	bitDepth = clamp(bitDepth, 0, len(transform.DqTbl)-1)
 	qstep := float64(transform.DqTbl[bitDepth][qindex][1])
-	return 0.85 * qstep * qstep / 256
+	return 0.20 * qstep * qstep / 256
 }
 
 // EstimateCoeffBits estimates entropy cost from quantized coefficient levels.
 func EstimateCoeffBits(coeff []int32) float64 {
-	bits := 0.0
-	for _, level := range coeff {
+	last := -1
+	for i, level := range coeff {
+		if level != 0 {
+			last = i
+		}
+	}
+	// A transform with no non-zero coefficients signals only txb_skip;
+	// trailing positions after EOB are never entropy coded.
+	if last < 0 {
+		return 1
+	}
+	bits := 1.0 + math.Log2(float64(last)+2)
+	for _, level := range coeff[:last+1] {
 		if level == 0 {
-			bits += 0.04
+			bits += 0.15
 			continue
 		}
 		mag := math.Abs(float64(level))
-		bits += 2.0 + math.Log2(mag+1)
+		bits += 1.5 + math.Log2(mag+1)
 	}
 	return bits
 }
