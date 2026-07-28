@@ -601,13 +601,6 @@ func (fe *FrameEncoder) encodeInterBlock(ec *bitwriter.MSACEncoder, ctx *tile.Ti
 func (fe *FrameEncoder) refineInterCandidate(st *tileEncodeState, refs [3][]byte,
 	bx, by, size int, seed me.MV, baseSyntaxBits float64,
 ) (me.MV, []*interPlaneEncode, float64) {
-	offsets := []int{-4, -3, -2, -1, 0, 1, 2, 3, 4}
-	if size == 32 {
-		offsets = []int{-2, -1, 0, 1, 2}
-	}
-	if fe.IntegerMEOnly {
-		offsets = []int{0}
-	}
 	bestMV := seed
 	var bestPlanes []*interPlaneEncode
 	bestCost := math.Inf(1)
@@ -617,25 +610,45 @@ func (fe *FrameEncoder) refineInterCandidate(st *tileEncodeState, refs [3][]byte
 	} else if size == 32 {
 		yTx, uvTx = transform.TX32x32, transform.TX16x16
 	}
-	for _, dy := range offsets {
-		for _, dx := range offsets {
-			mv := me.MV{X: seed.X + dx, Y: seed.Y + dy}
-			planes := []*interPlaneEncode{
-				fe.analyzeInterPlaneFrom(st, refs, 0, bx, by, size,
-					yTx, mv.X, mv.Y),
+	evaluate := func(mv me.MV) {
+		planes := []*interPlaneEncode{
+			fe.analyzeInterPlaneFrom(st, refs, 0, bx, by, size,
+				yTx, mv.X, mv.Y),
+		}
+		if blockHasChroma(bx, by, size, size) {
+			planes = append(planes,
+				fe.analyzeInterPlaneFrom(st, refs, 1, bx/2, by/2, size/2,
+					uvTx, mv.X, mv.Y),
+				fe.analyzeInterPlaneFrom(st, refs, 2, bx/2, by/2, size/2,
+					uvTx, mv.X, mv.Y))
+		}
+		cost := interPlanesRDOCost(st, planes,
+			baseSyntaxBits+motionSyntaxBits(mv), fe.QIndex, fe.BitDepth)
+		if cost < bestCost {
+			bestMV, bestPlanes, bestCost = mv, planes, cost
+		}
+	}
+	if fe.IntegerMEOnly {
+		evaluate(seed)
+		return bestMV, bestPlanes, bestCost
+	}
+	if size == 32 {
+		for dy := -2; dy <= 2; dy++ {
+			for dx := -2; dx <= 2; dx++ {
+				evaluate(me.MV{X: seed.X + dx, Y: seed.Y + dy})
 			}
-			if blockHasChroma(bx, by, size, size) {
-				planes = append(planes,
-					fe.analyzeInterPlaneFrom(st, refs, 1, bx/2, by/2, size/2,
-						uvTx, mv.X, mv.Y),
-					fe.analyzeInterPlaneFrom(st, refs, 2, bx/2, by/2, size/2,
-						uvTx, mv.X, mv.Y))
-			}
-			cost := interPlanesRDOCost(st, planes,
-				baseSyntaxBits+motionSyntaxBits(mv), fe.QIndex, fe.BitDepth)
-			if cost < bestCost {
-				bestMV, bestPlanes, bestCost = mv, planes, cost
-			}
+		}
+		return bestMV, bestPlanes, bestCost
+	}
+	for dy := -28; dy <= 28; dy += 4 {
+		for dx := -28; dx <= 28; dx += 4 {
+			evaluate(me.MV{X: seed.X + dx, Y: seed.Y + dy})
+		}
+	}
+	coarseBest := bestMV
+	for dy := -3; dy <= 3; dy++ {
+		for dx := -3; dx <= 3; dx++ {
+			evaluate(me.MV{X: coarseBest.X + dx, Y: coarseBest.Y + dy})
 		}
 	}
 	return bestMV, bestPlanes, bestCost
