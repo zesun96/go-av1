@@ -7,7 +7,7 @@ Each subdirectory is a standalone `main` package.
 |---|---|---|
 | [`go-av1d`](go-av1d/) | `go-av1d` | Active |
 | [`av1-benchcmp`](av1-benchcmp/) | `av1-benchcmp` | Developer tool |
-| [`go-av1enc`](go-av1enc/) | `go-av1enc` | Planned |
+| [`go-av1enc`](go-av1enc/) | `go-av1enc` | Active |
 | [`webrtc-av1d`](webrtc-av1d/) | `webrtc-av1d` | Active |
 
 ---
@@ -77,9 +77,8 @@ baseline and complete Windows reproduction steps.
 
 AV1 file encoder. Reads Y4M input and writes an IVF bitstream.
 
-> **Status:** encoder milestone is not yet reached — the binary currently
-> prints the version banner and exits with an error. Flags are defined
-> and stable; implementation will be filled in on milestone completion.
+> **Status:** experimental 8-bit 4:2:0 encoder with intra/inter prediction,
+> frame-level rate control, and SVT-style speed presets.
 
 ### Install
 
@@ -97,7 +96,7 @@ go-av1enc -i <input.y4m> -o <output.ivf> [-preset <0-13>] [-crf <n>]
 |---|---|---|
 | `-i` | *(required)* | Input Y4M file |
 | `-o` | *(required)* | Output IVF file |
-| `-preset` | `8` | Encoder speed preset (0 = slowest, 13 = fastest) |
+| `-preset` | `12` | Encoder speed preset (0 = slowest, 13 = fastest) |
 | `-crf` | `30` | Constant rate factor (quality) |
 
 ---
