@@ -113,6 +113,7 @@ was:
 | SSE4.1 primary-only CDEF | 1.713s | 70.04 | 0.657 GB | 0.628 million |
 | SSE4.1 combined CDEF | 1.553s | 77.28 | 0.656 GB | 0.628 million |
 | Complete 4/8-wide SSE4.1 CDEF | 1.470s | 81.63 | 0.656 GB | 0.628 million |
+| SSE4.1 two-pass 8-tap inter prediction | 1.397s | 85.91 | 0.641 GB | 0.627 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -228,6 +229,20 @@ In a stable same-session comparison, the decoder median fell 5.1 percent from
 The matching dav1d median was 0.353 seconds, for a 4.17x wall-time ratio.
 Relative to the original 10.522-second baseline, median wall time is down
 approximately 86.0 percent.
+
+The first inter-prediction SIMD slice accelerates the common two-dimensional
+8-tap path for widths divisible by eight. Its SSSE3/SSE4.1 horizontal pass
+uses pairwise byte/coefficient multiply-adds to produce the Q4 intermediate,
+and its vertical pass accumulates in 32-bit lanes before normative rounding
+and clipping. Four-pixel blocks, single-axis filtering, unsupported CPUs, and
+`purego` builds retain the scalar implementation. The optimized path passed
+60,750 randomized scalar/SIMD comparisons across block sizes, all nine 8-tap
+filter combinations, and every nonzero horizontal and vertical subpixel
+phase. A same-session end-to-end comparison reduced the decoder median from
+1.526 to 1.397 seconds (8.5 percent) and increased throughput from 78.66 to
+85.91 packets/s. CPU profiling reduced `Put8Tap` cumulative time from about
+14.8 to 4.3 percent. Relative to the original baseline, median wall time is
+down approximately 86.7 percent.
 
 ## Measurement Rules
 

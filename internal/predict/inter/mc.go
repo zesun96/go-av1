@@ -121,6 +121,11 @@ func Put8Tap(dst []uint8, dstStride int,
 		tmpH := h + 7 // 3 extra rows above + 4 below for the V tap range
 		midStride := 128
 		mid, scratch := getMCScratch(midStride * tmpH)
+		if put8TapHV8SIMD(dst, dstStride, src, srcBase, srcStride,
+			mid, w, h, fh, fv) {
+			putMCScratch(scratch)
+			return
+		}
 
 		// H pass: start 3 rows above the block.
 		rowBase := srcBase - 3*srcStride
