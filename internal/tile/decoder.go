@@ -7447,7 +7447,7 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 	bx, by, bw, bh int,
 	mv refmvs.MV, modeH, modeV header.FilterMode, ssHor, ssVer int,
 ) {
-	if len(dst) == 0 || len(src) == 0 || bw <= 0 || bh <= 0 {
+	if len(dst) == 0 || len(src) == 0 || srcW <= 0 || srcH <= 0 || bw <= 0 || bh <= 0 {
 		return
 	}
 	if bx < 0 || by < 0 || bx >= dstW || by >= dstH {
@@ -7479,11 +7479,30 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 		pad = pad[:padLen]
 	}
 	defer interPredictPadPool.Put(pad[:0])
+
+	sourceX0 := sx - 3
+	leftEnd := clampInt(-sourceX0, 0, padStride)
+	validSrcStart := sourceX0 + leftEnd
+	validCount := 0
+	if leftEnd < padStride && validSrcStart < srcW {
+		validCount = minInt(padStride-leftEnd, srcW-validSrcStart)
+	}
+	rightStart := leftEnd + validCount
 	for y := 0; y < padH; y++ {
 		srcY := clampInt(sy-3+y, 0, srcH-1)
-		for x := 0; x < padStride; x++ {
-			srcX := clampInt(sx-3+x, 0, srcW-1)
-			pad[y*padStride+x] = src[srcY*srcStride+srcX]
+		srcRow := srcY * srcStride
+		padRow := y * padStride
+		left := src[srcRow]
+		for x := 0; x < leftEnd; x++ {
+			pad[padRow+x] = left
+		}
+		if validCount > 0 {
+			copy(pad[padRow+leftEnd:padRow+rightStart],
+				src[srcRow+validSrcStart:srcRow+validSrcStart+validCount])
+		}
+		right := src[srcRow+srcW-1]
+		for x := rightStart; x < padStride; x++ {
+			pad[padRow+x] = right
 		}
 	}
 	dstOff := by*dstStride + bx

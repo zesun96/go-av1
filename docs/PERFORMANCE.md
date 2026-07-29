@@ -106,6 +106,7 @@ was:
 | Compact transform boundaries and adaptive 16-bit block grids | 2.655s | 45.19 | 1.188 GB | 2.296 million |
 | Pooled frame and temporary tile state | 2.664s | 45.04 | 0.679 GB | 2.237 million |
 | Optimized scalar CDEF | 2.201s | 54.53 | 0.683 GB | 2.237 million |
+| Row-wise inter-prediction padding | 1.891s | 63.47 | 0.678 GB | 2.237 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -148,6 +149,16 @@ fell 17.4 percent from 2.664 to 2.201 seconds while allocation remained
 effectively unchanged. Relative to the original baseline, median wall time is
 down 79.1 percent. The contemporaneous clang dav1d median was 0.372 seconds,
 for a 5.92x ratio.
+
+Inter-prediction edge extension now computes the horizontal clipped interval
+once per prediction block. Each padded row copies its in-frame span in one
+operation and fills only the left and right replicated edges, replacing a
+clamp and indexed source load for every padded pixel. In a same-session
+seven-run comparison, median wall time fell 14.8 percent from 2.220 to 1.891
+seconds, while throughput rose from 54.04 to 63.47 packets/s. Allocation
+remained effectively flat at 678 MB. The contemporaneous clang dav1d median
+was 0.377 seconds, for a 5.02x ratio. Relative to the original 10.522-second
+baseline, median wall time is down 82.0 percent.
 
 ## Measurement Rules
 
