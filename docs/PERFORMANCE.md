@@ -108,6 +108,7 @@ was:
 | Optimized scalar CDEF | 2.201s | 54.53 | 0.683 GB | 2.237 million |
 | Row-wise inter-prediction padding | 1.891s | 63.47 | 0.678 GB | 2.237 million |
 | Direct CDEF output | 1.767s | 67.91 | 0.679 GB | 2.237 million |
+| Allocation-free CDEF edges and inter padding | 1.792s | 66.95 | 0.655 GB | 0.628 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -169,6 +170,18 @@ reads neighboring pixels from the source snapshot. Removing them reduced the
 seven-run median another 6.6 percent, from 1.891 to 1.767 seconds, and raised
 throughput to 67.91 packets/s. Allocation counters remained effectively flat.
 Relative to the original baseline, median wall time is down 83.2 percent.
+
+The next allocation-focused slice replaces per-CDEF-block dynamic left-edge
+buffers with fixed local storage, omits unused top and bottom edge buffers,
+and computes each luma CDEF block's non-skip state once for reuse by all three
+planes. The inter-prediction padding pool now stores stable buffer pointers
+instead of boxing byte slices on every prediction. In a same-session
+comparison against the preceding committed binary, median wall time fell 1.3
+percent from 1.816 to 1.792 seconds. Cumulative allocation fell from about 679
+MB to 655 MB, while allocated objects fell 71.9 percent from 2.237 million to
+0.628 million. The absolute median varied slightly from the preceding
+measurement session; the same-session comparison is the relevant throughput
+result.
 
 ## Measurement Rules
 

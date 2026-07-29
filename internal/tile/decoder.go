@@ -7472,13 +7472,15 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 	padStride := bw + 7
 	padH := bh + 7
 	padLen := padStride * padH
-	pad, _ := interPredictPadPool.Get().([]byte)
+	padBuffer := interPredictPadPool.Get().(*interPredictBuffer)
+	pad := padBuffer.samples
 	if cap(pad) < padLen {
 		pad = make([]byte, padLen)
 	} else {
 		pad = pad[:padLen]
 	}
-	defer interPredictPadPool.Put(pad[:0])
+	padBuffer.samples = pad
+	defer interPredictPadPool.Put(padBuffer)
 
 	sourceX0 := sx - 3
 	leftEnd := clampInt(-sourceX0, 0, padStride)
@@ -7535,7 +7537,15 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 	predinter.Put8Tap(dst[dstOff:], dstStride, pad, srcBase, padStride, bw, bh, mx, my, filt)
 }
 
-var interPredictPadPool sync.Pool
+type interPredictBuffer struct {
+	samples []byte
+}
+
+var interPredictPadPool = sync.Pool{
+	New: func() any {
+		return new(interPredictBuffer)
+	},
+}
 
 func copyPlaneBlock(dst []byte, dstStride, dstW, dstH int, src []byte, srcStride, srcW, srcH int, x, y, w, h int) {
 	if len(dst) == 0 || len(src) == 0 || x >= dstW || y >= dstH || x >= srcW || y >= srcH {

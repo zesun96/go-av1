@@ -61,6 +61,7 @@ type decoderImpl struct {
 	cdefSrc                    []byte
 	cdefDirs                   []uint8
 	cdefVariances              []uint
+	cdefNonSkip                []uint8
 	restorationBoundaryScratch [3][]byte
 
 	closed bool
@@ -847,17 +848,29 @@ func (d *decoderImpl) applyCDEF(pic *Picture, fhdr *header.FrameHeader) {
 func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader, fs *tile.FrameState) {
 	damping := int(fhdr.CDEF.Damping)
 	w, h := pic.codedSize()
-	dirW := w / 8
-	dirH := h / 8
+	dirW := (w + 7) / 8
+	dirH := (h + 7) / 8
 	dirLen := dirW * dirH
 	if cap(d.cdefDirs) < dirLen {
 		d.cdefDirs = make([]uint8, dirLen)
 		d.cdefVariances = make([]uint, dirLen)
+		d.cdefNonSkip = make([]uint8, dirLen)
 	} else {
 		d.cdefDirs = d.cdefDirs[:dirLen]
 		d.cdefVariances = d.cdefVariances[:dirLen]
+		d.cdefNonSkip = d.cdefNonSkip[:dirLen]
 		clear(d.cdefDirs)
 		clear(d.cdefVariances)
+		clear(d.cdefNonSkip)
+	}
+	if fs != nil {
+		for by := 0; by < h; by += 8 {
+			for bx := 0; bx < w; bx += 8 {
+				if cdefBlockHasNonSkip(fs, bx, by, 8, 8, 0) {
+					d.cdefNonSkip[(by/8)*dirW+bx/8] = 1
+				}
+			}
+		}
 	}
 	maxPlaneLen := len(pic.Y)
 	if cap(d.cdefSrc) < maxPlaneLen {
@@ -866,16 +879,16 @@ func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader,
 		d.cdefSrc = d.cdefSrc[:maxPlaneLen]
 	}
 
-	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc)
+	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, d.cdefNonSkip, dirW, d.cdefSrc)
 	if pic.Chroma != ChromaMonochrome && len(pic.U) > 0 {
 		cw, ch := pic.codedChromaSize()
-		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc)
-		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc)
+		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, d.cdefNonSkip, dirW, d.cdefSrc)
+		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, d.cdefNonSkip, dirW, d.cdefSrc)
 	}
 }
 
 // applyCDEFPlane applies CDEF block-by-block to one plane.
-func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, dirStride int, src []byte) {
+func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, nonSkip []uint8, dirStride int, src []byte) {
 	if len(plane) == 0 {
 		return
 	}
@@ -883,8 +896,8 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 	copy(src, plane)
 	for by := 0; by < h; by += blockSz {
 		for bx := 0; bx < w; bx += blockSz {
-			hasNonSkip := cdefBlockHasNonSkip(fs, bx, by, blockSz, blockSz, planeID)
-			if fs != nil && !hasNonSkip {
+			dirIdx := (by/blockSz)*dirStride + bx/blockSz
+			if fs != nil && (dirIdx < 0 || dirIdx >= len(nonSkip) || nonSkip[dirIdx] == 0) {
 				continue
 			}
 			preset := 0
@@ -939,7 +952,8 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			}
 
 			// Build left [][2]uint8 (left 2 pixels, h rows).
-			left := make([][2]uint8, bh)
+			var leftBuf [8][2]uint8
+			left := leftBuf[:bh]
 			if bx >= 2 {
 				for row := 0; row < bh; row++ {
 					y := by + row
@@ -956,8 +970,6 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			if by > 0 {
 				top = src[(by-2)*stride:]
 				topBase = bx
-			} else {
-				top = make([]byte, bw)
 			}
 
 			// Bottom row.
@@ -966,12 +978,9 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			if by+bh < h {
 				bottom = src[(by+bh)*stride:]
 				bottomBase = bx
-			} else {
-				bottom = make([]byte, bw)
 			}
 
 			// Find direction.
-			dirIdx := (by/blockSz)*dirStride + bx/blockSz
 			dir := 0
 			if planeID == 0 {
 				rawPriStrength := priStrength
