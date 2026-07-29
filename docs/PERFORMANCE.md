@@ -90,6 +90,39 @@ about 94 percent. The scalar throughput gate of 30 packets/s is now met on
 this input, but the allocation target remains unmet. Frame-state ownership and
 remaining block/prediction temporaries are continuing work.
 
+On 2026-07-29, the durable block grid was changed from a complete
+`Av1Block` value per 4x4 cell to a 32-bit one-based index into per-block
+metadata. CDEF, restoration-boundary, and inter-prediction scratch storage is
+now reused, and the loop-filter trace environment switch is cached when the
+decoder is constructed.
+
+Using the same WebRTC input and measurement rules, the new seven-run result
+was:
+
+| Decoder state | Median | Packets/s | Allocation | Objects |
+|---|---:|---:|---:|---:|
+| Trace-guard baseline | 3.914s | 30.66 | 9.723 GB | 3.265 million |
+| Indexed metadata and reused filter/prediction scratch | 2.803s | 42.81 | 1.852 GB | 2.298 million |
+
+This is a further 28.4 percent wall-time reduction and an 81.0 percent
+allocation-volume reduction. Relative to the original 10.522-second baseline,
+median wall time is down 73.4 percent. A contemporaneous local clang dav1d
+build measured 0.373 seconds, making this go-av1 build 7.51 times its wall
+time; this ratio is not directly comparable with the GCC dav1d baseline above.
+
+The final allocation counter reported:
+
+```text
+total_alloc_bytes=1852014968
+mallocs=2298338
+bytes_per_frame=15433458
+mallocs_per_frame=19152
+```
+
+The complete local AOM differential run remained at 197 passed, zero failed,
+and 66 unsupported high-bit-depth vectors. All 120 selected dynamic WebRTC
+frames remained byte-exact against dav1d.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

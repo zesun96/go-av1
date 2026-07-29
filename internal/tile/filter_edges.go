@@ -27,9 +27,10 @@ func (fs *FrameState) LumaFilterEdge(x4, y4 int, vertical bool) (int, bool) {
 	if fs.TxGrid[a] == 0xff || fs.TxGrid[b] == 0xff {
 		return 0, false
 	}
-	blockEdge := fs.BlockGrid[a].X4 != fs.BlockGrid[b].X4 || fs.BlockGrid[a].Y4 != fs.BlockGrid[b].Y4
+	blockA, blockB := fs.blockStateAtGrid(a), fs.blockStateAtGrid(b)
+	blockEdge := blockA.X4 != blockB.X4 || blockA.Y4 != blockB.Y4
 	txEdge := fs.TxOriginX4[a] != fs.TxOriginX4[b] || fs.TxOriginY4[a] != fs.TxOriginY4[b]
-	if !blockEdge && (!txEdge || (!fs.BlockGrid[a].Intra && fs.BlockGrid[a].Skip)) {
+	if !blockEdge && (!txEdge || (!blockA.Intra && blockA.Skip)) {
 		return 0, false
 	}
 	da := transform.TxfmDimensions[fs.TxGrid[a]]
@@ -48,7 +49,7 @@ func (fs *FrameState) LumaFilterLevel(fhdr *header.FrameHeader, x4, y4 int, vert
 	if fs == nil || fhdr == nil || x4 < 0 || y4 < 0 || x4 >= fs.W4 || y4 >= fs.H4 {
 		return 0
 	}
-	blk := fs.BlockGrid[y4*fs.W4+x4]
+	blk := fs.blockStateAtGrid(y4*fs.W4 + x4)
 	dir := 0
 	if !vertical {
 		dir = 1
@@ -95,7 +96,7 @@ func (fs *FrameState) ChromaFilterEdge(x4, y4 int, vertical bool) (int, bool) {
 		return 0, false
 	}
 	blockAt := func(cx4, cy4 int) Av1Block {
-		return fs.ChromaBlockGrid[cy4*fs.CW4+cx4]
+		return fs.chromaBlockStateAtGrid(cy4*fs.CW4 + cx4)
 	}
 	a := blockAt(x4, y4)
 	b := Av1Block{}
@@ -144,7 +145,7 @@ func (fs *FrameState) ChromaFilterLevel(fhdr *header.FrameHeader, x4, y4, plane 
 	if fs == nil || fhdr == nil || x4 < 0 || y4 < 0 || x4 >= fs.CW4 || y4 >= fs.CH4 {
 		return 0
 	}
-	blk := fs.ChromaBlockGrid[y4*fs.CW4+x4]
+	blk := fs.chromaBlockStateAtGrid(y4*fs.CW4 + x4)
 	base, deltaIdx := int(fhdr.LoopFilter.LevelU), 2
 	if plane == 2 {
 		base, deltaIdx = int(fhdr.LoopFilter.LevelV), 3

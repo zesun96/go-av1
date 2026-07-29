@@ -39,7 +39,8 @@ type decoderImpl struct {
 	opts DecoderOptions
 
 	// logf is the logging function derived from opts.Logger (never nil).
-	logf func(string, ...any)
+	logf            func(string, ...any)
+	traceLoopFilter bool
 
 	// seq is the most-recently parsed SequenceHeader.
 	seq *header.SequenceHeader
@@ -57,6 +58,12 @@ type decoderImpl struct {
 	pendingCDF     *tile.TileCtx
 	pendingFhdrRaw []byte // raw payload bytes of the pending frame header
 
+	cdefSrc                    []byte
+	cdefWork                   []byte
+	cdefDirs                   []uint8
+	cdefVariances              []uint
+	restorationBoundaryScratch [3][]byte
+
 	closed bool
 }
 
@@ -66,7 +73,11 @@ func newDecoderImpl(opts DecoderOptions) (Decoder, error) {
 	if opts.Logger != nil {
 		logf = opts.Logger.Logf
 	}
-	return &decoderImpl{opts: opts, logf: logf}, nil
+	return &decoderImpl{
+		opts:            opts,
+		logf:            logf,
+		traceLoopFilter: os.Getenv("GOAV1_TRACE_LF") != "",
+	}, nil
 }
 
 // ─── Decoder interface ────────────────────────────────────────────────────────
@@ -526,9 +537,15 @@ func (d *decoderImpl) postFilter(pic *Picture, fhdr *header.FrameHeader, filterS
 	}
 	var restorationBoundary [3][]byte
 	if d.opts.InloopFilters&InloopFilterRestoration != 0 {
-		restorationBoundary[0] = append([]byte(nil), pic.Y...)
-		restorationBoundary[1] = append([]byte(nil), pic.U...)
-		restorationBoundary[2] = append([]byte(nil), pic.V...)
+		for plane, samples := range [][]byte{pic.Y, pic.U, pic.V} {
+			if cap(d.restorationBoundaryScratch[plane]) < len(samples) {
+				d.restorationBoundaryScratch[plane] = make([]byte, len(samples))
+			} else {
+				d.restorationBoundaryScratch[plane] = d.restorationBoundaryScratch[plane][:len(samples)]
+			}
+			copy(d.restorationBoundaryScratch[plane], samples)
+			restorationBoundary[plane] = d.restorationBoundaryScratch[plane]
+		}
 	}
 	if d.opts.InloopFilters&InloopFilterCDEF != 0 {
 		run("cdef", func() { d.applyCDEFWithState(pic, fhdr, filterState) })
@@ -665,7 +682,7 @@ func (d *decoderImpl) applyLumaLoopFilter(pic *Picture, fhdr *header.FrameHeader
 }
 
 func (d *decoderImpl) traceLoopFilterEdge(plane int, direction string, x4, y4, width, level int) {
-	if os.Getenv("GOAV1_TRACE_LF") == "" {
+	if !d.traceLoopFilter {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "lf edge plane=%d dir=%s x4=%d y4=%d width=%d level=%d\n", plane, direction, x4, y4, width, level)
@@ -826,24 +843,42 @@ func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader,
 	w, h := pic.codedSize()
 	dirW := w / 8
 	dirH := h / 8
-	dirs := make([]uint8, dirW*dirH)
-	variances := make([]uint, dirW*dirH)
+	dirLen := dirW * dirH
+	if cap(d.cdefDirs) < dirLen {
+		d.cdefDirs = make([]uint8, dirLen)
+		d.cdefVariances = make([]uint, dirLen)
+	} else {
+		d.cdefDirs = d.cdefDirs[:dirLen]
+		d.cdefVariances = d.cdefVariances[:dirLen]
+		clear(d.cdefDirs)
+		clear(d.cdefVariances)
+	}
+	maxPlaneLen := len(pic.Y)
+	if cap(d.cdefSrc) < maxPlaneLen {
+		d.cdefSrc = make([]byte, maxPlaneLen)
+		d.cdefWork = make([]byte, maxPlaneLen)
+	} else {
+		d.cdefSrc = d.cdefSrc[:maxPlaneLen]
+		d.cdefWork = d.cdefWork[:maxPlaneLen]
+	}
 
-	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, dirs, variances, dirW)
+	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc, d.cdefWork)
 	if pic.Chroma != ChromaMonochrome && len(pic.U) > 0 {
 		cw, ch := pic.codedChromaSize()
-		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, dirs, variances, dirW)
-		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, dirs, variances, dirW)
+		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc, d.cdefWork)
+		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc, d.cdefWork)
 	}
 }
 
 // applyCDEFPlane applies CDEF block-by-block to one plane.
-func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, dirStride int) {
+func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, dirStride int, src, work []byte) {
 	if len(plane) == 0 {
 		return
 	}
-	src := append([]byte(nil), plane...)
-	work := append([]byte(nil), plane...)
+	src = src[:len(plane)]
+	work = work[:len(plane)]
+	copy(src, plane)
+	copy(work, plane)
 	for by := 0; by < h; by += blockSz {
 		for bx := 0; bx < w; bx += blockSz {
 			hasNonSkip := cdefBlockHasNonSkip(fs, bx, by, blockSz, blockSz, planeID)
@@ -998,7 +1033,7 @@ func cdefBlockHasNonSkip(fs *tile.FrameState, bx, by, bw, bh, planeID int) bool 
 	x1, y1 := minInt((bx+bw+3)/4, fs.W4), minInt((by+bh+3)/4, fs.H4)
 	for y := y0; y < y1; y++ {
 		for x := x0; x < x1; x++ {
-			if !fs.BlockGrid[y*fs.W4+x].Skip {
+			if !fs.BlockIsSkipAt4(x, y) {
 				return true
 			}
 		}

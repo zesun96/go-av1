@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 
 	"github.com/zesun96/go-av1/pkg/av1"
@@ -32,6 +33,8 @@ func main() {
 	outputInvisible := flag.Bool("output-invisible", false, "also output hidden reference frames")
 	limit := flag.Int("limit", 0, "stop after decoding this many frames (0 = all)")
 	memstats := flag.Bool("memstats", false, "report decode allocation totals")
+	cpuProfile := flag.String("cpuprofile", "", "write decode-loop CPU profile")
+	memProfile := flag.String("memprofile", "", "write post-decode heap profile")
 	flag.Parse()
 
 	if *version {
@@ -124,6 +127,19 @@ func main() {
 	frameCount := 0
 	inputFrame := 0
 	outputStarted := false
+	var cpuProfileFile *os.File
+	if *cpuProfile != "" {
+		cpuProfileFile, err = os.Create(*cpuProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		if err = pprof.StartCPUProfile(cpuProfileFile); err != nil {
+			_ = cpuProfileFile.Close()
+			fmt.Fprintf(os.Stderr, "start CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	var memBefore runtime.MemStats
 	if *memstats {
 		runtime.ReadMemStats(&memBefore)
@@ -177,6 +193,10 @@ func main() {
 
 	// Flush remaining frames.
 	_ = dec.Flush()
+	if cpuProfileFile != nil {
+		pprof.StopCPUProfile()
+		_ = cpuProfileFile.Close()
+	}
 
 	fmt.Fprintf(os.Stderr, "decoded %d frames\n", frameCount)
 	if *memstats {
@@ -192,6 +212,24 @@ func main() {
 		fmt.Fprintf(os.Stderr,
 			"memstats: total_alloc_bytes=%d mallocs=%d bytes_per_frame=%d mallocs_per_frame=%d\n",
 			totalAlloc, mallocs, bytesPerFrame, mallocsPerFrame)
+	}
+	if *memProfile != "" {
+		profileFile, profileErr := os.Create(*memProfile)
+		if profileErr != nil {
+			fmt.Fprintf(os.Stderr, "create memory profile: %v\n", profileErr)
+			os.Exit(1)
+		}
+		runtime.GC()
+		profileErr = pprof.WriteHeapProfile(profileFile)
+		closeErr := profileFile.Close()
+		if profileErr != nil {
+			fmt.Fprintf(os.Stderr, "write memory profile: %v\n", profileErr)
+			os.Exit(1)
+		}
+		if closeErr != nil {
+			fmt.Fprintf(os.Stderr, "close memory profile: %v\n", closeErr)
+			os.Exit(1)
+		}
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"sync"
 
 	"github.com/zesun96/go-av1/internal/bitstream"
 	"github.com/zesun96/go-av1/internal/header"
@@ -5026,7 +5027,7 @@ func compoundNeighbour(fs *FrameState, bx, by int, above bool) (Av1Block, bool) 
 	if x4 < 0 || y4 < 0 || x4 >= fs.W4 || y4 >= fs.H4 {
 		return Av1Block{}, false
 	}
-	return fs.BlockGrid[y4*fs.W4+x4], true
+	return fs.blockStateAtGrid(y4*fs.W4 + x4), true
 }
 
 func compoundMaskContext(fs *FrameState, bx, by int) int {
@@ -6248,7 +6249,7 @@ func motionModeNeighbours(fs *FrameState, bx, by, bw, bh, refSlot int) (overlap,
 		if x4 < 0 || y4 < 0 || x4 >= fs.W4 || y4 >= fs.H4 {
 			return Av1Block{}, false
 		}
-		blk := fs.BlockGrid[y4*fs.W4+x4]
+		blk := fs.blockStateAtGrid(y4*fs.W4 + x4)
 		return blk, !blk.Intra
 	}
 	// OBMC availability samples the centre of each 8-pixel edge segment.
@@ -7141,7 +7142,7 @@ func applySub8x8ChromaState(fb *FrameBuf, seq *header.SequenceHeader, fs *FrameS
 		if x4 < 0 || y4 < 0 || x4 >= fs.W4 || y4 >= fs.H4 {
 			return Av1Block{}, false
 		}
-		blk := fs.BlockGrid[y4*fs.W4+x4]
+		blk := fs.blockStateAtGrid(y4*fs.W4 + x4)
 		return blk, !blk.Intra && int(blk.RefSlot) >= 0 && int(blk.RefSlot) < len(fb.Refs) && fb.Refs[blk.RefSlot] != nil
 	}
 	var topLeft, left, top Av1Block
@@ -7314,7 +7315,7 @@ func deriveLocalWarp(fs *FrameState, bx, by, bw, bh int, st interState) (header.
 	haveTopRight := haveTop && col4+bw4 < tileEnd4 &&
 		maxInt(bw4, bh4) < 32 && (!fs.RefMVTopRightKnown || fs.RefMVTopRightAvailable)
 	if haveTop {
-		blk := fs.BlockGrid[(row4-1)*fs.W4+col4]
+		blk := fs.blockStateAtGrid((row4-1)*fs.W4 + col4)
 		aw4 := maxInt(1, int(BlockDimensions[blk.Bs][0]))
 		if aw4 >= bw4 {
 			off := col4 & (aw4 - 1)
@@ -7327,7 +7328,7 @@ func deriveLocalWarp(fs *FrameState, bx, by, bw, bh int, st interState) (header.
 			}
 		} else {
 			for off := 0; off < scanW4 && len(points) < 8; {
-				blk = fs.BlockGrid[(row4-1)*fs.W4+col4+off]
+				blk = fs.blockStateAtGrid((row4-1)*fs.W4 + col4 + off)
 				add(off, 0, 1, -1, blk)
 				aw4 = maxInt(1, int(BlockDimensions[blk.Bs][0]))
 				off += aw4
@@ -7335,17 +7336,17 @@ func deriveLocalWarp(fs *FrameState, bx, by, bw, bh int, st interState) (header.
 		}
 	}
 	if haveLeft && len(points) < 8 {
-		blk := fs.BlockGrid[row4*fs.W4+col4-1]
+		blk := fs.blockStateAtGrid(row4*fs.W4 + col4 - 1)
 		lh4 := maxInt(1, int(BlockDimensions[blk.Bs][1]))
 		if lh4 >= bh4 {
 			off := row4 & (lh4 - 1)
-			add(0, -off, -1, 1, fs.BlockGrid[(row4-off)*fs.W4+col4-1])
+			add(0, -off, -1, 1, fs.blockStateAtGrid((row4-off)*fs.W4+col4-1))
 			if off != 0 {
 				haveTopLeft = false
 			}
 		} else {
 			for off := 0; off < scanH4 && len(points) < 8; {
-				blk = fs.BlockGrid[(row4+off)*fs.W4+col4-1]
+				blk = fs.blockStateAtGrid((row4+off)*fs.W4 + col4 - 1)
 				add(0, off, -1, 1, blk)
 				lh4 = maxInt(1, int(BlockDimensions[blk.Bs][1]))
 				off += lh4
@@ -7353,10 +7354,10 @@ func deriveLocalWarp(fs *FrameState, bx, by, bw, bh int, st interState) (header.
 		}
 	}
 	if haveTopLeft && len(points) < 8 {
-		add(0, 0, -1, -1, fs.BlockGrid[(row4-1)*fs.W4+col4-1])
+		add(0, 0, -1, -1, fs.blockStateAtGrid((row4-1)*fs.W4+col4-1))
 	}
 	if haveTopRight && len(points) < 8 {
-		add(bw4, 0, 1, -1, fs.BlockGrid[(row4-1)*fs.W4+col4+bw4])
+		add(bw4, 0, 1, -1, fs.blockStateAtGrid((row4-1)*fs.W4+col4+bw4))
 	}
 	if len(points) == 0 {
 		return header.WarpedMotionParams{}, false
@@ -7470,7 +7471,14 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 
 	padStride := bw + 7
 	padH := bh + 7
-	pad := make([]byte, padStride*padH)
+	padLen := padStride * padH
+	pad, _ := interPredictPadPool.Get().([]byte)
+	if cap(pad) < padLen {
+		pad = make([]byte, padLen)
+	} else {
+		pad = pad[:padLen]
+	}
+	defer interPredictPadPool.Put(pad[:0])
 	for y := 0; y < padH; y++ {
 		srcY := clampInt(sy-3+y, 0, srcH-1)
 		for x := 0; x < padStride; x++ {
@@ -7507,6 +7515,8 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 	}
 	predinter.Put8Tap(dst[dstOff:], dstStride, pad, srcBase, padStride, bw, bh, mx, my, filt)
 }
+
+var interPredictPadPool sync.Pool
 
 func copyPlaneBlock(dst []byte, dstStride, dstW, dstH int, src []byte, srcStride, srcW, srcH int, x, y, w, h int) {
 	if len(dst) == 0 || len(src) == 0 || x >= dstW || y >= dstH || x >= srcW || y >= srcH {

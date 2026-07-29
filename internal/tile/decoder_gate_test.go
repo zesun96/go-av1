@@ -228,8 +228,9 @@ func TestRestorationUnitYExtentUsesStripeOffset(t *testing.T) {
 func TestDeriveLocalWarpClipsBottomEdgeNeighbourScan(t *testing.T) {
 	fs := NewFrameState(352, 288)
 	fs.TileX1 = 352
+	fs.Blocks = append(fs.Blocks, Av1Block{RefFrame: 0, Bs: uint8(BS4x4)})
 	for i := range fs.BlockGrid {
-		fs.BlockGrid[i] = Av1Block{RefFrame: 0, Bs: uint8(BS4x4)}
+		fs.BlockGrid[i] = 1
 	}
 	if _, ok := deriveLocalWarp(fs, 128, 256, 128, 64, interState{refFrame: 0}); !ok {
 		t.Fatal("deriveLocalWarp found no matching edge samples")

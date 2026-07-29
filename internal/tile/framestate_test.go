@@ -105,6 +105,43 @@ func TestMergeFilterStateCopiesOnlyTileRegion(t *testing.T) {
 	}
 }
 
+func TestBlockGridSharesPerBlockMetadata(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.SetBlockState(0, 0, 16, 16, Av1Block{SegID: 3, Skip: true})
+
+	if len(fs.Blocks) != 1 {
+		t.Fatalf("metadata entries=%d want 1", len(fs.Blocks))
+	}
+	index := fs.BlockGrid[0]
+	if index == 0 {
+		t.Fatal("block grid entry is unset")
+	}
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			if got := fs.BlockGrid[y*fs.W4+x]; got != index {
+				t.Fatalf("grid[%d,%d]=%d want shared index %d", x, y, got, index)
+			}
+		}
+	}
+	if got, ok := fs.BlockState(12, 12); !ok || got.SegID != 3 || !got.Skip {
+		t.Fatalf("shared block state=%+v ok=%v", got, ok)
+	}
+}
+
+func TestMergeFilterStateRemapsChromaMetadata(t *testing.T) {
+	dst := NewFrameState(128, 64)
+	src := NewFrameState(128, 64)
+	src.TileX0, src.TileX1 = 64, 128
+	src.TileY0, src.TileY1 = 0, 64
+	src.SetChromaBlockState(64, 0, 64, 64, Av1Block{SegID: 5})
+
+	dst.MergeFilterState(src)
+	index := dst.ChromaBlockGrid[dst.CW4/2]
+	if got := dst.chromaBlockStateAtGrid(dst.CW4 / 2); index == 0 || got.SegID != 5 {
+		t.Fatalf("merged chroma index=%d metadata=%+v", index, got)
+	}
+}
+
 func TestTransformOriginsDistinguishEqualSizedLeaves(t *testing.T) {
 	fs := NewFrameState(16, 8)
 	fs.SetTxState(0, 0, 8, 8, 1)

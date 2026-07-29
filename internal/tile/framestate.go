@@ -79,13 +79,17 @@ type FrameState struct {
 	AboveSegPred []uint8
 	LeftSegPred  []uint8
 
-	AboveLCoef      []uint8
-	LeftLCoef       []uint8
-	AboveCCoef      [2][]uint8
-	LeftCCoef       [2][]uint8
-	MVFrame         *refmvs.Frame
-	BlockGrid       []Av1Block
-	ChromaBlockGrid []Av1Block
+	AboveLCoef []uint8
+	LeftLCoef  []uint8
+	AboveCCoef [2][]uint8
+	LeftCCoef  [2][]uint8
+	MVFrame    *refmvs.Frame
+	// Blocks owns block syntax once per decoded luma/chroma block. The grids
+	// store one-based indexes into Blocks so every covered 4x4 cell does not
+	// duplicate the complete Av1Block value.
+	Blocks          []Av1Block
+	BlockGrid       []uint32
+	ChromaBlockGrid []uint32
 	// TxGrid stores the luma transform leaf covering each 4x4 unit. Unset
 	// entries are 0xff so TX4x4 (zero) remains distinguishable.
 	TxGrid                 []uint8
@@ -236,8 +240,9 @@ func NewFrameState(w, h int) *FrameState {
 			filledUint8(h4, 0x40),
 			filledUint8(h4, 0x40),
 		},
-		BlockGrid:       make([]Av1Block, w4*h4),
-		ChromaBlockGrid: make([]Av1Block, ((w+7)/8)*((h+7)/8)),
+		Blocks:          make([]Av1Block, 0, minInt(w8*h8, 1024)),
+		BlockGrid:       make([]uint32, w4*h4),
+		ChromaBlockGrid: make([]uint32, ((w+7)/8)*((h+7)/8)),
 		TxGrid:          txGrid,
 		TxOriginX4:      make([]uint16, w4*h4),
 		TxOriginY4:      make([]uint16, w4*h4),
@@ -264,7 +269,7 @@ func (fs *FrameState) SetSubsampling(ssHor, ssVer uint8) {
 	fs.CH4 = (ch + 3) >> 2
 	chromaLen := fs.CW4 * fs.CH4
 	if cap(fs.ChromaBlockGrid) < chromaLen {
-		fs.ChromaBlockGrid = make([]Av1Block, chromaLen)
+		fs.ChromaBlockGrid = make([]uint32, chromaLen)
 	} else {
 		fs.ChromaBlockGrid = fs.ChromaBlockGrid[:chromaLen]
 		clear(fs.ChromaBlockGrid)
@@ -536,6 +541,8 @@ func (fs *FrameState) SetBlockSeg(bx, by, bw, bh int, skip bool, yMode int, segI
 func (fs *FrameState) SetBlockState(bx, by, bw, bh int, blk Av1Block) {
 	blk.X4 = uint16(maxInt(bx/4, 0))
 	blk.Y4 = uint16(maxInt(by/4, 0))
+	fs.Blocks = append(fs.Blocks, blk)
+	blockIndex := uint32(len(fs.Blocks))
 	col4Start := bx / 4
 	col4End := (bx + bw + 3) / 4
 	if col4End > fs.W4 {
@@ -559,7 +566,7 @@ func (fs *FrameState) SetBlockState(bx, by, bw, bh int, blk Av1Block) {
 	for r := row4Start; r < row4End; r++ {
 		base := r * fs.W4
 		for c := col4Start; c < col4End; c++ {
-			fs.BlockGrid[base+c] = blk
+			fs.BlockGrid[base+c] = blockIndex
 		}
 	}
 }
@@ -567,6 +574,8 @@ func (fs *FrameState) SetBlockState(bx, by, bw, bh int, blk Av1Block) {
 func (fs *FrameState) SetChromaBlockState(bx, by, bw, bh int, blk Av1Block) {
 	blk.X4 = uint16(maxInt(bx/4, 0))
 	blk.Y4 = uint16(maxInt(by/4, 0))
+	fs.Blocks = append(fs.Blocks, blk)
+	blockIndex := uint32(len(fs.Blocks))
 	px := bx >> fs.SsHor
 	py := by >> fs.SsVer
 	pw := (bw + (1 << fs.SsHor) - 1) >> fs.SsHor
@@ -575,7 +584,7 @@ func (fs *FrameState) SetChromaBlockState(bx, by, bw, bh int, blk Av1Block) {
 	x1, y1 := clampInt((px+pw+3)/4, 0, fs.CW4), clampInt((py+ph+3)/4, 0, fs.CH4)
 	for y := y0; y < y1; y++ {
 		for x := x0; x < x1; x++ {
-			fs.ChromaBlockGrid[y*fs.CW4+x] = blk
+			fs.ChromaBlockGrid[y*fs.CW4+x] = blockIndex
 		}
 	}
 }
@@ -606,8 +615,25 @@ func (fs *FrameState) MergeFilterState(src *FrameState) {
 	x1 := clampInt((src.TileX1+3)/4, 0, fs.W4)
 	y0 := clampInt(src.TileY0/4, 0, fs.H4)
 	y1 := clampInt((src.TileY1+3)/4, 0, fs.H4)
+	remap := make([]uint32, len(src.Blocks)+1)
+	remapBlock := func(srcIndex uint32) uint32 {
+		if srcIndex == 0 {
+			return 0
+		}
+		if dstIndex := remap[srcIndex]; dstIndex != 0 {
+			return dstIndex
+		}
+		fs.Blocks = append(fs.Blocks, src.Blocks[srcIndex-1])
+		dstIndex := uint32(len(fs.Blocks))
+		remap[srcIndex] = dstIndex
+		return dstIndex
+	}
 	for y := y0; y < y1; y++ {
-		copy(fs.BlockGrid[y*fs.W4+x0:y*fs.W4+x1], src.BlockGrid[y*src.W4+x0:y*src.W4+x1])
+		dstRow := fs.BlockGrid[y*fs.W4+x0 : y*fs.W4+x1]
+		srcRow := src.BlockGrid[y*src.W4+x0 : y*src.W4+x1]
+		for x, srcIndex := range srcRow {
+			dstRow[x] = remapBlock(srcIndex)
+		}
 		copy(fs.TxGrid[y*fs.W4+x0:y*fs.W4+x1], src.TxGrid[y*src.W4+x0:y*src.W4+x1])
 		copy(fs.TxOriginX4[y*fs.W4+x0:y*fs.W4+x1], src.TxOriginX4[y*src.W4+x0:y*src.W4+x1])
 		copy(fs.TxOriginY4[y*fs.W4+x0:y*fs.W4+x1], src.TxOriginY4[y*src.W4+x0:y*src.W4+x1])
@@ -617,7 +643,11 @@ func (fs *FrameState) MergeFilterState(src *FrameState) {
 	cy0 := clampInt((src.TileY0>>src.SsVer)/4, 0, fs.CH4)
 	cy1 := clampInt(((src.TileY1>>src.SsVer)+3)/4, 0, fs.CH4)
 	for y := cy0; y < cy1; y++ {
-		copy(fs.ChromaBlockGrid[y*fs.CW4+cx0:y*fs.CW4+cx1], src.ChromaBlockGrid[y*src.CW4+cx0:y*src.CW4+cx1])
+		dstRow := fs.ChromaBlockGrid[y*fs.CW4+cx0 : y*fs.CW4+cx1]
+		srcRow := src.ChromaBlockGrid[y*src.CW4+cx0 : y*src.CW4+cx1]
+		for x, srcIndex := range srcRow {
+			dstRow[x] = remapBlock(srcIndex)
+		}
 	}
 	for i, v := range src.CDEFIndex {
 		if v >= 0 {
@@ -628,12 +658,40 @@ func (fs *FrameState) MergeFilterState(src *FrameState) {
 }
 
 func (fs *FrameState) BlockState(bx, by int) (Av1Block, bool) {
-	col4 := bx / 4
-	row4 := by / 4
+	return fs.BlockStateAt4(bx/4, by/4)
+}
+
+// BlockStateAt4 returns block syntax at luma 4x4-grid coordinates.
+func (fs *FrameState) BlockStateAt4(col4, row4 int) (Av1Block, bool) {
 	if col4 < 0 || col4 >= fs.W4 || row4 < 0 || row4 >= fs.H4 {
 		return Av1Block{}, false
 	}
-	return fs.BlockGrid[row4*fs.W4+col4], true
+	return fs.blockStateAt(fs.BlockGrid[row4*fs.W4+col4]), true
+}
+
+// BlockIsSkipAt4 reports the skip flag without copying the complete block
+// syntax value during dense CDEF scans.
+func (fs *FrameState) BlockIsSkipAt4(col4, row4 int) bool {
+	if col4 < 0 || col4 >= fs.W4 || row4 < 0 || row4 >= fs.H4 {
+		return false
+	}
+	index := fs.BlockGrid[row4*fs.W4+col4]
+	return index != 0 && int(index) <= len(fs.Blocks) && fs.Blocks[index-1].Skip
+}
+
+func (fs *FrameState) blockStateAt(index uint32) Av1Block {
+	if index == 0 || int(index) > len(fs.Blocks) {
+		return Av1Block{}
+	}
+	return fs.Blocks[index-1]
+}
+
+func (fs *FrameState) blockStateAtGrid(index int) Av1Block {
+	return fs.blockStateAt(fs.BlockGrid[index])
+}
+
+func (fs *FrameState) chromaBlockStateAtGrid(index int) Av1Block {
+	return fs.blockStateAt(fs.ChromaBlockGrid[index])
 }
 
 func isSmoothIntraMode(mode uint8) bool {
