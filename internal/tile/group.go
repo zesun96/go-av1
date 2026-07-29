@@ -80,7 +80,7 @@ func DecodeTileGroupWithContext(
 		fb.MVFrame = refmvs.NewFrame(fb.Width, fb.Height)
 	}
 	if fb.FilterState == nil || fb.FilterState.Width != fb.Width || fb.FilterState.Height != fb.Height {
-		fb.FilterState = NewFrameState(fb.Width, fb.Height)
+		fb.FilterState = acquireFrameState(fb.Width, fb.Height)
 		fb.FilterState.SetSubsampling(seq.SsHor, seq.SsVer)
 	}
 	fb.MVFrame.OrderHint = int(fhdr.FrameOffset)
@@ -100,13 +100,24 @@ func DecodeTileGroupWithContext(
 	}
 	var updateCtx *TileCtx
 	singleTileFrame := fhdr.Tiling.Cols == 1 && fhdr.Tiling.Rows == 1
+	var tileScratch *FrameState
+	tileScratchFresh := true
+	if !singleTileFrame {
+		tileScratch = acquireFrameState(fb.Width, fb.Height)
+		defer ReleaseFrameState(tileScratch)
+	}
 	for _, td := range tiles {
 		// Tile entropy and neighbour state is independent. Full-frame indexing
 		// is retained so block coordinates remain absolute, but no above/left
 		// context may leak across a tile boundary.
 		fs := fb.FilterState
 		if !singleTileFrame {
-			fs = NewFrameState(fb.Width, fb.Height)
+			fs = tileScratch
+			if tileScratchFresh {
+				tileScratchFresh = false
+			} else {
+				fs.Reset()
+			}
 			fs.SetSubsampling(seq.SsHor, seq.SsVer)
 		}
 		if traceSymbols {

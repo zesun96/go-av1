@@ -176,6 +176,10 @@ func (d *decoderImpl) discardPending() {
 		d.pendingPic.Release()
 		d.pendingPic = nil
 	}
+	if d.pendingFB != nil {
+		tile.ReleaseFrameState(d.pendingFB.FilterState)
+		d.pendingFB.FilterState = nil
+	}
 	d.pendingFhdr = nil
 	d.pendingFB = nil
 	d.pendingCDF = nil
@@ -302,6 +306,8 @@ func (d *decoderImpl) routeOBU(o obu.OBU) error {
 				d.finishFrame(pic, &fhdr, nil, fb.MVFrame, fb.FilterState)
 				return nil
 			}
+			tile.ReleaseFrameState(fb.FilterState)
+			fb.FilterState = nil
 			pic.Release()
 			return fmt.Errorf("decode frame tile group: %w: %v", ErrInvalidBitstream, err)
 		}
@@ -346,6 +352,7 @@ func frameOBUTilePayload(payload []byte, frameHeaderBytes int) []byte {
 // Must be called with d.mu held.
 func (d *decoderImpl) finishFrame(pic *Picture, fhdr *header.FrameHeader, cdf *tile.TileCtx, mv *refmvs.Frame, filterState *tile.FrameState) {
 	d.postFilter(pic, fhdr, filterState)
+	tile.ReleaseFrameState(filterState)
 	d.updateRefs(pic, fhdr, cdf, mv)
 	if fhdr.ShowFrame != 0 || d.opts.OutputInvisible {
 		d.outQ = append(d.outQ, pic.Retain())

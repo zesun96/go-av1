@@ -150,6 +150,41 @@ func TestBlockGridPromotesWithoutLosingCompactIndexes(t *testing.T) {
 	}
 }
 
+func TestFrameStateResetRestoresSentinelsAndMetadata(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.AboveSkip[0] = 1
+	fs.AboveRef[0] = 3
+	fs.AboveTxIntra[0] = 2
+	fs.AboveLCoef[0] = 7
+	fs.CDEFIndex[0] = 4
+	fs.SetBlockState(0, 0, 8, 8, Av1Block{SegID: 5})
+	fs.SetChromaBlockState(0, 0, 8, 8, Av1Block{SegID: 6})
+	fs.SetTxState(0, 0, 8, 8, 1)
+	fs.RestorationUnits = append(fs.RestorationUnits, RestorationUnit{Plane: 1})
+	fs.Tracef = func(string, ...any) {}
+	fs.TileX1 = 32
+
+	fs.Reset()
+
+	if fs.AboveSkip[0] != 0 || fs.AboveRef[0] != -1 || fs.AboveTxIntra[0] != 0xff || fs.AboveLCoef[0] != 0x40 {
+		t.Fatalf("rolling context was not reset: skip=%d ref=%d tx=%d coef=%d",
+			fs.AboveSkip[0], fs.AboveRef[0], fs.AboveTxIntra[0], fs.AboveLCoef[0])
+	}
+	if fs.CDEFIndex[0] != -1 || len(fs.RestorationUnits) != 0 || len(fs.Blocks) != 0 {
+		t.Fatalf("durable state was not reset: cdef=%d restoration=%d blocks=%d",
+			fs.CDEFIndex[0], len(fs.RestorationUnits), len(fs.Blocks))
+	}
+	if block, _ := fs.BlockState(0, 0); block != (Av1Block{}) {
+		t.Fatalf("block grid retained metadata: %+v", block)
+	}
+	if _, _, ok := fs.txStateAtGrid(0); ok {
+		t.Fatal("transform grid entry remained set")
+	}
+	if fs.Tracef != nil || fs.TileX1 != 0 {
+		t.Fatal("diagnostic or tile state was not reset")
+	}
+}
+
 func TestMergeFilterStateRemapsChromaMetadata(t *testing.T) {
 	dst := NewFrameState(128, 64)
 	src := NewFrameState(128, 64)

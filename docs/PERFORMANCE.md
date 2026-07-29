@@ -104,6 +104,7 @@ was:
 | Trace-guard baseline | 3.914s | 30.66 | 9.723 GB | 3.265 million |
 | Indexed metadata and reused filter/prediction scratch | 2.803s | 42.81 | 1.852 GB | 2.298 million |
 | Compact transform boundaries and adaptive 16-bit block grids | 2.655s | 45.19 | 1.188 GB | 2.296 million |
+| Pooled frame and temporary tile state | 2.664s | 45.04 | 0.679 GB | 2.237 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -131,6 +132,13 @@ Block indexes now use 16 bits on ordinary frames and automatically promote to
 another 35.9 percent and median wall time by 5.3 percent from the preceding
 row. Relative to the original baseline, median wall time is down 74.8 percent.
 The contemporaneous clang dav1d median was 0.352 seconds, for a 7.54x ratio.
+
+Frame-state pooling then reused fully reset entropy, block, transform, and
+filter metadata across equal-sized frames. Multi-tile groups also reuse one
+temporary tile state after merging each tile. Allocation fell another 42.8
+percent to 679 MB, or 5.66 MB per frame. The 2.664-second median is effectively
+flat against 2.655 seconds; the contemporaneous clang dav1d median was 0.365
+seconds, for a 7.29x ratio.
 
 ## Measurement Rules
 

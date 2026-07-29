@@ -12,6 +12,8 @@
 package tile
 
 import (
+	"sync"
+
 	"github.com/zesun96/go-av1/internal/header"
 	"github.com/zesun96/go-av1/internal/refmvs"
 	"github.com/zesun96/go-av1/internal/transform"
@@ -255,6 +257,129 @@ func NewFrameState(w, h int) *FrameState {
 		W8:              w8,
 		H8:              h8,
 		W64:             w64,
+	}
+}
+
+type frameStatePoolKey struct {
+	width  int
+	height int
+}
+
+var frameStatePools sync.Map
+
+func frameStatePoolFor(w, h int) *sync.Pool {
+	key := frameStatePoolKey{width: w, height: h}
+	if value, ok := frameStatePools.Load(key); ok {
+		return value.(*sync.Pool)
+	}
+	pool := new(sync.Pool)
+	value, _ := frameStatePools.LoadOrStore(key, pool)
+	return value.(*sync.Pool)
+}
+
+// acquireFrameState returns a zeroed state for the requested dimensions.
+func acquireFrameState(w, h int) *FrameState {
+	pool := frameStatePoolFor(w, h)
+	if value := pool.Get(); value != nil {
+		fs := value.(*FrameState)
+		fs.Reset()
+		return fs
+	}
+	return NewFrameState(w, h)
+}
+
+// ReleaseFrameState makes durable decoder state available for a later frame.
+// Callers must release it only after all post-filters have consumed it.
+func ReleaseFrameState(fs *FrameState) {
+	if fs == nil {
+		return
+	}
+	fs.Tracef = nil
+	fs.MVFrame = nil
+	frameStatePoolFor(fs.Width, fs.Height).Put(fs)
+}
+
+// Reset restores constructor-equivalent state while retaining slice capacity.
+func (fs *FrameState) Reset() {
+	if fs == nil {
+		return
+	}
+	clear(fs.AboveSkip)
+	clear(fs.LeftSkip)
+	clear(fs.AboveSkipMode)
+	clear(fs.LeftSkipMode)
+	clear(fs.AboveMode)
+	clear(fs.LeftMode)
+	clear(fs.AbovePresent)
+	clear(fs.LeftPresent)
+	clear(fs.AbovePartition)
+	clear(fs.LeftPartition)
+	clear(fs.AboveTx)
+	clear(fs.LeftTx)
+	fillUint8(fs.AboveTxIntra, 0xff)
+	fillUint8(fs.LeftTxIntra, 0xff)
+	clear(fs.AbovePalY)
+	clear(fs.LeftPalY)
+	clear(fs.AbovePalUV)
+	clear(fs.LeftPalUV)
+	fillUint8(fs.AboveUVMode, DCPred)
+	fillUint8(fs.LeftUVMode, DCPred)
+	for plane := range fs.AbovePal {
+		clear(fs.AbovePal[plane])
+		clear(fs.LeftPal[plane])
+	}
+	fillInt8(fs.AboveRef, -1)
+	fillInt8(fs.LeftRef, -1)
+	clear(fs.AboveFilter)
+	clear(fs.LeftFilter)
+	clear(fs.AboveFilterV)
+	clear(fs.LeftFilterV)
+	for component := range fs.AboveMV {
+		clear(fs.AboveMV[component])
+		clear(fs.LeftMV[component])
+	}
+	fillInt8(fs.CDEFIndex, -1)
+	fs.RestorationUnits = fs.RestorationUnits[:0]
+	clear(fs.AboveSegID)
+	clear(fs.LeftSegID)
+	clear(fs.AboveSegPred)
+	clear(fs.LeftSegPred)
+	fillUint8(fs.AboveLCoef, 0x40)
+	fillUint8(fs.LeftLCoef, 0x40)
+	for plane := range fs.AboveCCoef {
+		fillUint8(fs.AboveCCoef[plane], 0x40)
+		fillUint8(fs.LeftCCoef[plane], 0x40)
+	}
+	fs.Blocks = fs.Blocks[:0]
+	clear(fs.BlockGrid)
+	clear(fs.ChromaBlockGrid)
+	fs.blockGrid32 = nil
+	fs.chromaBlockGrid32 = nil
+	fillUint8(fs.TxGrid, 0xff)
+	fs.Tracef = nil
+	fs.traceModeTrial = false
+	fs.traceRefMVTrial = false
+	fs.traceDRLTrial = false
+	fs.MVFrame = nil
+	fs.SsHor = 1
+	fs.SsVer = 1
+	fs.TileX0 = 0
+	fs.TileY0 = 0
+	fs.TileX1 = 0
+	fs.TileY1 = 0
+	fs.RefMVTopRightKnown = false
+	fs.RefMVTopRightAvailable = false
+}
+
+func fillUint8(values []uint8, value uint8) {
+	for i := range values {
+		values[i] = value
+	}
+}
+
+func fillInt8(values []int8, value int8) {
+	for i := range values {
+		values[i] = value
 	}
 }
 
