@@ -41,7 +41,7 @@ DATA ·cdefEight<>+8(SB)/8, $0x0008000800080008
 GLOBL ·cdefEight<>(SB), RODATA|NOPTR, $16
 
 // filterPrimary8SSE41 filters eight primary-only CDEF pixels per row.
-TEXT ·filterPrimary8SSE41(SB), NOSPLIT, $0-80
+TEXT ·filterPrimary8SSE41(SB), NOSPLIT, $0-88
 	MOVQ dst+0(FP), DI
 	MOVQ dstStride+8(FP), R8
 	MOVQ src+16(FP), SI
@@ -49,7 +49,7 @@ TEXT ·filterPrimary8SSE41(SB), NOSPLIT, $0-80
 	SHLQ $1, R10
 	MOVQ priOff1+32(FP), R11
 	SHLQ $1, R11
-	MOVQ h+72(FP), R9
+	MOVQ h+80(FP), R9
 
 	PXOR X15, X15
 
@@ -152,7 +152,13 @@ row:
 	PSRAW $4, X0
 	PADDW X9, X0
 	PACKUSWB X0, X0
+	CMPQ w+72(FP), $4
+	JEQ primaryStore4
 	MOVQ X0, (DI)
+	JMP primaryStored
+primaryStore4:
+	PEXTRD $0, X0, (DI)
+primaryStored:
 
 	ADDQ R8, DI
 	ADDQ $24, SI
@@ -161,12 +167,12 @@ row:
 	RET
 
 // filterCombined8SSE41 filters eight primary+secondary CDEF pixels per row.
-TEXT ·filterCombined8SSE41(SB), NOSPLIT, $0-88
+TEXT ·filterCombined8SSE41(SB), NOSPLIT, $0-96
 	MOVQ dst+0(FP), DI
 	MOVQ dstStride+8(FP), R8
 	MOVQ src+16(FP), SI
 	MOVQ offsets+24(FP), R9
-	MOVQ h+80(FP), R11
+	MOVQ h+88(FP), R11
 
 	PXOR X15, X15
 	BROADCAST_WORD(priThreshold+32(FP), X14)
@@ -245,10 +251,94 @@ combinedRow:
 	PMAXSW X8, X0
 	PMINSW X7, X0
 	PACKUSWB X0, X0
+	CMPQ w+80(FP), $4
+	JEQ combinedStore4
 	MOVQ X0, (DI)
+	JMP combinedStored
+combinedStore4:
+	PEXTRD $0, X0, (DI)
+combinedStored:
 
 	ADDQ R8, DI
 	ADDQ $24, SI
 	DECQ R11
 	JNZ combinedRow
+	RET
+
+// filterSecondary8SSE41 filters four or eight secondary-only CDEF pixels.
+TEXT ·filterSecondary8SSE41(SB), NOSPLIT, $0-64
+	MOVQ dst+0(FP), DI
+	MOVQ dstStride+8(FP), R8
+	MOVQ src+16(FP), SI
+	MOVQ offsets+24(FP), R9
+	MOVQ h+56(FP), R11
+
+	PXOR X15, X15
+	BROADCAST_WORD(threshold+32(FP), X14)
+	MOVQ shift+40(FP), AX
+	MOVD AX, X13
+	MOVL $-32768, AX
+	MOVD AX, X10
+	PSHUFL $0, X10, X10
+	PACKSSLW X10, X10
+
+secondaryRow:
+	PMOVZXBW (DI), X9
+	MOVO X9, X8
+	MOVO X9, X7
+	PXOR X0, X0
+
+	MOVL $2, AX
+	MOVD AX, X6
+	PSHUFL $0, X6, X6
+	PACKSSLW X6, X6
+	MOVQ 0(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X14, X13)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X14, X13)
+	MOVQ 8(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X14, X13)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X14, X13)
+
+	MOVL $1, AX
+	MOVD AX, X6
+	PSHUFL $0, X6, X6
+	PACKSSLW X6, X6
+	MOVQ 16(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X14, X13)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X14, X13)
+	MOVQ 24(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X14, X13)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X14, X13)
+
+	MOVO X0, X1
+	PSRAW $15, X1
+	PADDW X1, X0
+	PADDW ·cdefEight<>(SB), X0
+	PSRAW $4, X0
+	PADDW X9, X0
+	PACKUSWB X0, X0
+	CMPQ w+48(FP), $4
+	JEQ secondaryStore4
+	MOVQ X0, (DI)
+	JMP secondaryStored
+secondaryStore4:
+	PEXTRD $0, X0, (DI)
+secondaryStored:
+
+	ADDQ R8, DI
+	ADDQ $24, SI
+	DECQ R11
+	JNZ secondaryRow
 	RET

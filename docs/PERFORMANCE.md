@@ -112,6 +112,7 @@ was:
 | Unrolled scalar CDEF strength paths | 1.757s | 68.31 | 0.657 GB | 0.628 million |
 | SSE4.1 primary-only CDEF | 1.713s | 70.04 | 0.657 GB | 0.628 million |
 | SSE4.1 combined CDEF | 1.553s | 77.28 | 0.656 GB | 0.628 million |
+| Complete 4/8-wide SSE4.1 CDEF | 1.470s | 81.63 | 0.656 GB | 0.628 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -217,6 +218,16 @@ comparison against the primary-only SIMD binary, the end-to-end median fell
 77.28 packets/s. The contemporaneous clang dav1d median was 0.355 seconds, for
 a 4.37x wall-time ratio. Relative to the original 10.522-second baseline,
 median wall time is down 85.2 percent.
+
+The completed SSE4.1 CDEF path covers four- and eight-pixel-wide primary-only,
+combined primary+secondary, and secondary-only filtering. More than 100,000
+randomized scalar/SIMD comparisons cover both supported heights, every
+direction, all supported strengths and damping values, and every edge mask.
+In a stable same-session comparison, the decoder median fell 5.1 percent from
+1.549 to 1.470 seconds and throughput increased from 77.45 to 81.63 packets/s.
+The matching dav1d median was 0.353 seconds, for a 4.17x wall-time ratio.
+Relative to the original 10.522-second baseline, median wall time is down
+approximately 86.0 percent.
 
 ## Measurement Rules
 

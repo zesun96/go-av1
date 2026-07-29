@@ -237,16 +237,16 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 	if priStrength != 0 {
 		priTap := 4 - ((priStrength) & 1)
 		priShift := imax(0, damping-ulog2(priStrength))
-		if secStrength == 0 && w == 8 &&
+		if secStrength == 0 && (w == 4 || w == 8) &&
 			filterPrimary8SIMD(dst, dstBase, dstStride, &tmpBuf, tmpBase,
 				cdefDirections[dir+2][0], cdefDirections[dir+2][1],
-				priStrength, priShift, priTap, (priTap&3)|2, h) {
+				priStrength, priShift, priTap, (priTap&3)|2, w, h) {
 			return
 		}
 		priConstrain := &constrainTable[priStrength][priShift]
 		if secStrength != 0 {
 			secShift := damping - ulog2(secStrength)
-			if w == 8 &&
+			if (w == 4 || w == 8) &&
 				filterCombined8SIMD(dst, dstBase, dstStride, &tmpBuf, tmpBase,
 					[cdefCombinedOffsets]int{
 						cdefDirections[dir+2][0],
@@ -257,7 +257,7 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 						cdefDirections[dir+0][1],
 					},
 					priStrength, priShift, priTap, (priTap&3)|2,
-					secStrength, secShift, h) {
+					secStrength, secShift, w, h) {
 				return
 			}
 			secConstrain := &constrainTable[secStrength][secShift]
@@ -350,6 +350,17 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 	} else {
 		// sec only
 		secShift := damping - ulog2(secStrength)
+		if (w == 4 || w == 8) &&
+			filterSecondary8SIMD(dst, dstBase, dstStride, &tmpBuf, tmpBase,
+				[cdefSecondaryOffsets]int{
+					cdefDirections[dir+4][0],
+					cdefDirections[dir+0][0],
+					cdefDirections[dir+4][1],
+					cdefDirections[dir+0][1],
+				},
+				secStrength, secShift, w, h) {
+			return
+		}
 		secConstrain := &constrainTable[secStrength][secShift]
 		secOff00 := cdefDirections[dir+4][0]
 		secOff01 := cdefDirections[dir+0][0]

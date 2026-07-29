@@ -18,35 +18,46 @@ func TestFilterPrimary8SSE41MatchesScalar(t *testing.T) {
 	originalSetting := havePrimary8SSE41
 	defer func() { havePrimary8SSE41 = originalSetting }()
 
-	for h := 4; h <= 8; h += 4 {
-		for dir := 0; dir < 8; dir++ {
-			for strength := 1; strength <= 15; strength++ {
-				for damping := 3; damping <= 6; damping++ {
-					src := make([]byte, stride*12)
-					if _, err := rng.Read(src); err != nil {
-						t.Fatal(err)
-					}
-					scalar := append([]byte(nil), src...)
-					simd := append([]byte(nil), src...)
-					left := make([][2]uint8, h)
-					for y := 0; y < h; y++ {
-						left[y][0] = src[(y+2)*stride]
-						left[y][1] = src[(y+2)*stride+1]
-					}
-					top := src[:]
-					bottom := src[(h+2)*stride:]
+	for w := 4; w <= 8; w += 4 {
+		for h := 4; h <= 8; h += 4 {
+			for dir := 0; dir < 8; dir++ {
+				for strength := 1; strength <= 15; strength++ {
+					for damping := 3; damping <= 6; damping++ {
+						src := make([]byte, stride*12)
+						if _, err := rng.Read(src); err != nil {
+							t.Fatal(err)
+						}
+						scalar := append([]byte(nil), src...)
+						simd := append([]byte(nil), src...)
+						left := make([][2]uint8, h)
+						for y := 0; y < h; y++ {
+							left[y][0] = src[(y+2)*stride]
+							left[y][1] = src[(y+2)*stride+1]
+						}
+						top := src[:]
+						bottom := src[(h+2)*stride:]
 
-					havePrimary8SSE41 = false
-					FilterBlock(scalar, 2*stride+2, stride,
-						left, top, 2, stride, bottom, 2, stride,
-						strength, 0, dir, damping, 8, h, allEdges())
-					havePrimary8SSE41 = true
-					FilterBlock(simd, 2*stride+2, stride,
-						left, top, 2, stride, bottom, 2, stride,
-						strength, 0, dir, damping, 8, h, allEdges())
+						havePrimary8SSE41 = false
+						FilterBlock(scalar, 2*stride+2, stride,
+							left, top, 2, stride, bottom, 2, stride,
+							strength, 0, dir, damping, w, h, allEdges())
+						havePrimary8SSE41 = true
+						FilterBlock(simd, 2*stride+2, stride,
+							left, top, 2, stride, bottom, 2, stride,
+							strength, 0, dir, damping, w, h, allEdges())
 
-					if !bytes.Equal(simd, scalar) {
-						t.Fatalf("mismatch h=%d dir=%d strength=%d damping=%d", h, dir, strength, damping)
+						if !bytes.Equal(simd, scalar) {
+							firstDiff := -1
+							for i := range simd {
+								if simd[i] != scalar[i] {
+									firstDiff = i
+									break
+								}
+							}
+							t.Fatalf("mismatch w=%d h=%d dir=%d strength=%d damping=%d first_diff=%d scalar=%d simd=%d",
+								w, h, dir, strength, damping,
+								firstDiff, scalar[firstDiff], simd[firstDiff])
+						}
 					}
 				}
 			}
@@ -65,9 +76,72 @@ func TestFilterCombined8SSE41MatchesScalar(t *testing.T) {
 	defer func() { haveCombined8SSE41 = originalSetting }()
 	secondaryStrengths := [...]int{1, 2, 4}
 
-	for h := 4; h <= 8; h += 4 {
-		for dir := 0; dir < 8; dir++ {
-			for strength := 1; strength <= 15; strength++ {
+	for w := 4; w <= 8; w += 4 {
+		for h := 4; h <= 8; h += 4 {
+			for dir := 0; dir < 8; dir++ {
+				for strength := 1; strength <= 15; strength++ {
+					for _, secStrength := range secondaryStrengths {
+						for damping := 3; damping <= 6; damping++ {
+							for edgeBits := 0; edgeBits < 16; edgeBits++ {
+								src := make([]byte, stride*12)
+								if _, err := rng.Read(src); err != nil {
+									t.Fatal(err)
+								}
+								scalar := append([]byte(nil), src...)
+								simd := append([]byte(nil), src...)
+								left := make([][2]uint8, h)
+								for y := 0; y < h; y++ {
+									left[y][0] = src[(y+2)*stride]
+									left[y][1] = src[(y+2)*stride+1]
+								}
+								top := src[:]
+								bottom := src[(h+2)*stride:]
+								edges := EdgeFlags(edgeBits)
+
+								haveCombined8SSE41 = false
+								FilterBlock(scalar, 2*stride+2, stride,
+									left, top, 2, stride, bottom, 2, stride,
+									strength, secStrength, dir, damping, w, h, edges)
+								haveCombined8SSE41 = true
+								FilterBlock(simd, 2*stride+2, stride,
+									left, top, 2, stride, bottom, 2, stride,
+									strength, secStrength, dir, damping, w, h, edges)
+
+								if !bytes.Equal(simd, scalar) {
+									firstDiff := -1
+									for i := range simd {
+										if simd[i] != scalar[i] {
+											firstDiff = i
+											break
+										}
+									}
+									t.Fatalf("mismatch w=%d h=%d dir=%d strength=%d sec=%d damping=%d edges=%d first_diff=%d scalar=%d simd=%d",
+										w, h, dir, strength, secStrength, damping, edgeBits,
+										firstDiff, scalar[firstDiff], simd[firstDiff])
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestFilterSecondary8SSE41MatchesScalar(t *testing.T) {
+	if !haveSecondary8SSE41 {
+		t.Skip("SSE4.1/SSSE3 unavailable")
+	}
+
+	const stride = 12
+	rng := rand.New(rand.NewSource(3))
+	originalSetting := haveSecondary8SSE41
+	defer func() { haveSecondary8SSE41 = originalSetting }()
+	secondaryStrengths := [...]int{1, 2, 4}
+
+	for w := 4; w <= 8; w += 4 {
+		for h := 4; h <= 8; h += 4 {
+			for dir := 0; dir < 8; dir++ {
 				for _, secStrength := range secondaryStrengths {
 					for damping := 3; damping <= 6; damping++ {
 						for edgeBits := 0; edgeBits < 16; edgeBits++ {
@@ -86,14 +160,14 @@ func TestFilterCombined8SSE41MatchesScalar(t *testing.T) {
 							bottom := src[(h+2)*stride:]
 							edges := EdgeFlags(edgeBits)
 
-							haveCombined8SSE41 = false
+							haveSecondary8SSE41 = false
 							FilterBlock(scalar, 2*stride+2, stride,
 								left, top, 2, stride, bottom, 2, stride,
-								strength, secStrength, dir, damping, 8, h, edges)
-							haveCombined8SSE41 = true
+								0, secStrength, dir, damping, w, h, edges)
+							haveSecondary8SSE41 = true
 							FilterBlock(simd, 2*stride+2, stride,
 								left, top, 2, stride, bottom, 2, stride,
-								strength, secStrength, dir, damping, 8, h, edges)
+								0, secStrength, dir, damping, w, h, edges)
 
 							if !bytes.Equal(simd, scalar) {
 								firstDiff := -1
@@ -103,8 +177,8 @@ func TestFilterCombined8SSE41MatchesScalar(t *testing.T) {
 										break
 									}
 								}
-								t.Fatalf("mismatch h=%d dir=%d strength=%d sec=%d damping=%d edges=%d first_diff=%d scalar=%d simd=%d",
-									h, dir, strength, secStrength, damping, edgeBits,
+								t.Fatalf("mismatch w=%d h=%d dir=%d sec=%d damping=%d edges=%d first_diff=%d scalar=%d simd=%d",
+									w, h, dir, secStrength, damping, edgeBits,
 									firstDiff, scalar[firstDiff], simd[firstDiff])
 							}
 						}
