@@ -42,32 +42,11 @@ func imax(a, b int) int {
 	return b
 }
 
-func imin(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func iabs(v int) int {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
-
 func umin(a, b int) int {
 	if uint(a) < uint(b) {
 		return a
 	}
 	return b
-}
-
-func applySign(v, s int) int {
-	if s < 0 {
-		return -v
-	}
-	return v
 }
 
 func iclip(v, lo, hi int) int {
@@ -82,8 +61,41 @@ func iclip(v, lo, hi int) int {
 
 // constrain is the CDEF constrain function.
 func constrain(diff, threshold, shift int) int {
-	adiff := iabs(diff)
-	return applySign(imin(adiff, imax(0, threshold-(adiff>>shift))), diff)
+	sign := 1
+	if diff < 0 {
+		diff = -diff
+		sign = -1
+	}
+	limit := threshold - (diff >> shift)
+	if limit < 0 {
+		limit = 0
+	}
+	if diff > limit {
+		diff = limit
+	}
+	return diff * sign
+}
+
+const constrainTableOffset = 255
+
+var constrainTable [65][7][2*constrainTableOffset + 1]int8
+
+func init() {
+	for threshold := range constrainTable {
+		for shift := range constrainTable[threshold] {
+			for diff := -constrainTableOffset; diff <= constrainTableOffset; diff++ {
+				constrainTable[threshold][shift][diff+constrainTableOffset] = int8(constrain(diff, threshold, shift))
+			}
+		}
+	}
+}
+
+func constrainFromTable(diff int, table *[2*constrainTableOffset + 1]int8) int {
+	index := diff + constrainTableOffset
+	if uint(index) >= uint(len(table)) {
+		return 0
+	}
+	return int(table[index])
 }
 
 // fill sets tmp region to INT16_MIN (used for out-of-bounds padding).
@@ -132,9 +144,10 @@ func padding(tmp []int16, tmpBase int,
 	// Top rows.
 	tb := topBase
 	for y := yStart; y < 0; y++ {
+		rowStart := tb - tb%topStride
+		rowEnd := rowStart + topStride
 		for x := xStart; x < xEnd; x++ {
 			xi := tb + x
-			rowStart, rowEnd := tb-(tb%topStride), tb-(tb%topStride)+topStride
 			if xi < rowStart || xi >= rowEnd || xi < 0 || xi >= len(top) {
 				xi = tb + iclip(x, 0, w-1)
 			}
@@ -154,15 +167,18 @@ func padding(tmp []int16, tmpBase int,
 	sb := dstBase
 	tt := tmpBase
 	for y := 0; y < h; y++ {
-		for x := 0; x < xEnd; x++ {
-			xi := x
-			if xi >= w {
-				rowEnd := sb - (sb % dstStride) + dstStride
-				if edges&HaveRight == 0 || sb+xi >= rowEnd || sb+xi >= len(dst) {
+		for x := 0; x < w; x++ {
+			tmp[tt+x] = int16(dst[sb+x])
+		}
+		if xEnd > w {
+			rowEnd := sb - sb%dstStride + dstStride
+			for x := w; x < xEnd; x++ {
+				xi := x
+				if edges&HaveRight == 0 || sb+x >= rowEnd || sb+x >= len(dst) {
 					xi = w - 1
 				}
+				tmp[tt+x] = int16(dst[sb+xi])
 			}
-			tmp[tt+x] = int16(dst[sb+xi])
 		}
 		sb += dstStride
 		tt += tmpStride
@@ -172,9 +188,10 @@ func padding(tmp []int16, tmpBase int,
 	bb := bottomBase
 	tt = tmpBase + h*tmpStride
 	for y := h; y < yEnd; y++ {
+		rowStart := bb - bb%bottomStride
+		rowEnd := rowStart + bottomStride
 		for x := xStart; x < xEnd; x++ {
 			xi := bb + x
-			rowStart, rowEnd := bb-(bb%bottomStride), bb-(bb%bottomStride)+bottomStride
 			if xi < rowStart || xi >= rowEnd || xi < 0 || xi >= len(bottom) {
 				xi = bb + iclip(x, 0, w-1)
 			}
@@ -220,47 +237,60 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 	if priStrength != 0 {
 		priTap := 4 - ((priStrength) & 1)
 		priShift := imax(0, damping-ulog2(priStrength))
+		priConstrain := &constrainTable[priStrength][priShift]
 		if secStrength != 0 {
 			secShift := damping - ulog2(secStrength)
+			secConstrain := &constrainTable[secStrength][secShift]
+			priOff0 := cdefDirections[dir+2][0]
+			priOff1 := cdefDirections[dir+2][1]
+			secOff00 := cdefDirections[dir+4][0]
+			secOff01 := cdefDirections[dir+0][0]
+			secOff10 := cdefDirections[dir+4][1]
+			secOff11 := cdefDirections[dir+0][1]
+			priTap1 := (priTap & 3) | 2
 			db := dstBase
 			tt := tmpBase
 			for row := 0; row < h; row++ {
 				for x := 0; x < w; x++ {
 					px := int(dst[db+x])
-					sum := 0
+					base := tt + x
+					p00 := int(tmpBuf[base+priOff0])
+					p01 := int(tmpBuf[base-priOff0])
+					p10 := int(tmpBuf[base+priOff1])
+					p11 := int(tmpBuf[base-priOff1])
+					s000 := int(tmpBuf[base+secOff00])
+					s001 := int(tmpBuf[base-secOff00])
+					s010 := int(tmpBuf[base+secOff01])
+					s011 := int(tmpBuf[base-secOff01])
+					s100 := int(tmpBuf[base+secOff10])
+					s101 := int(tmpBuf[base-secOff10])
+					s110 := int(tmpBuf[base+secOff11])
+					s111 := int(tmpBuf[base-secOff11])
+					sum := priTap * (constrainFromTable(p00-px, priConstrain) +
+						constrainFromTable(p01-px, priConstrain))
+					sum += priTap1 * (constrainFromTable(p10-px, priConstrain) +
+						constrainFromTable(p11-px, priConstrain))
+					sum += 2 * (constrainFromTable(s000-px, secConstrain) +
+						constrainFromTable(s001-px, secConstrain) +
+						constrainFromTable(s010-px, secConstrain) +
+						constrainFromTable(s011-px, secConstrain))
+					sum += constrainFromTable(s100-px, secConstrain) +
+						constrainFromTable(s101-px, secConstrain) +
+						constrainFromTable(s110-px, secConstrain) +
+						constrainFromTable(s111-px, secConstrain)
 					maxV, minV := px, px
-					priTapK := priTap
-					for k := 0; k < 2; k++ {
-						off1 := cdefDirections[dir+2][k]
-						p0 := int(tmpBuf[tt+x+off1])
-						p1 := int(tmpBuf[tt+x-off1])
-						sum += priTapK * constrain(p0-px, priStrength, priShift)
-						sum += priTapK * constrain(p1-px, priStrength, priShift)
-						priTapK = (priTapK & 3) | 2
-						minV = umin(p0, minV)
-						maxV = imax(p0, maxV)
-						minV = umin(p1, minV)
-						maxV = imax(p1, maxV)
-						off2 := cdefDirections[dir+4][k]
-						off3 := cdefDirections[dir+0][k]
-						s0 := int(tmpBuf[tt+x+off2])
-						s1 := int(tmpBuf[tt+x-off2])
-						s2 := int(tmpBuf[tt+x+off3])
-						s3 := int(tmpBuf[tt+x-off3])
-						secTap := 2 - k
-						sum += secTap * constrain(s0-px, secStrength, secShift)
-						sum += secTap * constrain(s1-px, secStrength, secShift)
-						sum += secTap * constrain(s2-px, secStrength, secShift)
-						sum += secTap * constrain(s3-px, secStrength, secShift)
-						minV = umin(s0, minV)
-						maxV = imax(s0, maxV)
-						minV = umin(s1, minV)
-						maxV = imax(s1, maxV)
-						minV = umin(s2, minV)
-						maxV = imax(s2, maxV)
-						minV = umin(s3, minV)
-						maxV = imax(s3, maxV)
-					}
+					minV, maxV = umin(p00, minV), imax(p00, maxV)
+					minV, maxV = umin(p01, minV), imax(p01, maxV)
+					minV, maxV = umin(p10, minV), imax(p10, maxV)
+					minV, maxV = umin(p11, minV), imax(p11, maxV)
+					minV, maxV = umin(s000, minV), imax(s000, maxV)
+					minV, maxV = umin(s001, minV), imax(s001, maxV)
+					minV, maxV = umin(s010, minV), imax(s010, maxV)
+					minV, maxV = umin(s011, minV), imax(s011, maxV)
+					minV, maxV = umin(s100, minV), imax(s100, maxV)
+					minV, maxV = umin(s101, minV), imax(s101, maxV)
+					minV, maxV = umin(s110, minV), imax(s110, maxV)
+					minV, maxV = umin(s111, minV), imax(s111, maxV)
 					adj := 0
 					if sum < 0 {
 						adj = -1
@@ -283,8 +313,8 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 						off := cdefDirections[dir+2][k]
 						p0 := int(tmpBuf[tt+x+off])
 						p1 := int(tmpBuf[tt+x-off])
-						sum += priTapK * constrain(p0-px, priStrength, priShift)
-						sum += priTapK * constrain(p1-px, priStrength, priShift)
+						sum += priTapK * constrainFromTable(p0-px, priConstrain)
+						sum += priTapK * constrainFromTable(p1-px, priConstrain)
 						priTapK = (priTapK & 3) | 2
 					}
 					adj := 0
@@ -300,6 +330,7 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 	} else {
 		// sec only
 		secShift := damping - ulog2(secStrength)
+		secConstrain := &constrainTable[secStrength][secShift]
 		db := dstBase
 		tt := tmpBase
 		for row := 0; row < h; row++ {
@@ -314,10 +345,10 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 					s2 := int(tmpBuf[tt+x+off2])
 					s3 := int(tmpBuf[tt+x-off2])
 					secTap := 2 - k
-					sum += secTap * constrain(s0-px, secStrength, secShift)
-					sum += secTap * constrain(s1-px, secStrength, secShift)
-					sum += secTap * constrain(s2-px, secStrength, secShift)
-					sum += secTap * constrain(s3-px, secStrength, secShift)
+					sum += secTap * constrainFromTable(s0-px, secConstrain)
+					sum += secTap * constrainFromTable(s1-px, secConstrain)
+					sum += secTap * constrainFromTable(s2-px, secConstrain)
+					sum += secTap * constrainFromTable(s3-px, secConstrain)
 				}
 				adj := 0
 				if sum < 0 {

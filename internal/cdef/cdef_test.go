@@ -70,6 +70,24 @@ func TestConstrain_Negative(t *testing.T) {
 
 // ─── FilterBlock: flat input → no change ──────────────────────────────────────
 
+func TestConstrainTableMatchesScalar(t *testing.T) {
+	for threshold := range constrainTable {
+		for shift := range constrainTable[threshold] {
+			table := &constrainTable[threshold][shift]
+			for diff := -255; diff <= 255; diff++ {
+				if got, want := constrainFromTable(diff, table), constrain(diff, threshold, shift); got != want {
+					t.Fatalf("threshold=%d shift=%d diff=%d: table=%d scalar=%d", threshold, shift, diff, got, want)
+				}
+			}
+			for _, diff := range []int{-32768, 32768} {
+				if got, want := constrainFromTable(diff, table), constrain(diff, threshold, shift); got != want {
+					t.Fatalf("sentinel threshold=%d shift=%d diff=%d: table=%d scalar=%d", threshold, shift, diff, got, want)
+				}
+			}
+		}
+	}
+}
+
 // TestFilterBlock_PriOnly_Flat: uniform block → every constrain() returns 0 → sum=0 → no change.
 func TestFilterBlock_PriOnly_Flat(t *testing.T) {
 	w, h := 8, 8

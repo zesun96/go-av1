@@ -105,6 +105,7 @@ was:
 | Indexed metadata and reused filter/prediction scratch | 2.803s | 42.81 | 1.852 GB | 2.298 million |
 | Compact transform boundaries and adaptive 16-bit block grids | 2.655s | 45.19 | 1.188 GB | 2.296 million |
 | Pooled frame and temporary tile state | 2.664s | 45.04 | 0.679 GB | 2.237 million |
+| Optimized scalar CDEF | 2.201s | 54.53 | 0.683 GB | 2.237 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -139,6 +140,14 @@ temporary tile state after merging each tile. Allocation fell another 42.8
 percent to 679 MB, or 5.66 MB per frame. The 2.664-second median is effectively
 flat against 2.655 seconds; the contemporaneous clang dav1d median was 0.365
 seconds, for a 7.29x ratio.
+
+The scalar CDEF follow-up hoists row-boundary calculations out of padding
+pixel loops, expands the common primary-plus-secondary tap loop, and replaces
+the small AV1 constrain domain with read-only lookup tables. Median wall time
+fell 17.4 percent from 2.664 to 2.201 seconds while allocation remained
+effectively unchanged. Relative to the original baseline, median wall time is
+down 79.1 percent. The contemporaneous clang dav1d median was 0.372 seconds,
+for a 5.92x ratio.
 
 ## Measurement Rules
 
