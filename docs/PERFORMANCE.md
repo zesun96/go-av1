@@ -109,6 +109,7 @@ was:
 | Row-wise inter-prediction padding | 1.891s | 63.47 | 0.678 GB | 2.237 million |
 | Direct CDEF output | 1.767s | 67.91 | 0.679 GB | 2.237 million |
 | Allocation-free CDEF edges and inter padding | 1.792s | 66.95 | 0.655 GB | 0.628 million |
+| Unrolled scalar CDEF strength paths | 1.757s | 68.31 | 0.657 GB | 0.628 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -182,6 +183,16 @@ MB to 655 MB, while allocated objects fell 71.9 percent from 2.237 million to
 0.628 million. The absolute median varied slightly from the preceding
 measurement session; the same-session comparison is the relevant throughput
 result.
+
+The scalar CDEF primary-only and secondary-only pixel paths now hoist all
+direction offsets out of the pixel loops and expand their fixed two-tap
+iterations. This removes loop control, repeated direction-table indexing, and
+per-tap weight selection from the current largest CPU hotspot. In a
+same-session seven-run comparison, median wall time fell 2.5 percent from
+1.802 to 1.757 seconds and throughput increased from 66.58 to 68.31 packets/s.
+Allocation remained effectively unchanged at 657 MB and 0.628 million
+objects. Relative to the original 10.522-second baseline, median wall time is
+down 83.3 percent.
 
 ## Measurement Rules
 

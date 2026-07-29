@@ -302,21 +302,21 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 			}
 		} else {
 			// pri only
+			priOff0 := cdefDirections[dir+2][0]
+			priOff1 := cdefDirections[dir+2][1]
 			db := dstBase
 			tt := tmpBase
 			for row := 0; row < h; row++ {
 				for x := 0; x < w; x++ {
 					px := int(dst[db+x])
-					sum := 0
-					priTapK := priTap
-					for k := 0; k < 2; k++ {
-						off := cdefDirections[dir+2][k]
-						p0 := int(tmpBuf[tt+x+off])
-						p1 := int(tmpBuf[tt+x-off])
-						sum += priTapK * constrainFromTable(p0-px, priConstrain)
-						sum += priTapK * constrainFromTable(p1-px, priConstrain)
-						priTapK = (priTapK & 3) | 2
-					}
+					p00 := int(tmpBuf[tt+x+priOff0])
+					p01 := int(tmpBuf[tt+x-priOff0])
+					p10 := int(tmpBuf[tt+x+priOff1])
+					p11 := int(tmpBuf[tt+x-priOff1])
+					sum := priTap * (constrainFromTable(p00-px, priConstrain) +
+						constrainFromTable(p01-px, priConstrain))
+					sum += ((priTap & 3) | 2) * (constrainFromTable(p10-px, priConstrain) +
+						constrainFromTable(p11-px, priConstrain))
 					adj := 0
 					if sum < 0 {
 						adj = -1
@@ -331,25 +331,31 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 		// sec only
 		secShift := damping - ulog2(secStrength)
 		secConstrain := &constrainTable[secStrength][secShift]
+		secOff00 := cdefDirections[dir+4][0]
+		secOff01 := cdefDirections[dir+0][0]
+		secOff10 := cdefDirections[dir+4][1]
+		secOff11 := cdefDirections[dir+0][1]
 		db := dstBase
 		tt := tmpBase
 		for row := 0; row < h; row++ {
 			for x := 0; x < w; x++ {
 				px := int(dst[db+x])
-				sum := 0
-				for k := 0; k < 2; k++ {
-					off1 := cdefDirections[dir+4][k]
-					off2 := cdefDirections[dir+0][k]
-					s0 := int(tmpBuf[tt+x+off1])
-					s1 := int(tmpBuf[tt+x-off1])
-					s2 := int(tmpBuf[tt+x+off2])
-					s3 := int(tmpBuf[tt+x-off2])
-					secTap := 2 - k
-					sum += secTap * constrainFromTable(s0-px, secConstrain)
-					sum += secTap * constrainFromTable(s1-px, secConstrain)
-					sum += secTap * constrainFromTable(s2-px, secConstrain)
-					sum += secTap * constrainFromTable(s3-px, secConstrain)
-				}
+				s000 := int(tmpBuf[tt+x+secOff00])
+				s001 := int(tmpBuf[tt+x-secOff00])
+				s010 := int(tmpBuf[tt+x+secOff01])
+				s011 := int(tmpBuf[tt+x-secOff01])
+				s100 := int(tmpBuf[tt+x+secOff10])
+				s101 := int(tmpBuf[tt+x-secOff10])
+				s110 := int(tmpBuf[tt+x+secOff11])
+				s111 := int(tmpBuf[tt+x-secOff11])
+				sum := 2 * (constrainFromTable(s000-px, secConstrain) +
+					constrainFromTable(s001-px, secConstrain) +
+					constrainFromTable(s010-px, secConstrain) +
+					constrainFromTable(s011-px, secConstrain))
+				sum += constrainFromTable(s100-px, secConstrain) +
+					constrainFromTable(s101-px, secConstrain) +
+					constrainFromTable(s110-px, secConstrain) +
+					constrainFromTable(s111-px, secConstrain)
 				adj := 0
 				if sum < 0 {
 					adj = -1
