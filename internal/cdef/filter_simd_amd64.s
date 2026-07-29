@@ -1,0 +1,123 @@
+//go:build amd64 && !purego
+
+#include "textflag.h"
+
+// filterPrimary8SSE41 filters eight primary-only CDEF pixels per row.
+TEXT ·filterPrimary8SSE41(SB), NOSPLIT, $0-80
+	MOVQ dst+0(FP), DI
+	MOVQ dstStride+8(FP), R8
+	MOVQ src+16(FP), SI
+	MOVQ priOff0+24(FP), R10
+	SHLQ $1, R10
+	MOVQ priOff1+32(FP), R11
+	SHLQ $1, R11
+	MOVQ h+72(FP), R9
+
+	PXOR X15, X15
+
+	MOVQ threshold+40(FP), AX
+	MOVD AX, X14
+	PSHUFL $0, X14, X14
+	PACKSSLW X14, X14
+
+	MOVQ shift+48(FP), AX
+	MOVD AX, X13
+
+	MOVQ tap0+56(FP), AX
+	MOVD AX, X12
+	PSHUFL $0, X12, X12
+	PACKSSLW X12, X12
+
+	MOVQ tap1+64(FP), AX
+	MOVD AX, X11
+	PSHUFL $0, X11, X11
+	PACKSSLW X11, X11
+
+	MOVL $8, AX
+	MOVD AX, X10
+	PSHUFL $0, X10, X10
+	PACKSSLW X10, X10
+
+row:
+	PMOVZXBW (DI), X9
+	PXOR X0, X0
+
+	// First positive primary tap.
+	MOVOU (SI)(R10*1), X1
+	PSUBW X9, X1
+	MOVO X1, X2
+	PABSW X1, X1
+	MOVO X1, X4
+	PSRAW X13, X4
+	MOVO X14, X3
+	PSUBW X4, X3
+	PMAXSW X15, X3
+	PMINSW X3, X1
+	PSIGNW X2, X1
+	PMULLW X12, X1
+	PADDW X1, X0
+
+	// First negative primary tap.
+	MOVQ SI, AX
+	SUBQ R10, AX
+	MOVOU (AX), X1
+	PSUBW X9, X1
+	MOVO X1, X2
+	PABSW X1, X1
+	MOVO X1, X4
+	PSRAW X13, X4
+	MOVO X14, X3
+	PSUBW X4, X3
+	PMAXSW X15, X3
+	PMINSW X3, X1
+	PSIGNW X2, X1
+	PMULLW X12, X1
+	PADDW X1, X0
+
+	// Second positive primary tap.
+	MOVOU (SI)(R11*1), X1
+	PSUBW X9, X1
+	MOVO X1, X2
+	PABSW X1, X1
+	MOVO X1, X4
+	PSRAW X13, X4
+	MOVO X14, X3
+	PSUBW X4, X3
+	PMAXSW X15, X3
+	PMINSW X3, X1
+	PSIGNW X2, X1
+	PMULLW X11, X1
+	PADDW X1, X0
+
+	// Second negative primary tap.
+	MOVQ SI, AX
+	SUBQ R11, AX
+	MOVOU (AX), X1
+	PSUBW X9, X1
+	MOVO X1, X2
+	PABSW X1, X1
+	MOVO X1, X4
+	PSRAW X13, X4
+	MOVO X14, X3
+	PSUBW X4, X3
+	PMAXSW X15, X3
+	PMINSW X3, X1
+	PSIGNW X2, X1
+	PMULLW X11, X1
+	PADDW X1, X0
+
+	// (sum + (sum < 0 ? -1 : 0) + 8) >> 4.
+	MOVO X0, X1
+	PSRAW $15, X1
+	PADDW X1, X0
+	PADDW X10, X0
+	PSRAW $4, X0
+	PADDW X9, X0
+	PACKUSWB X0, X0
+	MOVQ X0, (DI)
+
+	ADDQ R8, DI
+	ADDQ $24, SI
+	DECQ R9
+	JNZ row
+	RET

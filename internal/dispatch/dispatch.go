@@ -15,6 +15,8 @@
 // Milestone: M0 (interface), M9 (assembly fast paths).
 package dispatch
 
+import "sync/atomic"
+
 // CPUFeatures records which architecture-specific instruction extensions
 // are available at runtime.
 type CPUFeatures struct {
@@ -28,24 +30,27 @@ type CPUFeatures struct {
 }
 
 // Detect returns the runtime CPU feature set.
-//
-// At M0 it always returns the zero value, which is interpreted by every
-// kernel table as "use the generic Go path".
 func Detect() CPUFeatures {
-	return CPUFeatures{}
+	return detectCPU()
 }
 
 // ForceGeneric overrides Detect to return the zero value for the rest of
 // the process lifetime. Intended for testing the generic code path.
 func ForceGeneric() {
-	forceGeneric = true
+	forceGeneric.Store(true)
 }
 
-var forceGeneric bool
+var forceGeneric atomic.Bool
+
+// GenericForced reports whether ForceGeneric has disabled architecture-
+// specific dispatch for this process.
+func GenericForced() bool {
+	return forceGeneric.Load()
+}
 
 // Active returns the effective feature set, taking ForceGeneric into account.
 func Active() CPUFeatures {
-	if forceGeneric {
+	if GenericForced() {
 		return CPUFeatures{}
 	}
 	return Detect()

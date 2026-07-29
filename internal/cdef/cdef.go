@@ -237,6 +237,12 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 	if priStrength != 0 {
 		priTap := 4 - ((priStrength) & 1)
 		priShift := imax(0, damping-ulog2(priStrength))
+		if secStrength == 0 && w == 8 &&
+			filterPrimary8SIMD(dst, dstBase, dstStride, &tmpBuf, tmpBase,
+				cdefDirections[dir+2][0], cdefDirections[dir+2][1],
+				priStrength, priShift, priTap, (priTap&3)|2, h) {
+			return
+		}
 		priConstrain := &constrainTable[priStrength][priShift]
 		if secStrength != 0 {
 			secShift := damping - ulog2(secStrength)

@@ -110,6 +110,7 @@ was:
 | Direct CDEF output | 1.767s | 67.91 | 0.679 GB | 2.237 million |
 | Allocation-free CDEF edges and inter padding | 1.792s | 66.95 | 0.655 GB | 0.628 million |
 | Unrolled scalar CDEF strength paths | 1.757s | 68.31 | 0.657 GB | 0.628 million |
+| SSE4.1 primary-only CDEF | 1.713s | 70.04 | 0.657 GB | 0.628 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -193,6 +194,17 @@ same-session seven-run comparison, median wall time fell 2.5 percent from
 Allocation remained effectively unchanged at 657 MB and 0.628 million
 objects. Relative to the original 10.522-second baseline, median wall time is
 down 83.3 percent.
+
+The first architecture-specific decoder kernel adds runtime amd64
+CPUID/XGETBV detection and an SSSE3/SSE4.1 implementation of the eight-pixel
+primary-only CDEF path. Unsupported CPUs, non-amd64 platforms, four-pixel
+blocks, other CDEF strength combinations, and builds using the `purego` tag
+retain the scalar implementation. Across five microbenchmark runs, the kernel
+fell from approximately 294--297 ns to 152--155 ns, a reduction of about 48
+percent. Its deliberately narrow coverage reduced the same-session end-to-end
+median by 0.8 percent, from 1.727 to 1.713 seconds, and raised throughput from
+69.50 to 70.04 packets/s. This establishes the tested SIMD dispatch and
+fallback structure for wider CDEF and inter-prediction kernels.
 
 ## Measurement Rules
 
