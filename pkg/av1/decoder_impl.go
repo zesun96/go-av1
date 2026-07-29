@@ -59,7 +59,6 @@ type decoderImpl struct {
 	pendingFhdrRaw []byte // raw payload bytes of the pending frame header
 
 	cdefSrc                    []byte
-	cdefWork                   []byte
 	cdefDirs                   []uint8
 	cdefVariances              []uint
 	restorationBoundaryScratch [3][]byte
@@ -863,29 +862,25 @@ func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader,
 	maxPlaneLen := len(pic.Y)
 	if cap(d.cdefSrc) < maxPlaneLen {
 		d.cdefSrc = make([]byte, maxPlaneLen)
-		d.cdefWork = make([]byte, maxPlaneLen)
 	} else {
 		d.cdefSrc = d.cdefSrc[:maxPlaneLen]
-		d.cdefWork = d.cdefWork[:maxPlaneLen]
 	}
 
-	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc, d.cdefWork)
+	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc)
 	if pic.Chroma != ChromaMonochrome && len(pic.U) > 0 {
 		cw, ch := pic.codedChromaSize()
-		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc, d.cdefWork)
-		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc, d.cdefWork)
+		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc)
+		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, dirW, d.cdefSrc)
 	}
 }
 
 // applyCDEFPlane applies CDEF block-by-block to one plane.
-func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, dirStride int, src, work []byte) {
+func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, dirStride int, src []byte) {
 	if len(plane) == 0 {
 		return
 	}
 	src = src[:len(plane)]
-	work = work[:len(plane)]
 	copy(src, plane)
-	copy(work, plane)
 	for by := 0; by < h; by += blockSz {
 		for bx := 0; bx < w; bx += blockSz {
 			hasNonSkip := cdefBlockHasNonSkip(fs, bx, by, blockSz, blockSz, planeID)
@@ -999,21 +994,15 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			} else {
 				dir = chromaCDEFDirection(priStrength, dirIdx, dirs)
 			}
-			for y := 0; y < bh; y++ {
-				copy(work[(by+y)*stride+bx:(by+y)*stride+bx+bw], src[(by+y)*stride+bx:(by+y)*stride+bx+bw])
-			}
 
 			cdef.FilterBlock(
-				work, by*stride+bx, stride,
+				plane, by*stride+bx, stride,
 				left,
 				top, topBase, stride,
 				bottom, bottomBase, stride,
 				priStrength, secStrength, dir, damping, bw, bh,
 				edges,
 			)
-			for y := 0; y < bh; y++ {
-				copy(plane[(by+y)*stride+bx:(by+y)*stride+bx+bw], work[(by+y)*stride+bx:(by+y)*stride+bx+bw])
-			}
 		}
 	}
 }

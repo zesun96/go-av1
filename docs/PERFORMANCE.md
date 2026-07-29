@@ -107,6 +107,7 @@ was:
 | Pooled frame and temporary tile state | 2.664s | 45.04 | 0.679 GB | 2.237 million |
 | Optimized scalar CDEF | 2.201s | 54.53 | 0.683 GB | 2.237 million |
 | Row-wise inter-prediction padding | 1.891s | 63.47 | 0.678 GB | 2.237 million |
+| Direct CDEF output | 1.767s | 67.91 | 0.679 GB | 2.237 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -159,6 +160,15 @@ seconds, while throughput rose from 54.04 to 63.47 packets/s. Allocation
 remained effectively flat at 678 MB. The contemporaneous clang dav1d median
 was 0.377 seconds, for a 5.02x ratio. Relative to the original 10.522-second
 baseline, median wall time is down 82.0 percent.
+
+CDEF now filters directly into the destination plane while retaining one
+immutable source snapshot for all neighboring samples. The former second
+full-plane work buffer, initial work copy, and per-block copy-in/copy-out
+passes were redundant because CDEF blocks do not overlap and padding already
+reads neighboring pixels from the source snapshot. Removing them reduced the
+seven-run median another 6.6 percent, from 1.891 to 1.767 seconds, and raised
+throughput to 67.91 packets/s. Allocation counters remained effectively flat.
+Relative to the original baseline, median wall time is down 83.2 percent.
 
 ## Measurement Rules
 
