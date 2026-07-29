@@ -2,6 +2,44 @@
 
 #include "textflag.h"
 
+#define BROADCAST_WORD(src, dst) \
+	MOVQ src, AX; \
+	MOVD AX, dst; \
+	PSHUFL $0, dst, dst; \
+	PACKSSLW dst, dst
+
+// X1-X5 are scratch, X6 is the current tap weight, X7/X8 are max/min,
+// X9 is the current pixel, X10 is INT16_MIN, and X15 is zero.
+#define ACCUM_NEIGHBOR(addr, threshold, shift) \
+	MOVOU addr, X1; \
+	MOVO X1, X2; \
+	PCMPEQW X10, X2; \
+	MOVO X2, X5; \
+	MOVO X2, X3; \
+	PAND X9, X3; \
+	PANDN X1, X2; \
+	POR X3, X2; \
+	PMINSW X2, X8; \
+	PMAXSW X2, X7; \
+	PSUBW X9, X1; \
+	MOVO X1, X2; \
+	PABSW X1, X1; \
+	MOVO X1, X4; \
+	PSRAW shift, X4; \
+	MOVO threshold, X3; \
+	PSUBW X4, X3; \
+	PMAXSW X15, X3; \
+	PMINSW X3, X1; \
+	PSIGNW X2, X1; \
+	PANDN X1, X5; \
+	MOVO X5, X1; \
+	PMULLW X6, X1; \
+	PADDW X1, X0
+
+DATA ·cdefEight<>+0(SB)/8, $0x0008000800080008
+DATA ·cdefEight<>+8(SB)/8, $0x0008000800080008
+GLOBL ·cdefEight<>(SB), RODATA|NOPTR, $16
+
 // filterPrimary8SSE41 filters eight primary-only CDEF pixels per row.
 TEXT ·filterPrimary8SSE41(SB), NOSPLIT, $0-80
 	MOVQ dst+0(FP), DI
@@ -120,4 +158,97 @@ row:
 	ADDQ $24, SI
 	DECQ R9
 	JNZ row
+	RET
+
+// filterCombined8SSE41 filters eight primary+secondary CDEF pixels per row.
+TEXT ·filterCombined8SSE41(SB), NOSPLIT, $0-88
+	MOVQ dst+0(FP), DI
+	MOVQ dstStride+8(FP), R8
+	MOVQ src+16(FP), SI
+	MOVQ offsets+24(FP), R9
+	MOVQ h+80(FP), R11
+
+	PXOR X15, X15
+	BROADCAST_WORD(priThreshold+32(FP), X14)
+	MOVQ priShift+40(FP), AX
+	MOVD AX, X13
+	BROADCAST_WORD(secThreshold+64(FP), X12)
+	MOVQ secShift+72(FP), AX
+	MOVD AX, X11
+	MOVL $-32768, AX
+	MOVD AX, X10
+	PSHUFL $0, X10, X10
+	PACKSSLW X10, X10
+
+combinedRow:
+	PMOVZXBW (DI), X9
+	MOVO X9, X8
+	MOVO X9, X7
+	PXOR X0, X0
+
+	BROADCAST_WORD(priTap0+48(FP), X6)
+	MOVQ 0(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X14, X13)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X14, X13)
+
+	BROADCAST_WORD(priTap1+56(FP), X6)
+	MOVQ 8(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X14, X13)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X14, X13)
+
+	MOVL $2, AX
+	MOVD AX, X6
+	PSHUFL $0, X6, X6
+	PACKSSLW X6, X6
+	MOVQ 16(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X12, X11)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X12, X11)
+	MOVQ 24(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X12, X11)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X12, X11)
+
+	MOVL $1, AX
+	MOVD AX, X6
+	PSHUFL $0, X6, X6
+	PACKSSLW X6, X6
+	MOVQ 32(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X12, X11)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X12, X11)
+	MOVQ 40(R9), R10
+	SHLQ $1, R10
+	ACCUM_NEIGHBOR((SI)(R10*1), X12, X11)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_NEIGHBOR((AX), X12, X11)
+
+	MOVO X0, X1
+	PSRAW $15, X1
+	PADDW X1, X0
+	PADDW ·cdefEight<>(SB), X0
+	PSRAW $4, X0
+	PADDW X9, X0
+	PMAXSW X8, X0
+	PMINSW X7, X0
+	PACKUSWB X0, X0
+	MOVQ X0, (DI)
+
+	ADDQ R8, DI
+	ADDQ $24, SI
+	DECQ R11
+	JNZ combinedRow
 	RET

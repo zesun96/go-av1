@@ -111,6 +111,7 @@ was:
 | Allocation-free CDEF edges and inter padding | 1.792s | 66.95 | 0.655 GB | 0.628 million |
 | Unrolled scalar CDEF strength paths | 1.757s | 68.31 | 0.657 GB | 0.628 million |
 | SSE4.1 primary-only CDEF | 1.713s | 70.04 | 0.657 GB | 0.628 million |
+| SSE4.1 combined CDEF | 1.553s | 77.28 | 0.656 GB | 0.628 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -205,6 +206,17 @@ percent. Its deliberately narrow coverage reduced the same-session end-to-end
 median by 0.8 percent, from 1.727 to 1.713 seconds, and raised throughput from
 69.50 to 70.04 packets/s. This establishes the tested SIMD dispatch and
 fallback structure for wider CDEF and inter-prediction kernels.
+
+The second SIMD slice covers eight-pixel CDEF blocks with both primary and
+secondary strengths. It vectorizes all twelve constrained neighbors, weighted
+accumulation, sentinel-aware neighborhood min/max, rounding, clipping, and
+output packing. Three microbenchmark runs reduced this combined kernel from
+approximately 691--694 ns to 249--252 ns, about 64 percent. In a same-session
+comparison against the primary-only SIMD binary, the end-to-end median fell
+9.6 percent from 1.717 to 1.553 seconds and throughput increased from 69.89 to
+77.28 packets/s. The contemporaneous clang dav1d median was 0.355 seconds, for
+a 4.37x wall-time ratio. Relative to the original 10.522-second baseline,
+median wall time is down 85.2 percent.
 
 ## Measurement Rules
 
