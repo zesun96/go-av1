@@ -22,6 +22,28 @@ func put8TapHV8SIMD(dst []uint8, dstStride int,
 	return true
 }
 
+func put8TapH8SIMD(dst []uint8, dstStride int,
+	src []uint8, srcBase, srcStride, w, h int, filter []int8) bool {
+	if !havePut8TapSSE41 || dispatch.GenericForced() ||
+		w < 8 || w&7 != 0 || h <= 0 {
+		return false
+	}
+	filter8TapHorizontalPutSSE41(&dst[0], dstStride, &src[srcBase],
+		srcStride, w, h, &filter[0])
+	return true
+}
+
+func put8TapV8SIMD(dst []uint8, dstStride int,
+	src []uint8, srcBase, srcStride, w, h int, filter []int8) bool {
+	if !havePut8TapSSE41 || dispatch.GenericForced() ||
+		w < 8 || w&7 != 0 || h <= 0 {
+		return false
+	}
+	filter8TapVerticalPutSSE41(&dst[0], dstStride, &src[srcBase],
+		srcStride, w, h, &filter[0])
+	return true
+}
+
 //go:noescape
 func filter8TapHorizontalSSE41(dst *int16, src *uint8,
 	srcStride, w, h int, filter *int8)
@@ -29,3 +51,11 @@ func filter8TapHorizontalSSE41(dst *int16, src *uint8,
 //go:noescape
 func filter8TapVerticalSSE41(dst *uint8, dstStride int, src *int16,
 	w, h int, filter *int8)
+
+//go:noescape
+func filter8TapHorizontalPutSSE41(dst *uint8, dstStride int, src *uint8,
+	srcStride, w, h int, filter *int8)
+
+//go:noescape
+func filter8TapVerticalPutSSE41(dst *uint8, dstStride int, src *uint8,
+	srcStride, w, h int, filter *int8)

@@ -151,6 +151,10 @@ func Put8Tap(dst []uint8, dstStride int,
 
 	case fh != nil:
 		// Horizontal-only.
+		if put8TapH8SIMD(dst, dstStride, src, srcBase, srcStride,
+			w, h, fh) {
+			return
+		}
 		intermediateRnd := 32 + ((1 << (6 - intermediateBits)) >> 1)
 		rowBase := srcBase
 		dstOff := 0
@@ -165,6 +169,10 @@ func Put8Tap(dst []uint8, dstStride int,
 
 	case fv != nil:
 		// Vertical-only.
+		if put8TapV8SIMD(dst, dstStride, src, srcBase, srcStride,
+			w, h, fv) {
+			return
+		}
 		rowBase := srcBase
 		dstOff := 0
 		for row := 0; row < h; row++ {

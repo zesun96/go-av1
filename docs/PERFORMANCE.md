@@ -114,6 +114,7 @@ was:
 | SSE4.1 combined CDEF | 1.553s | 77.28 | 0.656 GB | 0.628 million |
 | Complete 4/8-wide SSE4.1 CDEF | 1.470s | 81.63 | 0.656 GB | 0.628 million |
 | SSE4.1 two-pass 8-tap inter prediction | 1.397s | 85.91 | 0.641 GB | 0.627 million |
+| Complete single-axis SSE4.1 8-tap inter | 1.360s | 88.22 | 0.641 GB | 0.627 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -243,6 +244,18 @@ phase. A same-session end-to-end comparison reduced the decoder median from
 85.91 packets/s. CPU profiling reduced `Put8Tap` cumulative time from about
 14.8 to 4.3 percent. Relative to the original baseline, median wall time is
 down approximately 86.7 percent.
+
+The next inter SIMD slice adds horizontal-only and vertical-only kernels for
+the same widths. It also hardens the shared horizontal convolution by widening
+the four pairwise results to 32-bit lanes before accumulation. This is needed
+for legal extreme sharp-filter pixel patterns even though each individual
+`PMADDUBSW` pair is within range. In addition to the original 60,750
+two-dimensional comparisons, 8,100 randomized single-axis cases and 180
+coefficient-directed extreme patterns now cover this behavior. A stable
+same-session comparison reduced the median from 1.433 to 1.360 seconds (5.1
+percent), raised throughput from 83.73 to 88.22 packets/s, and measured 5.68x
+the matching dav1d wall time. Relative to the original baseline, median wall
+time is down approximately 87.1 percent.
 
 ## Measurement Rules
 
