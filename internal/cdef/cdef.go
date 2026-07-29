@@ -143,17 +143,19 @@ func padding(tmp []int16, tmpBase int,
 
 	// Top rows.
 	tb := topBase
+	topRowStart := tb - tb%topStride
+	topRowEnd := topRowStart + topStride
 	for y := yStart; y < 0; y++ {
-		rowStart := tb - tb%topStride
-		rowEnd := rowStart + topStride
 		for x := xStart; x < xEnd; x++ {
 			xi := tb + x
-			if xi < rowStart || xi >= rowEnd || xi < 0 || xi >= len(top) {
+			if xi < topRowStart || xi >= topRowEnd || xi < 0 || xi >= len(top) {
 				xi = tb + iclip(x, 0, w-1)
 			}
 			tmp[tmpBase+x+y*tmpStride] = int16(top[xi])
 		}
 		tb += topStride
+		topRowStart += topStride
+		topRowEnd += topStride
 	}
 
 	// Left columns.
@@ -166,39 +168,60 @@ func padding(tmp []int16, tmpBase int,
 	// Main block + right columns.
 	sb := dstBase
 	tt := tmpBase
+	dstRowEnd := dstBase - dstBase%dstStride + dstStride
 	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			tmp[tt+x] = int16(dst[sb+x])
+		switch w {
+		case 8:
+			tmp[tt+7] = int16(dst[sb+7])
+			tmp[tt+6] = int16(dst[sb+6])
+			tmp[tt+5] = int16(dst[sb+5])
+			tmp[tt+4] = int16(dst[sb+4])
+			fallthrough
+		case 4:
+			tmp[tt+3] = int16(dst[sb+3])
+			tmp[tt+2] = int16(dst[sb+2])
+			tmp[tt+1] = int16(dst[sb+1])
+			tmp[tt+0] = int16(dst[sb+0])
+		default:
+			for x := 0; x < w; x++ {
+				tmp[tt+x] = int16(dst[sb+x])
+			}
 		}
 		if xEnd > w {
-			rowEnd := sb - sb%dstStride + dstStride
-			for x := w; x < xEnd; x++ {
-				xi := x
-				if edges&HaveRight == 0 || sb+x >= rowEnd || sb+x >= len(dst) {
-					xi = w - 1
-				}
-				tmp[tt+x] = int16(dst[sb+xi])
+			last := dst[sb+w-1]
+			if sb+w < dstRowEnd && sb+w < len(dst) {
+				tmp[tt+w] = int16(dst[sb+w])
+			} else {
+				tmp[tt+w] = int16(last)
+			}
+			if sb+w+1 < dstRowEnd && sb+w+1 < len(dst) {
+				tmp[tt+w+1] = int16(dst[sb+w+1])
+			} else {
+				tmp[tt+w+1] = int16(last)
 			}
 		}
 		sb += dstStride
 		tt += tmpStride
+		dstRowEnd += dstStride
 	}
 
 	// Bottom rows.
 	bb := bottomBase
 	tt = tmpBase + h*tmpStride
+	bottomRowStart := bb - bb%bottomStride
+	bottomRowEnd := bottomRowStart + bottomStride
 	for y := h; y < yEnd; y++ {
-		rowStart := bb - bb%bottomStride
-		rowEnd := rowStart + bottomStride
 		for x := xStart; x < xEnd; x++ {
 			xi := bb + x
-			if xi < rowStart || xi >= rowEnd || xi < 0 || xi >= len(bottom) {
+			if xi < bottomRowStart || xi >= bottomRowEnd || xi < 0 || xi >= len(bottom) {
 				xi = bb + iclip(x, 0, w-1)
 			}
 			tmp[tt+x] = int16(bottom[xi])
 		}
 		bb += bottomStride
 		tt += tmpStride
+		bottomRowStart += bottomStride
+		bottomRowEnd += bottomStride
 	}
 }
 

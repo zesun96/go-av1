@@ -115,6 +115,7 @@ was:
 | Complete 4/8-wide SSE4.1 CDEF | 1.470s | 81.63 | 0.656 GB | 0.628 million |
 | SSE4.1 two-pass 8-tap inter prediction | 1.397s | 85.91 | 0.641 GB | 0.627 million |
 | Complete single-axis SSE4.1 8-tap inter | 1.360s | 88.22 | 0.641 GB | 0.627 million |
+| Hoisted CDEF padding row boundaries | 1.333s | 90.02 | 0.641 GB | 0.627 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -256,6 +257,17 @@ same-session comparison reduced the median from 1.433 to 1.360 seconds (5.1
 percent), raised throughput from 83.73 to 88.22 packets/s, and measured 5.68x
 the matching dav1d wall time. Relative to the original baseline, median wall
 time is down approximately 87.1 percent.
+
+CDEF padding now computes the row boundaries for its source, top, and bottom
+planes once per block instead of repeating integer remainder operations for
+every row. The fixed four- and eight-pixel active copies and two right-edge
+samples are also specialized, removing small inner loops and a branch whose
+condition is already encoded by the edge extent. A reference implementation
+comparison covers 320 combinations of block size, row position, and edge
+availability. The 8x8 all-edge microbenchmark fell from approximately 121 to
+82 ns (32 percent), while a same-session end-to-end comparison fell from
+1.349 to 1.333 seconds (1.2 percent) and reached 90.02 packets/s. Relative to
+the original baseline, median wall time is down approximately 87.3 percent.
 
 ## Measurement Rules
 
