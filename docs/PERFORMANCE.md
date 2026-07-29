@@ -103,6 +103,7 @@ was:
 |---|---:|---:|---:|---:|
 | Trace-guard baseline | 3.914s | 30.66 | 9.723 GB | 3.265 million |
 | Indexed metadata and reused filter/prediction scratch | 2.803s | 42.81 | 1.852 GB | 2.298 million |
+| Compact transform boundaries and adaptive 16-bit block grids | 2.655s | 45.19 | 1.188 GB | 2.296 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -122,6 +123,14 @@ mallocs_per_frame=19152
 The complete local AOM differential run remained at 197 passed, zero failed,
 and 66 unsupported high-bit-depth vectors. All 120 selected dynamic WebRTC
 frames remained byte-exact against dav1d.
+
+The follow-up compact-grid slice encodes transform-leaf left/top boundaries
+inside the existing transform-size byte, removing two 16-bit origin grids.
+Block indexes now use 16 bits on ordinary frames and automatically promote to
+32 bits if a tile exceeds 65,535 metadata entries. This reduced allocation by
+another 35.9 percent and median wall time by 5.3 percent from the preceding
+row. Relative to the original baseline, median wall time is down 74.8 percent.
+The contemporaneous clang dav1d median was 0.352 seconds, for a 7.54x ratio.
 
 ## Measurement Rules
 

@@ -97,8 +97,9 @@ func TestMergeFilterStateCopiesOnlyTileRegion(t *testing.T) {
 	if got, _ := dst.BlockState(64, 0); got.SegID != 2 {
 		t.Fatalf("tile metadata missing: %+v", got)
 	}
-	if dst.TxGrid[0] != 0xff || dst.TxGrid[16] != 2 {
-		t.Fatalf("merged transform grid outside=%d inside=%d", dst.TxGrid[0], dst.TxGrid[16])
+	insideTx, _, insideOK := dst.txStateAtGrid(16)
+	if dst.TxGrid[0] != 0xff || !insideOK || insideTx != 2 {
+		t.Fatalf("merged transform grid outside=%d inside=(%d,%t)", dst.TxGrid[0], insideTx, insideOK)
 	}
 	if dst.CDEFIndex[1] != 3 {
 		t.Fatalf("CDEF index=%d want 3", dst.CDEFIndex[1])
@@ -128,6 +129,27 @@ func TestBlockGridSharesPerBlockMetadata(t *testing.T) {
 	}
 }
 
+func TestBlockGridPromotesWithoutLosingCompactIndexes(t *testing.T) {
+	fs := NewFrameState(16, 8)
+	fs.setBlockGridIndex(0, 7)
+	fs.setBlockGridIndex(1, maxCompactBlockIndex+1)
+	if got := fs.blockGridIndex(0); got != 7 {
+		t.Fatalf("compact index after promotion=%d want 7", got)
+	}
+	if got := fs.blockGridIndex(1); got != maxCompactBlockIndex+1 {
+		t.Fatalf("wide index=%d want %d", got, maxCompactBlockIndex+1)
+	}
+
+	fs.setChromaBlockGridIndex(0, 9)
+	fs.setChromaBlockGridIndex(1, maxCompactBlockIndex+2)
+	if got := fs.chromaBlockGridIndex(0); got != 9 {
+		t.Fatalf("compact chroma index after promotion=%d want 9", got)
+	}
+	if got := fs.chromaBlockGridIndex(1); got != maxCompactBlockIndex+2 {
+		t.Fatalf("wide chroma index=%d want %d", got, maxCompactBlockIndex+2)
+	}
+}
+
 func TestMergeFilterStateRemapsChromaMetadata(t *testing.T) {
 	dst := NewFrameState(128, 64)
 	src := NewFrameState(128, 64)
@@ -142,15 +164,17 @@ func TestMergeFilterStateRemapsChromaMetadata(t *testing.T) {
 	}
 }
 
-func TestTransformOriginsDistinguishEqualSizedLeaves(t *testing.T) {
+func TestTransformBoundariesDistinguishEqualSizedLeaves(t *testing.T) {
 	fs := NewFrameState(16, 8)
 	fs.SetTxState(0, 0, 8, 8, 1)
 	fs.SetTxState(8, 0, 8, 8, 1)
-	if fs.TxGrid[1] != fs.TxGrid[2] {
+	leftSize, leftBoundaries, leftOK := fs.txStateAtGrid(1)
+	rightSize, rightBoundaries, rightOK := fs.txStateAtGrid(2)
+	if !leftOK || !rightOK || leftSize != rightSize {
 		t.Fatal("test requires equal transform sizes")
 	}
-	if fs.TxOriginX4[1] == fs.TxOriginX4[2] {
-		t.Fatal("equal-sized adjacent transform leaves share an origin")
+	if leftBoundaries&txBoundaryLeft != 0 || rightBoundaries&txBoundaryLeft == 0 {
+		t.Fatal("equal-sized adjacent transform leaves lack a separating boundary")
 	}
 }
 

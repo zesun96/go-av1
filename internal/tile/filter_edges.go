@@ -24,17 +24,23 @@ func (fs *FrameState) LumaFilterEdge(x4, y4 int, vertical bool) (int, bool) {
 		}
 		b = a - fs.W4
 	}
-	if fs.TxGrid[a] == 0xff || fs.TxGrid[b] == 0xff {
+	txA, boundaries, okA := fs.txStateAtGrid(a)
+	txB, _, okB := fs.txStateAtGrid(b)
+	if !okA || !okB {
 		return 0, false
 	}
 	blockA, blockB := fs.blockStateAtGrid(a), fs.blockStateAtGrid(b)
 	blockEdge := blockA.X4 != blockB.X4 || blockA.Y4 != blockB.Y4
-	txEdge := fs.TxOriginX4[a] != fs.TxOriginX4[b] || fs.TxOriginY4[a] != fs.TxOriginY4[b]
+	boundaryMask := txBoundaryTop
+	if vertical {
+		boundaryMask = txBoundaryLeft
+	}
+	txEdge := boundaries&boundaryMask != 0
 	if !blockEdge && (!txEdge || (!blockA.Intra && blockA.Skip)) {
 		return 0, false
 	}
-	da := transform.TxfmDimensions[fs.TxGrid[a]]
-	db := transform.TxfmDimensions[fs.TxGrid[b]]
+	da := transform.TxfmDimensions[txA]
+	db := transform.TxfmDimensions[txB]
 	logSizeA, logSizeB := int(da.Lh), int(db.Lh)
 	if vertical {
 		logSizeA, logSizeB = int(da.Lw), int(db.Lw)
