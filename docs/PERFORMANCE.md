@@ -426,6 +426,24 @@ without a visible replacement hotspot. Allocation remained effectively flat
 at approximately 1.89 GB. WebRTC remained 599/599 byte-exact, and the
 complete AOM result remained 197 passed, zero failed, and 66 unsupported.
 
+Complete interior 8x8 luma CDEF blocks now expand their immutable contiguous
+12x12 source window directly into the int16 scratch layout. The amd64 path
+uses SSE4.1 byte-to-word expansion; pure-Go uses an unrolled row fallback.
+Boundary blocks and 4x4 chroma blocks retain the general top/left/bottom
+assembly path. Filtering itself is shared after padding, so both paths execute
+the same scalar or SIMD CDEF kernel.
+
+The 12x12 padding microbenchmark fell from approximately 58 to 6.8 ns, about
+8.5x faster. In an 11-run measurement that alternated the baseline and
+candidate every run, the 120-packet median fell from 1.14195 to 1.11737
+seconds (2.15 percent), increasing throughput from 105.08 to 107.39
+packets/s. On the 599-frame profile, general padding fell from approximately
+0.65 to 0.37 seconds, the new contiguous path used approximately 0.06 seconds,
+and cumulative CDEF time fell from approximately 2.85 to 2.65 seconds.
+Allocation remained flat at approximately 1.89 GB. WebRTC remained 599/599
+byte-exact, and the complete AOM result remained 197 passed, zero failed, and
+66 unsupported.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

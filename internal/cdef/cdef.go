@@ -250,6 +250,29 @@ func padding(tmp []int16, tmpBase int,
 	}
 }
 
+func paddingContiguous8x8(tmp *[144]int16, src []uint8, srcBase, srcStride int) {
+	if paddingContiguous8x8SIMD(tmp, src, srcBase, srcStride) {
+		return
+	}
+	srcBase -= 2*srcStride + 2
+	for y := 0; y < 12; y++ {
+		s := srcBase + y*srcStride
+		d := y * tmpStride
+		tmp[d+0] = int16(src[s+0])
+		tmp[d+1] = int16(src[s+1])
+		tmp[d+2] = int16(src[s+2])
+		tmp[d+3] = int16(src[s+3])
+		tmp[d+4] = int16(src[s+4])
+		tmp[d+5] = int16(src[s+5])
+		tmp[d+6] = int16(src[s+6])
+		tmp[d+7] = int16(src[s+7])
+		tmp[d+8] = int16(src[s+8])
+		tmp[d+9] = int16(src[s+9])
+		tmp[d+10] = int16(src[s+10])
+		tmp[d+11] = int16(src[s+11])
+	}
+}
+
 // ulog2 returns floor(log2(v)) for v>0.
 func ulog2(v int) int {
 	if v <= 0 {
@@ -282,11 +305,29 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 		left, top, topBase, topStride, bottom, bottomBase, bottomStride,
 		w, h, edges)
 
+	filterBlockPrepared(dst, dstBase, dstStride, &tmpBuf, tmpBase,
+		priStrength, secStrength, dir, damping, w, h)
+}
+
+// FilterBlock8x8FromSource applies CDEF to an interior 8x8 block whose full
+// 12x12 neighbor window is contiguous in the immutable source plane.
+func FilterBlock8x8FromSource(dst []uint8, dstBase, dstStride int,
+	src []uint8, srcBase, srcStride int,
+	priStrength, secStrength, dir, damping int) {
+	var tmpBuf [144]int16
+	paddingContiguous8x8(&tmpBuf, src, srcBase, srcStride)
+	filterBlockPrepared(dst, dstBase, dstStride, &tmpBuf, 2*tmpStride+2,
+		priStrength, secStrength, dir, damping, 8, 8)
+}
+
+func filterBlockPrepared(dst []uint8, dstBase, dstStride int,
+	tmpBuf *[144]int16, tmpBase int,
+	priStrength, secStrength, dir, damping, w, h int) {
 	if priStrength != 0 {
 		priTap := 4 - ((priStrength) & 1)
 		priShift := imax(0, damping-ulog2(priStrength))
 		if secStrength == 0 && (w == 4 || w == 8) &&
-			filterPrimary8SIMD(dst, dstBase, dstStride, &tmpBuf, tmpBase,
+			filterPrimary8SIMD(dst, dstBase, dstStride, tmpBuf, tmpBase,
 				cdefDirections[dir+2][0], cdefDirections[dir+2][1],
 				priStrength, priShift, priTap, (priTap&3)|2, w, h) {
 			return
@@ -295,7 +336,7 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 		if secStrength != 0 {
 			secShift := damping - ulog2(secStrength)
 			if (w == 4 || w == 8) &&
-				filterCombined8SIMD(dst, dstBase, dstStride, &tmpBuf, tmpBase,
+				filterCombined8SIMD(dst, dstBase, dstStride, tmpBuf, tmpBase,
 					[cdefCombinedOffsets]int{
 						cdefDirections[dir+2][0],
 						cdefDirections[dir+2][1],
@@ -399,7 +440,7 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 		// sec only
 		secShift := damping - ulog2(secStrength)
 		if (w == 4 || w == 8) &&
-			filterSecondary8SIMD(dst, dstBase, dstStride, &tmpBuf, tmpBase,
+			filterSecondary8SIMD(dst, dstBase, dstStride, tmpBuf, tmpBase,
 				[cdefSecondaryOffsets]int{
 					cdefDirections[dir+4][0],
 					cdefDirections[dir+0][0],

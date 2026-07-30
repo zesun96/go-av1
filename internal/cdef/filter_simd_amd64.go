@@ -64,3 +64,15 @@ func filterSecondary8SIMD(dst []uint8, dstBase, dstStride int,
 //go:noescape
 func filterSecondary8SSE41(dst *uint8, dstStride int, src *int16,
 	offsets *[cdefSecondaryOffsets]int, threshold, shift, w, h int)
+
+func paddingContiguous8x8SIMD(tmp *[144]int16, src []uint8, srcBase, srcStride int) bool {
+	if !havePrimary8SSE41 || dispatch.GenericForced() ||
+		srcBase < 2*srcStride+2 || srcBase+9*srcStride+9 >= len(src) {
+		return false
+	}
+	paddingContiguous8x8SSE41(&tmp[0], &src[srcBase-2*srcStride-2], srcStride)
+	return true
+}
+
+//go:noescape
+func paddingContiguous8x8SSE41(dst *int16, src *uint8, srcStride int)

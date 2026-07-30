@@ -60,12 +60,86 @@ func TestPaddingMatchesReference(t *testing.T) {
 	}
 }
 
+func TestPaddingContiguous8x8MatchesSourceWindow(t *testing.T) {
+	const stride = 32
+	rng := rand.New(rand.NewSource(91))
+	src := make([]byte, stride*20)
+	if _, err := rng.Read(src); err != nil {
+		t.Fatal(err)
+	}
+	srcBase := 5*stride + 8
+	var got [144]int16
+	paddingContiguous8x8(&got, src, srcBase, stride)
+	windowBase := srcBase - 2*stride - 2
+	for y := 0; y < 12; y++ {
+		for x := 0; x < 12; x++ {
+			if want := int16(src[windowBase+y*stride+x]); got[y*12+x] != want {
+				t.Fatalf("window[%d,%d]=%d want %d", x, y, got[y*12+x], want)
+			}
+		}
+	}
+}
+
+func TestFilterBlock8x8FromSourceMatchesAssembledPadding(t *testing.T) {
+	const stride = 32
+	rng := rand.New(rand.NewSource(117))
+	src := make([]byte, stride*20)
+	if _, err := rng.Read(src); err != nil {
+		t.Fatal(err)
+	}
+	const bx, by = 8, 8
+	base := by*stride + bx
+	left := make([][2]byte, 8)
+	for y := range left {
+		left[y][0] = src[(by+y)*stride+bx-2]
+		left[y][1] = src[(by+y)*stride+bx-1]
+	}
+	for pri := 0; pri <= 15; pri += 3 {
+		for _, sec := range []int{0, 1, 2, 4} {
+			for dir := 0; dir < 8; dir++ {
+				want := append([]byte(nil), src...)
+				got := append([]byte(nil), src...)
+				FilterBlock(want, base, stride, left,
+					src[(by-2)*stride:], bx, stride,
+					src[(by+8)*stride:], bx, stride,
+					pri, sec, dir, 4, 8, 8, allEdges())
+				FilterBlock8x8FromSource(got, base, stride, src, base, stride,
+					pri, sec, dir, 4)
+				for y := 0; y < 8; y++ {
+					for x := 0; x < 8; x++ {
+						index := (by+y)*stride + bx + x
+						if got[index] != want[index] {
+							t.Fatalf("pri=%d sec=%d dir=%d pixel=(%d,%d) got=%d want=%d",
+								pri, sec, dir, x, y, got[index], want[index])
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func BenchmarkPadding8x8(b *testing.B) {
 	benchmarkPadding8x8(b, padding)
 }
 
 func BenchmarkPadding8x8Reference(b *testing.B) {
 	benchmarkPadding8x8(b, paddingReference)
+}
+
+func BenchmarkPaddingContiguous8x8(b *testing.B) {
+	const stride = 32
+	src := make([]byte, stride*20)
+	for i := range src {
+		src[i] = byte(i*29 + 17)
+	}
+	base := 5*stride + 8
+	var tmp [144]int16
+	b.ReportAllocs()
+	b.SetBytes(12 * 12)
+	for n := 0; n < b.N; n++ {
+		paddingContiguous8x8(&tmp, src, base, stride)
+	}
 }
 
 func benchmarkPadding8x8(b *testing.B, fn func([]int16, int,

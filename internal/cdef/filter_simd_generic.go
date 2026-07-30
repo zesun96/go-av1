@@ -23,3 +23,7 @@ func filterSecondary8SIMD(dst []uint8, dstBase, dstStride int,
 	threshold, shift, w, h int) bool {
 	return false
 }
+
+func paddingContiguous8x8SIMD(tmp *[144]int16, src []uint8, srcBase, srcStride int) bool {
+	return false
+}

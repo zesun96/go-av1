@@ -36,6 +36,26 @@
 	PMULLW X6, X1; \
 	PADDW X1, X0
 
+// paddingContiguous8x8SSE41 expands a contiguous 12x12 byte window into the
+// 12x12 int16 CDEF scratch layout.
+TEXT ·paddingContiguous8x8SSE41(SB), NOSPLIT, $0-24
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ srcStride+16(FP), R8
+	MOVQ $12, CX
+padding_row:
+	PMOVZXBW (SI), X0
+	MOVOU X0, (DI)
+	MOVL 8(SI), AX
+	MOVD AX, X1
+	PMOVZXBW X1, X1
+	MOVQ X1, 16(DI)
+	ADDQ R8, SI
+	ADDQ $24, DI
+	DECQ CX
+	JNZ padding_row
+	RET
+
 DATA ·cdefEight<>+0(SB)/8, $0x0008000800080008
 DATA ·cdefEight<>+8(SB)/8, $0x0008000800080008
 GLOBL ·cdefEight<>(SB), RODATA|NOPTR, $16

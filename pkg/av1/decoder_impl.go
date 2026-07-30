@@ -959,35 +959,6 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 				edges |= cdef.HaveRight
 			}
 
-			// Build left [][2]uint8 (left 2 pixels, h rows).
-			var leftBuf [8][2]uint8
-			left := leftBuf[:bh]
-			if bx >= 2 {
-				for row := 0; row < bh; row++ {
-					y := by + row
-					if y < h {
-						left[row][0] = src[y*stride+(bx-2)]
-						left[row][1] = src[y*stride+(bx-1)]
-					}
-				}
-			}
-
-			// Top row.
-			var top []byte
-			topBase := 0
-			if by > 0 {
-				top = src[(by-2)*stride:]
-				topBase = bx
-			}
-
-			// Bottom row.
-			var bottom []byte
-			bottomBase := 0
-			if by+bh < h {
-				bottom = src[(by+bh)*stride:]
-				bottomBase = bx
-			}
-
 			// Find direction.
 			dir := 0
 			if planeID == 0 {
@@ -1012,8 +983,46 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 				dir = chromaCDEFDirection(priStrength, dirIdx, dirs)
 			}
 
+			srcBase := by*stride + bx
+			const allCDEFEdges = cdef.HaveTop | cdef.HaveBottom | cdef.HaveLeft | cdef.HaveRight
+			if bw == 8 && bh == 8 && edges == allCDEFEdges &&
+				srcBase >= 2*stride+2 && srcBase+9*stride+9 < len(src) {
+				cdef.FilterBlock8x8FromSource(
+					plane, srcBase, stride,
+					src, srcBase, stride,
+					priStrength, secStrength, dir, damping,
+				)
+				continue
+			}
+
+			// Boundary and 4x4 blocks retain the general assembled-padding
+			// path. Build their left, top, and bottom inputs only when needed.
+			var leftBuf [8][2]uint8
+			left := leftBuf[:bh]
+			if bx >= 2 {
+				for row := 0; row < bh; row++ {
+					y := by + row
+					if y < h {
+						left[row][0] = src[y*stride+(bx-2)]
+						left[row][1] = src[y*stride+(bx-1)]
+					}
+				}
+			}
+			var top []byte
+			topBase := 0
+			if by > 0 {
+				top = src[(by-2)*stride:]
+				topBase = bx
+			}
+			var bottom []byte
+			bottomBase := 0
+			if by+bh < h {
+				bottom = src[(by+bh)*stride:]
+				bottomBase = bx
+			}
+
 			cdef.FilterBlock(
-				plane, by*stride+bx, stride,
+				plane, srcBase, stride,
 				left,
 				top, topBase, stride,
 				bottom, bottomBase, stride,
