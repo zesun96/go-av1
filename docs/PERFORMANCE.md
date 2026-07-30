@@ -116,6 +116,7 @@ was:
 | SSE4.1 two-pass 8-tap inter prediction | 1.397s | 85.91 | 0.641 GB | 0.627 million |
 | Complete single-axis SSE4.1 8-tap inter | 1.360s | 88.22 | 0.641 GB | 0.627 million |
 | Hoisted CDEF padding row boundaries | 1.333s | 90.02 | 0.641 GB | 0.627 million |
+| SSE2 inverse-transform DC add | 1.332s | 90.12 | 0.641 GB | 0.627 million |
 
 This is a further 28.4 percent wall-time reduction and an 81.0 percent
 allocation-volume reduction. Relative to the original 10.522-second baseline,
@@ -268,6 +269,20 @@ availability. The 8x8 all-edge microbenchmark fell from approximately 121 to
 82 ns (32 percent), while a same-session end-to-end comparison fell from
 1.349 to 1.333 seconds (1.2 percent) and reached 90.02 packets/s. Relative to
 the original baseline, median wall time is down approximately 87.3 percent.
+
+The inverse-transform DC-only path now applies its signed constant with SSE2
+unsigned saturating byte arithmetic for every transform width of at least
+eight pixels. Four-pixel transforms and non-amd64 or `purego` builds retain
+the scalar path. The general transform path also stops clearing rows twice:
+the pooled scratch buffer is cleared once before the populated rows are
+transformed, so untouched rows are already zero. Across all supported square
+and rectangular sizes, 336 scalar/SIMD comparisons cover three shifts and
+large positive and negative DC extremes. The 16x16 DC-add microbenchmark fell
+from approximately 120 to 31--35 ns (about 72 percent). A conservative
+same-session end-to-end comparison fell from 1.381 to 1.357 seconds (1.7
+percent); the final candidate rerun measured 1.332 seconds and 90.12
+packets/s. The sampled inverse-transform cumulative share fell from
+approximately 13.7 to 8.5 percent.
 
 ## Measurement Rules
 

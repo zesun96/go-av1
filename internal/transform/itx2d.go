@@ -91,6 +91,9 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 		dc = (dc*181 + 128) >> 8
 		dc = (dc + rnd) >> shift
 		dc = (dc*181 + 128 + 2048) >> 12
+		if bitDepth == 8 && addDC8SIMD(dst, stride, w, h, dc) {
+			return
+		}
 		for y := 0; y < h; y++ {
 			rowOff := y * stride
 			for x := 0; x < w; x++ {
@@ -169,12 +172,7 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 		}
 		first1d(row, 1, rowClipMin, rowClipMax)
 	}
-	// Zero remaining rows
-	for y := lastNonzeroCol + 1; y < sh; y++ {
-		for x := 0; x < w; x++ {
-			tmp[y*w+x] = 0
-		}
-	}
+	// Rows beyond lastNonzeroCol remain zero from the full scratch clear above.
 
 	// Zero coefficient block
 	for i := range coeff {
