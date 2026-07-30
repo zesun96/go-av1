@@ -451,17 +451,26 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 	// Seed planes with neutral grey so any block that fails to decode shows
 	// up as grey rather than pure-green (chroma=0 maps to bright green in
 	// YUV→RGB). Y=128, U=V=128 ⇒ mid-grey.
-	for i := range pic.Y {
-		pic.Y[i] = 128
-	}
-	for i := range pic.U {
-		pic.U[i] = 128
-	}
-	for i := range pic.V {
-		pic.V[i] = 128
-	}
+	fillBytes(pic.Y, 128)
+	fillBytes(pic.U, 128)
+	fillBytes(pic.V, 128)
 	pic.Retain() // initial reference
 	return pic
+}
+
+func fillBytes(values []byte, value byte) {
+	if len(values) < 32 {
+		for i := range values {
+			values[i] = value
+		}
+		return
+	}
+	for i := 0; i < 32; i++ {
+		values[i] = value
+	}
+	for filled := 32; filled < len(values); {
+		filled += copy(values[filled:], values[:filled])
+	}
 }
 
 func (d *decoderImpl) reconstructionSize(w, h int) (int, int) {

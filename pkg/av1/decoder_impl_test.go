@@ -317,6 +317,55 @@ func TestAllocPictureIncludesCodedGridPadding(t *testing.T) {
 	if fb.CodedWidth != 1512 || fb.CodedHeight != 1024 || fb.CodedChromaW != 756 || fb.CodedChromaH != 512 {
 		t.Fatalf("coded geometry = %dx%d chroma=%dx%d", fb.CodedWidth, fb.CodedHeight, fb.CodedChromaW, fb.CodedChromaH)
 	}
+	for plane, values := range [][]byte{pic.Y, pic.U, pic.V} {
+		for i, value := range values {
+			if value != 128 {
+				t.Fatalf("plane=%d index=%d value=%d want 128", plane, i, value)
+			}
+		}
+	}
+}
+
+func TestFillBytesSizesAndValues(t *testing.T) {
+	for _, size := range []int{0, 1, 15, 16, 31, 32, 33, 63, 64, 65, 255, 256, 4096} {
+		for _, value := range []byte{0, 1, 128, 255} {
+			values := make([]byte, size)
+			for i := range values {
+				values[i] = byte(i*29 + 7)
+			}
+			fillBytes(values, value)
+			for i, got := range values {
+				if got != value {
+					t.Fatalf("size=%d value=%d index=%d got=%d", size, value, i, got)
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkFillBytesPicturePlane(b *testing.B) {
+	const size = 2560 * 1408
+	for _, tc := range []struct {
+		name string
+		fill func([]byte, byte)
+	}{
+		{name: "Scalar", fill: func(values []byte, value byte) {
+			for i := range values {
+				values[i] = value
+			}
+		}},
+		{name: "Batched", fill: fillBytes},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			values := make([]byte, size)
+			b.SetBytes(size)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				tc.fill(values, byte(i))
+			}
+		})
+	}
 }
 
 func TestAllocPicturePreservesMonochromeSequenceLayout(t *testing.T) {

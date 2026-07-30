@@ -335,6 +335,19 @@ index cost. The corresponding long wall-clock A/B was inconclusive under
 heavy frequency variation: the medians differed by less than 0.1 percent,
 so no end-to-end gain is claimed for this content.
 
+New picture planes are now initialized to neutral grey by seeding 32 bytes
+and doubling the initialized region with overlap-safe copies. This preserves
+the diagnostic grey fallback while replacing scalar stores across multi-
+megabyte Y, U, and V allocations. Tests cover the scalar/copy threshold and
+verify every coded-grid padding byte produced by `allocPicture`. The
+2560x1408 plane microbenchmark fell from approximately 0.43 to 0.127
+milliseconds (70 percent). A same-session all-filter comparison reduced the
+120-packet median from 1.3102 to 1.2619 seconds (3.7 percent), increasing
+throughput from 91.59 to 95.10 packets/s. The standard seven-run result
+measured 1.258 seconds and 95.42 packets/s, or 5.18x the matching dav1d wall
+time. `allocPicture` had no flat CPU samples in the candidate profile and
+only approximately 20 ms cumulative time.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:
