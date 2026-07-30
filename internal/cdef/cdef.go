@@ -146,12 +146,23 @@ func padding(tmp []int16, tmpBase int,
 	topRowStart := tb - tb%topStride
 	topRowEnd := topRowStart + topStride
 	for y := yStart; y < 0; y++ {
-		for x := xStart; x < xEnd; x++ {
-			xi := tb + x
-			if xi < topRowStart || xi >= topRowEnd || xi < 0 || xi >= len(top) {
-				xi = tb + iclip(x, 0, w-1)
+		srcStart, srcEnd := tb+xStart, tb+xEnd
+		dstStart := tmpBase + xStart + y*tmpStride
+		if srcStart >= topRowStart && srcEnd <= topRowEnd &&
+			srcStart >= 0 && srcEnd <= len(top) {
+			srcRow := top[srcStart:srcEnd]
+			dstRow := tmp[dstStart : dstStart+len(srcRow)]
+			for x, pixel := range srcRow {
+				dstRow[x] = int16(pixel)
 			}
-			tmp[tmpBase+x+y*tmpStride] = int16(top[xi])
+		} else {
+			for x := xStart; x < xEnd; x++ {
+				xi := tb + x
+				if xi < topRowStart || xi >= topRowEnd || xi < 0 || xi >= len(top) {
+					xi = tb + iclip(x, 0, w-1)
+				}
+				tmp[tmpBase+x+y*tmpStride] = int16(top[xi])
+			}
 		}
 		tb += topStride
 		topRowStart += topStride
@@ -159,9 +170,12 @@ func padding(tmp []int16, tmpBase int,
 	}
 
 	// Left columns.
-	for y := 0; y < h; y++ {
-		for x := xStart; x < 0; x++ {
-			tmp[tmpBase+x+y*tmpStride] = int16(left[y][2+x])
+	if xStart < 0 {
+		tt := tmpBase
+		for y := 0; y < h; y++ {
+			tmp[tt-2] = int16(left[y][0])
+			tmp[tt-1] = int16(left[y][1])
+			tt += tmpStride
 		}
 	}
 
@@ -211,12 +225,23 @@ func padding(tmp []int16, tmpBase int,
 	bottomRowStart := bb - bb%bottomStride
 	bottomRowEnd := bottomRowStart + bottomStride
 	for y := h; y < yEnd; y++ {
-		for x := xStart; x < xEnd; x++ {
-			xi := bb + x
-			if xi < bottomRowStart || xi >= bottomRowEnd || xi < 0 || xi >= len(bottom) {
-				xi = bb + iclip(x, 0, w-1)
+		srcStart, srcEnd := bb+xStart, bb+xEnd
+		dstStart := tt + xStart
+		if srcStart >= bottomRowStart && srcEnd <= bottomRowEnd &&
+			srcStart >= 0 && srcEnd <= len(bottom) {
+			srcRow := bottom[srcStart:srcEnd]
+			dstRow := tmp[dstStart : dstStart+len(srcRow)]
+			for x, pixel := range srcRow {
+				dstRow[x] = int16(pixel)
 			}
-			tmp[tt+x] = int16(bottom[xi])
+		} else {
+			for x := xStart; x < xEnd; x++ {
+				xi := bb + x
+				if xi < bottomRowStart || xi >= bottomRowEnd || xi < 0 || xi >= len(bottom) {
+					xi = bb + iclip(x, 0, w-1)
+				}
+				tmp[tt+x] = int16(bottom[xi])
+			}
 		}
 		bb += bottomStride
 		tt += tmpStride

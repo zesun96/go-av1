@@ -348,6 +348,20 @@ measured 1.258 seconds and 95.42 packets/s, or 5.18x the matching dav1d wall
 time. `allocPicture` had no flat CPU samples in the candidate profile and
 only approximately 20 ms cumulative time.
 
+CDEF padding now widens top and bottom neighbor rows through a contiguous
+slice fast path whenever the complete requested interval is inside one
+source row. Frame-edge cases retain the existing clipped per-pixel fallback.
+The fixed two-column left edge is also written directly instead of using an
+inner loop. The retained reference test covers 320 combinations of block
+dimensions, column position, and edge availability. The 8x8 all-edge
+microbenchmark fell from approximately 82.5 to 57.9 ns (30 percent). A
+same-session all-filter comparison reduced the median from 1.2474 to 1.2362
+seconds (0.9 percent), increasing throughput from 96.20 to 97.07 packets/s.
+The standard seven-run result measured 1.235 seconds and 97.19 packets/s, or
+5.04x the matching dav1d wall time. On the longer 599-frame profile,
+`padding` accounted for approximately 0.64 seconds / 4.4 percent, down from
+approximately 0.94 seconds / 6.2 percent in the preceding long profile.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:
