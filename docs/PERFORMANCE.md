@@ -444,6 +444,17 @@ Allocation remained flat at approximately 1.89 GB. WebRTC remained 599/599
 byte-exact, and the complete AOM result remained 197 passed, zero failed, and
 66 unsupported.
 
+CDEF direction selection now computes all eight 8x8 directional costs with
+SSSE3/SSE4.1 on amd64. Unsupported CPUs and `purego` builds retain the scalar
+Go implementation, and a randomized differential test validates every
+intermediate cost. The low-load microbenchmark improved from approximately
+105 to 20 ns, about 5.2x. An 11-run alternating comparison reduced the
+120-packet median from 1.110528 to 1.084318 seconds (2.36 percent), increasing
+throughput from 108.06 to 110.67 packets/s. On the 599-frame profile,
+cumulative direction-search time fell from approximately 0.48 to 0.14
+seconds. Allocation remained approximately 1.89 GB; WebRTC stayed 599/599
+byte-exact and AOM stayed at 197 passed, zero failed, and 66 unsupported.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

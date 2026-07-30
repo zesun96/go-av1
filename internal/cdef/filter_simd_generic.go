@@ -27,3 +27,7 @@ func filterSecondary8SIMD(dst []uint8, dstBase, dstStride int,
 func paddingContiguous8x8SIMD(tmp *[144]int16, src []uint8, srcBase, srcStride int) bool {
 	return false
 }
+
+func findDirSIMD(img []uint8, imgBase, stride int) (dir int, variance uint, ok bool) {
+	return 0, 0, false
+}

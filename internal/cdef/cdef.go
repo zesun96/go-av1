@@ -502,6 +502,13 @@ func FindDir(img []uint8, imgBase, stride int) (dir int, variance uint) {
 	if imgBase+7*stride+8 > len(img) {
 		return 0, 0
 	}
+	if dir, variance, ok := findDirSIMD(img, imgBase, stride); ok {
+		return dir, variance
+	}
+	return findDirScalar(img, imgBase, stride)
+}
+
+func findDirScalar(img []uint8, imgBase, stride int) (dir int, variance uint) {
 	var partialSumHV [2][8]int
 	var partialSumDiag [2][15]int
 	var partialSumAlt [4][11]int

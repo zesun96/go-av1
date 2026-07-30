@@ -43,6 +43,14 @@ func checksumCDEF(data []uint8) uint64 {
 }
 
 func BenchmarkFindDir8x8(b *testing.B) {
+	benchmarkFindDir8x8(b, FindDir)
+}
+
+func BenchmarkFindDir8x8Scalar(b *testing.B) {
+	benchmarkFindDir8x8(b, findDirScalar)
+}
+
+func benchmarkFindDir8x8(b *testing.B, findDir func([]byte, int, int) (int, uint)) {
 	const stride = 16
 	img := make([]byte, stride*8)
 	for i := range img {
@@ -53,7 +61,7 @@ func BenchmarkFindDir8x8(b *testing.B) {
 	var dir int
 	var variance uint
 	for n := 0; n < b.N; n++ {
-		dir, variance = FindDir(img, 3, stride)
+		dir, variance = findDir(img, 3, stride)
 	}
 	benchmarkCDEFSink = byte(dir) ^ byte(variance)
 }
