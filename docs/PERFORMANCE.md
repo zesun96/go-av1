@@ -296,6 +296,18 @@ candidate rerun measured 1.333 seconds and 90.05 packets/s. The former scalar
 pixel-add loop no longer appears as a standalone profile hotspot; the SIMD
 wrapper accounts for approximately 0.8 percent in the sampled run.
 
+CDEF direction search now accumulates two rows at a time. Fixed pixel loads
+replace the nested 8x8 indexing loop, horizontal pixel pairs are shared by the
+shallow-direction sums, and vertical row pairs are shared by the remaining
+directions. An exact reference comparison covers 20,000 randomized blocks
+with varied strides and offsets plus every constant byte value. The 8x8
+microbenchmark fell from approximately 165 to 106 ns (36 percent). A
+same-session end-to-end comparison fell from 1.345 to 1.324 seconds (1.6
+percent), increasing throughput from 89.23 to 90.64 packets/s. A final
+candidate rerun measured 1.335 seconds and 89.85 packets/s, or 5.45x the
+matching dav1d wall time. The sampled `FindDir` share fell from approximately
+5.3 to 2.4 percent.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

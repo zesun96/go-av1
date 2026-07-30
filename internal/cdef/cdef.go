@@ -441,20 +441,107 @@ func FindDir(img []uint8, imgBase, stride int) (dir int, variance uint) {
 	var partialSumAlt [4][11]int
 
 	ib := imgBase
-	for y := 0; y < 8; y++ {
-		for x := 0; x < 8; x++ {
-			px := int(img[ib+x]) - 128
+	for pair := 0; pair < 4; pair++ {
+		y0 := pair << 1
+		y1 := y0 + 1
+		row0 := img[ib : ib+8]
+		row1 := img[ib+stride : ib+stride+8]
+		p00, p01 := int(row0[0])-128, int(row0[1])-128
+		p02, p03 := int(row0[2])-128, int(row0[3])-128
+		p04, p05 := int(row0[4])-128, int(row0[5])-128
+		p06, p07 := int(row0[6])-128, int(row0[7])-128
+		p10, p11 := int(row1[0])-128, int(row1[1])-128
+		p12, p13 := int(row1[2])-128, int(row1[3])-128
+		p14, p15 := int(row1[4])-128, int(row1[5])-128
+		p16, p17 := int(row1[6])-128, int(row1[7])-128
 
-			partialSumDiag[0][y+x] += px
-			partialSumAlt[0][y+(x>>1)] += px
-			partialSumHV[0][y] += px
-			partialSumAlt[1][3+y-(x>>1)] += px
-			partialSumDiag[1][7+y-x] += px
-			partialSumAlt[2][3-(y>>1)+x] += px
-			partialSumHV[1][x] += px
-			partialSumAlt[3][(y>>1)+x] += px
-		}
-		ib += stride
+		partialSumHV[0][y0] = p00 + p01 + p02 + p03 + p04 + p05 + p06 + p07
+		partialSumHV[0][y1] = p10 + p11 + p12 + p13 + p14 + p15 + p16 + p17
+
+		partialSumDiag[0][y0+0] += p00
+		partialSumDiag[0][y0+1] += p01
+		partialSumDiag[0][y0+2] += p02
+		partialSumDiag[0][y0+3] += p03
+		partialSumDiag[0][y0+4] += p04
+		partialSumDiag[0][y0+5] += p05
+		partialSumDiag[0][y0+6] += p06
+		partialSumDiag[0][y0+7] += p07
+		partialSumDiag[0][y1+0] += p10
+		partialSumDiag[0][y1+1] += p11
+		partialSumDiag[0][y1+2] += p12
+		partialSumDiag[0][y1+3] += p13
+		partialSumDiag[0][y1+4] += p14
+		partialSumDiag[0][y1+5] += p15
+		partialSumDiag[0][y1+6] += p16
+		partialSumDiag[0][y1+7] += p17
+
+		partialSumDiag[1][y0+7] += p00
+		partialSumDiag[1][y0+6] += p01
+		partialSumDiag[1][y0+5] += p02
+		partialSumDiag[1][y0+4] += p03
+		partialSumDiag[1][y0+3] += p04
+		partialSumDiag[1][y0+2] += p05
+		partialSumDiag[1][y0+1] += p06
+		partialSumDiag[1][y0+0] += p07
+		partialSumDiag[1][y1+7] += p10
+		partialSumDiag[1][y1+6] += p11
+		partialSumDiag[1][y1+5] += p12
+		partialSumDiag[1][y1+4] += p13
+		partialSumDiag[1][y1+3] += p14
+		partialSumDiag[1][y1+2] += p15
+		partialSumDiag[1][y1+1] += p16
+		partialSumDiag[1][y1+0] += p17
+
+		partialSumAlt[0][y0+0] += p00 + p01
+		partialSumAlt[0][y0+1] += p02 + p03
+		partialSumAlt[0][y0+2] += p04 + p05
+		partialSumAlt[0][y0+3] += p06 + p07
+		partialSumAlt[0][y1+0] += p10 + p11
+		partialSumAlt[0][y1+1] += p12 + p13
+		partialSumAlt[0][y1+2] += p14 + p15
+		partialSumAlt[0][y1+3] += p16 + p17
+
+		partialSumAlt[1][y0+3] += p00 + p01
+		partialSumAlt[1][y0+2] += p02 + p03
+		partialSumAlt[1][y0+1] += p04 + p05
+		partialSumAlt[1][y0+0] += p06 + p07
+		partialSumAlt[1][y1+3] += p10 + p11
+		partialSumAlt[1][y1+2] += p12 + p13
+		partialSumAlt[1][y1+1] += p14 + p15
+		partialSumAlt[1][y1+0] += p16 + p17
+
+		q0, q1 := p00+p10, p01+p11
+		q2, q3 := p02+p12, p03+p13
+		q4, q5 := p04+p14, p05+p15
+		q6, q7 := p06+p16, p07+p17
+		alt2 := 3 - pair
+		alt3 := pair
+		partialSumAlt[2][alt2+0] += q0
+		partialSumAlt[2][alt2+1] += q1
+		partialSumAlt[2][alt2+2] += q2
+		partialSumAlt[2][alt2+3] += q3
+		partialSumAlt[2][alt2+4] += q4
+		partialSumAlt[2][alt2+5] += q5
+		partialSumAlt[2][alt2+6] += q6
+		partialSumAlt[2][alt2+7] += q7
+		partialSumHV[1][0] += q0
+		partialSumHV[1][1] += q1
+		partialSumHV[1][2] += q2
+		partialSumHV[1][3] += q3
+		partialSumHV[1][4] += q4
+		partialSumHV[1][5] += q5
+		partialSumHV[1][6] += q6
+		partialSumHV[1][7] += q7
+		partialSumAlt[3][alt3+0] += q0
+		partialSumAlt[3][alt3+1] += q1
+		partialSumAlt[3][alt3+2] += q2
+		partialSumAlt[3][alt3+3] += q3
+		partialSumAlt[3][alt3+4] += q4
+		partialSumAlt[3][alt3+5] += q5
+		partialSumAlt[3][alt3+6] += q6
+		partialSumAlt[3][alt3+7] += q7
+
+		ib += stride << 1
 	}
 
 	var cost [8]uint
