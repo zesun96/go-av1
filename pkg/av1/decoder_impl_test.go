@@ -368,6 +368,41 @@ func BenchmarkFillBytesPicturePlane(b *testing.B) {
 	}
 }
 
+func BenchmarkAllocPictureRelease1080p(b *testing.B) {
+	d := &decoderImpl{}
+	fhdr := &header.FrameHeader{Width: [2]int{1920, 1920}, Height: 1080}
+	d.allocPicture(fhdr).Release()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		d.allocPicture(fhdr).Release()
+	}
+}
+
+func TestAllocPictureReinitializesPooledPlanes(t *testing.T) {
+	d := &decoderImpl{}
+	large := &header.FrameHeader{Width: [2]int{1920, 1920}, Height: 1080}
+	small := &header.FrameHeader{Width: [2]int{321, 321}, Height: 181}
+
+	first := d.allocPicture(large)
+	first.Y[0], first.U[0], first.V[0] = 1, 2, 3
+	first.PTS = 42
+	first.Release()
+
+	pic := d.allocPicture(small)
+	defer pic.Release()
+	if pic.Width != 321 || pic.Height != 181 || pic.PTS != 0 {
+		t.Fatalf("pooled picture metadata = %dx%d pts=%d, want 321x181 pts=0", pic.Width, pic.Height, pic.PTS)
+	}
+	for planeIndex, plane := range [][]byte{pic.Y, pic.U, pic.V} {
+		for i, value := range plane {
+			if value != 128 {
+				t.Fatalf("plane=%d index=%d value=%d, want 128", planeIndex, i, value)
+			}
+		}
+	}
+}
+
 func TestAllocPicturePreservesMonochromeSequenceLayout(t *testing.T) {
 	d := &decoderImpl{seq: &header.SequenceHeader{Monochrome: true}}
 	pic := d.allocPicture(&header.FrameHeader{Width: [2]int{64, 64}, Height: 48})

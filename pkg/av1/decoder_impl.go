@@ -437,17 +437,13 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 		chroma = ChromaMonochrome
 	}
 
-	pic := &Picture{
-		Y:        make([]byte, strideY*codedH),
-		U:        make([]byte, strideUV*codedCh),
-		V:        make([]byte, strideUV*codedCh),
-		StrideY:  strideY,
-		StrideUV: strideUV,
-		Width:    w,
-		Height:   h,
-		BitDepth: 8,
-		Chroma:   chroma,
-	}
+	pic := acquireDecodedPicture(strideY*codedH, strideUV*codedCh, strideUV*codedCh)
+	pic.StrideY = strideY
+	pic.StrideUV = strideUV
+	pic.Width = w
+	pic.Height = h
+	pic.BitDepth = 8
+	pic.Chroma = chroma
 	// Seed planes with neutral grey so any block that fails to decode shows
 	// up as grey rather than pure-green (chroma=0 maps to bright green in
 	// YUV→RGB). Y=128, U=V=128 ⇒ mid-grey.

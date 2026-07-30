@@ -379,6 +379,22 @@ seconds and 105.92 packets/s, or 4.88x the matching dav1d wall time. In the
 to approximately 0.01 seconds; most of its 0.34-second cumulative time is
 now the actual `Put8Tap` work.
 
+Decoded pictures now return to a concurrency-safe pool when their reference
+count reaches zero. Subsequent frames reuse the Y, U, and V plane capacities,
+including across resolution changes, while resetting metadata and filling
+the complete active coded-grid storage with neutral grey before decode. The
+1080p allocate/fill/release benchmark fell from approximately 294 to 66
+microseconds and from 3.14 MB / 4 allocations to zero steady-state
+allocations.
+
+On the 599-frame WebRTC run, cumulative decode-loop allocation fell from
+4.281 GB to 2.708 GB (7.15 to 4.52 MB/frame), a 36.7 percent reduction.
+The same-session five-run median moved from 7.750 to 7.700 seconds, a modest
+0.65 percent wall-time improvement; plane initialization still has to write
+every active byte. The 120-packet nine-run median moved from 1.129 to 1.126
+seconds. WebRTC remained 599/599 byte-exact, and the complete AOM result
+remained 197 passed, zero failed, and 66 unsupported.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

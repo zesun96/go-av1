@@ -1,6 +1,13 @@
 package av1
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
+
+var decodedPicturePool = sync.Pool{
+	New: func() any { return new(Picture) },
+}
 
 // ChromaFormat describes the subsampling of a decoded picture.
 type ChromaFormat uint8
@@ -73,6 +80,38 @@ type Picture struct {
 	// release is invoked when the reference count drops to zero. The decoder
 	// installs a callback that returns the buffer to the pool.
 	release func(*Picture)
+}
+
+func acquireDecodedPicture(ySize, uSize, vSize int) *Picture {
+	pic := decodedPicturePool.Get().(*Picture)
+	pic.Y = resizePicturePlane(pic.Y, ySize)
+	pic.U = resizePicturePlane(pic.U, uSize)
+	pic.V = resizePicturePlane(pic.V, vSize)
+	pic.refs.Store(0)
+	pic.release = releaseDecodedPicture
+	return pic
+}
+
+func resizePicturePlane(plane []byte, size int) []byte {
+	if cap(plane) < size {
+		return make([]byte, size)
+	}
+	return plane[:size]
+}
+
+func releaseDecodedPicture(pic *Picture) {
+	pic.Y = pic.Y[:0]
+	pic.U = pic.U[:0]
+	pic.V = pic.V[:0]
+	pic.StrideY = 0
+	pic.StrideUV = 0
+	pic.Width = 0
+	pic.Height = 0
+	pic.BitDepth = 0
+	pic.Chroma = 0
+	pic.PTS = 0
+	pic.release = nil
+	decodedPicturePool.Put(pic)
 }
 
 func (p *Picture) codedSize() (int, int) {
