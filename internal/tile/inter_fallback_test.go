@@ -1,6 +1,8 @@
 package tile
 
 import (
+	"fmt"
+	"math/rand"
 	"testing"
 
 	"github.com/zesun96/go-av1/internal/bitstream"
@@ -171,6 +173,103 @@ func TestInterPredictionClipsWriteAfterNominalFiltering(t *testing.T) {
 			if got, want := clipped[y*16+x], full[y*16+x]; got != want {
 				t.Fatalf("clipped prediction (%d,%d)=%d, want nominal-filter result %d", x, y, got, want)
 			}
+		}
+	}
+}
+
+func TestInterPredictionDirectMatchesPaddedRandom(t *testing.T) {
+	const width, height, stride = 160, 160, 176
+	rng := rand.New(rand.NewSource(105))
+	src := make([]byte, stride*height)
+	if _, err := rng.Read(src); err != nil {
+		t.Fatal(err)
+	}
+	sizes := []int{4, 8, 16, 32, 64}
+	modes := []header.FilterMode{
+		header.FilterMode8TapRegular,
+		header.FilterMode8TapSmooth,
+		header.FilterMode8TapSharp,
+		header.FilterModeBilinear,
+	}
+	for iteration := 0; iteration < 5_000; iteration++ {
+		bw := sizes[rng.Intn(len(sizes))]
+		bh := sizes[rng.Intn(len(sizes))]
+		bx := 16 + rng.Intn(width-bw-31)
+		by := 16 + rng.Intn(height-bh-31)
+		mv := refmvs.MV{
+			X: int16(rng.Intn(129) - 64),
+			Y: int16(rng.Intn(129) - 64),
+		}
+		ssHor, ssVer := rng.Intn(2), rng.Intn(2)
+		modeH := modes[rng.Intn(len(modes))]
+		modeV := modes[rng.Intn(len(modes))]
+		initial := make([]byte, stride*height)
+		if _, err := rng.Read(initial); err != nil {
+			t.Fatal(err)
+		}
+		direct := append([]byte(nil), initial...)
+		padded := append([]byte(nil), initial...)
+
+		copyInterPredictPlaneSubsampledImpl(direct, stride, width, height,
+			src, stride, width, height, bx, by, bw, bh, mv,
+			modeH, modeV, ssHor, ssVer, true)
+		copyInterPredictPlaneSubsampledImpl(padded, stride, width, height,
+			src, stride, width, height, bx, by, bw, bh, mv,
+			modeH, modeV, ssHor, ssVer, false)
+		for i := range padded {
+			if direct[i] != padded[i] {
+				t.Fatalf("iteration=%d index=%d rect=(%d,%d %dx%d) mv=%+v ss=(%d,%d) modes=(%d,%d) got=%d want=%d",
+					iteration, i, bx, by, bw, bh, mv, ssHor, ssVer,
+					modeH, modeV, direct[i], padded[i])
+			}
+		}
+	}
+}
+
+func BenchmarkInterPredictionInterior(b *testing.B) {
+	const width, height, stride = 160, 160, 176
+	src := make([]byte, stride*height)
+	for i := range src {
+		src[i] = byte(i*31 + i/stride*7)
+	}
+	for _, size := range []int{8, 16, 32, 64} {
+		for _, phase := range []struct {
+			name         string
+			mv           refmvs.MV
+			modeH, modeV header.FilterMode
+		}{
+			{name: "Integer", mv: refmvs.MV{},
+				modeH: header.FilterMode8TapRegular, modeV: header.FilterMode8TapRegular},
+			{name: "Horizontal", mv: refmvs.MV{X: 5},
+				modeH: header.FilterMode8TapRegular, modeV: header.FilterMode8TapRegular},
+			{name: "Vertical", mv: refmvs.MV{Y: 7},
+				modeH: header.FilterMode8TapRegular, modeV: header.FilterMode8TapRegular},
+			{name: "TwoAxis", mv: refmvs.MV{X: 5, Y: 7},
+				modeH: header.FilterMode8TapRegular, modeV: header.FilterMode8TapSmooth},
+			{name: "Bilinear", mv: refmvs.MV{X: 5, Y: 7},
+				modeH: header.FilterModeBilinear, modeV: header.FilterModeBilinear},
+		} {
+			b.Run(fmt.Sprintf("%dx%d/%s", size, size, phase.name), func(b *testing.B) {
+				for _, tc := range []struct {
+					name        string
+					allowDirect bool
+				}{
+					{name: "Padded", allowDirect: false},
+					{name: "Direct", allowDirect: true},
+				} {
+					b.Run(tc.name, func(b *testing.B) {
+						dst := make([]byte, stride*height)
+						b.ReportAllocs()
+						b.SetBytes(int64(size * size))
+						b.ResetTimer()
+						for i := 0; i < b.N; i++ {
+							copyInterPredictPlaneSubsampledImpl(dst, stride, width, height,
+								src, stride, width, height, 32, 32, size, size, phase.mv,
+								phase.modeH, phase.modeV, 0, 0, tc.allowDirect)
+						}
+					})
+				}
+			})
 		}
 	}
 }

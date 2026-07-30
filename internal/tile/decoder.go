@@ -7447,6 +7447,17 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 	bx, by, bw, bh int,
 	mv refmvs.MV, modeH, modeV header.FilterMode, ssHor, ssVer int,
 ) {
+	copyInterPredictPlaneSubsampledImpl(dst, dstStride, dstW, dstH,
+		src, srcStride, srcW, srcH, bx, by, bw, bh, mv,
+		modeH, modeV, ssHor, ssVer, true)
+}
+
+func copyInterPredictPlaneSubsampledImpl(dst []byte, dstStride, dstW, dstH int,
+	src []byte, srcStride, srcW, srcH int,
+	bx, by, bw, bh int,
+	mv refmvs.MV, modeH, modeV header.FilterMode, ssHor, ssVer int,
+	allowDirect bool,
+) {
 	if len(dst) == 0 || len(src) == 0 || srcW <= 0 || srcH <= 0 || bw <= 0 || bh <= 0 {
 		return
 	}
@@ -7469,8 +7480,39 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 	sx := bx + px
 	sy := by + py
 
+	dstOff := by*dstStride + bx
+	if dstOff < 0 || dstOff >= len(dst) {
+		return
+	}
+	filt := interFilter2D(modeH, modeV)
+	writeW := minInt(bw, dstW-bx)
+	writeH := minInt(bh, dstH-by)
+	if writeW <= 0 || writeH <= 0 {
+		return
+	}
+
 	padStride := bw + 7
 	padH := bh + 7
+	sourceX0 := sx - 3
+	sourceY0 := sy - 3
+	if allowDirect && writeW == bw && writeH == bh &&
+		sourceX0 >= 0 && sourceX0+padStride <= srcW &&
+		sourceY0 >= 0 && sourceY0+padH <= srcH &&
+		srcStride > 0 && sourceX0+padStride <= srcStride {
+		srcBase := sy*srcStride + sx
+		lastSource := (sourceY0+padH-1)*srcStride + sourceX0 + padStride
+		if srcBase >= 0 && lastSource <= len(src) {
+			if filt == predinter.Filter2DBilinear {
+				predinter.PutBilin(dst[dstOff:], dstStride,
+					src, srcBase, srcStride, bw, bh, mx, my)
+				return
+			}
+			predinter.Put8Tap(dst[dstOff:], dstStride,
+				src, srcBase, srcStride, bw, bh, mx, my, filt)
+			return
+		}
+	}
+
 	padLen := padStride * padH
 	padBuffer := interPredictPadPool.Get().(*interPredictBuffer)
 	pad := padBuffer.samples
@@ -7482,7 +7524,6 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 	padBuffer.samples = pad
 	defer interPredictPadPool.Put(padBuffer)
 
-	sourceX0 := sx - 3
 	leftEnd := clampInt(-sourceX0, 0, padStride)
 	validSrcStart := sourceX0 + leftEnd
 	validCount := 0
@@ -7507,17 +7548,7 @@ func copyInterPredictPlaneSubsampled(dst []byte, dstStride, dstW, dstH int,
 			pad[padRow+x] = right
 		}
 	}
-	dstOff := by*dstStride + bx
-	if dstOff < 0 || dstOff >= len(dst) {
-		return
-	}
-	filt := interFilter2D(modeH, modeV)
 	srcBase := 3*padStride + 3
-	writeW := minInt(bw, dstW-bx)
-	writeH := minInt(bh, dstH-by)
-	if writeW <= 0 || writeH <= 0 {
-		return
-	}
 	if writeW != bw || writeH != bh {
 		pred := make([]byte, bw*bh)
 		if filt == predinter.Filter2DBilinear {

@@ -362,6 +362,23 @@ The standard seven-run result measured 1.235 seconds and 97.19 packets/s, or
 `padding` accounted for approximately 0.64 seconds / 4.4 percent, down from
 approximately 0.94 seconds / 6.2 percent in the preceding long profile.
 
+Unscaled inter prediction now reads the reference plane directly when the
+complete 3/4-pixel filter margin is inside the visible frame and the
+destination accepts the full nominal block. Boundary emulation, clamped
+motion vectors, and partial destination writes retain the pooled padding
+path. A forced-padding reference mode matches the direct path across 5,000
+randomized interior blocks, luma/chroma phases, filter combinations, and
+block sizes from 4x4 through 64x64. Representative two-axis 8-tap
+microbenchmarks fell from approximately 309 to 201 ns at 16x16 and from
+2.69 to 2.37 microseconds at 64x64; integer prediction is approximately
+three times faster. A same-session all-filter comparison reduced the median
+from 1.1743 to 1.1343 seconds (3.4 percent), increasing throughput from
+102.19 to 105.79 packets/s. The standard seven-run result measured 1.133
+seconds and 105.92 packets/s, or 4.88x the matching dav1d wall time. In the
+599-frame profile, padding-related `memmove` inside the inter wrapper fell
+to approximately 0.01 seconds; most of its 0.34-second cumulative time is
+now the actual `Put8Tap` work.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:
