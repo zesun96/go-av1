@@ -169,6 +169,9 @@ func TestMergeFilterStateCopiesOnlyTileRegion(t *testing.T) {
 	if dst.CDEFIndex[1] != 3 {
 		t.Fatalf("CDEF index=%d want 3", dst.CDEFIndex[1])
 	}
+	if !dst.CDEFBlockHasNonSkip(8, 0) || dst.CDEFBlockHasNonSkip(0, 0) {
+		t.Fatalf("merged CDEF non-skip bits do not match the tile region")
+	}
 }
 
 func TestBlockGridSharesPerBlockMetadata(t *testing.T) {
@@ -235,9 +238,10 @@ func TestFrameStateResetRestoresSentinelsAndMetadata(t *testing.T) {
 		t.Fatalf("rolling context was not reset: skip=%d ref=%d tx=%d coef=%d",
 			fs.AboveSkip[0], fs.AboveRef[0], fs.AboveTxIntra[0], fs.AboveLCoef[0])
 	}
-	if fs.CDEFIndex[0] != -1 || len(fs.RestorationUnits) != 0 || len(fs.Blocks) != 0 {
-		t.Fatalf("durable state was not reset: cdef=%d restoration=%d blocks=%d",
-			fs.CDEFIndex[0], len(fs.RestorationUnits), len(fs.Blocks))
+	if fs.CDEFIndex[0] != -1 || fs.CDEFBlockHasNonSkip(0, 0) ||
+		len(fs.RestorationUnits) != 0 || len(fs.Blocks) != 0 {
+		t.Fatalf("durable state was not reset: cdef=%d non_skip=%t restoration=%d blocks=%d",
+			fs.CDEFIndex[0], fs.CDEFBlockHasNonSkip(0, 0), len(fs.RestorationUnits), len(fs.Blocks))
 	}
 	if block, _ := fs.BlockState(0, 0); block != (Av1Block{}) {
 		t.Fatalf("block grid retained metadata: %+v", block)

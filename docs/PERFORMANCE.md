@@ -409,6 +409,23 @@ decode-loop allocation fell from 2.708 to 1.889 GB (4.52 to 3.15 MB/frame),
 a further 30.2 percent reduction. WebRTC remained 599/599 byte-exact, and the
 complete AOM result remained 197 passed, zero failed, and 66 unsupported.
 
+CDEF non-skip state is now accumulated as one bit per luma 8x8 block while
+coding blocks are committed. Luma and chroma filtering read that shared
+bitset directly instead of clearing and filling a byte table after scanning
+four 4x4 block-grid entries for every CDEF block. Multi-tile state merges
+copy only the active tile's bits. Best-effort damaged-frame decoding retains
+the original grid scan because uncommitted cells must not be mistaken for
+valid skip blocks.
+
+Two same-session nine-run comparisons reduced the 120-packet median by 0.7
+and 1.7 percent; the conservative final result was 1.114 to 1.106 seconds,
+increasing throughput from 107.72 to 108.47 packets/s. In comparable
+599-frame profiles, the CDEF path fell from approximately 3.30 to 2.86
+seconds cumulatively, and the former 0.28-second non-skip scan disappeared
+without a visible replacement hotspot. Allocation remained effectively flat
+at approximately 1.89 GB. WebRTC remained 599/599 byte-exact, and the
+complete AOM result remained 197 passed, zero failed, and 66 unsupported.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

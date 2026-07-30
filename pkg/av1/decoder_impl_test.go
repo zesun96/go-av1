@@ -449,15 +449,61 @@ func TestCDEFBlockHasNonSkip(t *testing.T) {
 	fs := tile.NewFrameState(16, 16)
 	fs.SetSubsampling(1, 1)
 	fs.SetBlockState(0, 0, 16, 16, tile.Av1Block{Skip: true})
-	if cdefBlockHasNonSkip(fs, 0, 0, 8, 8, 0) {
+	if fs.CDEFBlockHasNonSkip(0, 0) || cdefBlockHasNonSkip(fs, 0, 0, 8, 8, 0) {
 		t.Fatal("all-skip luma CDEF block reported non-skip")
 	}
 	fs.SetBlockState(4, 4, 4, 4, tile.Av1Block{Skip: false})
-	if !cdefBlockHasNonSkip(fs, 0, 0, 8, 8, 0) {
+	if !fs.CDEFBlockHasNonSkip(0, 0) || !cdefBlockHasNonSkip(fs, 0, 0, 8, 8, 0) {
 		t.Fatal("mixed luma CDEF block reported all-skip")
 	}
-	if !cdefBlockHasNonSkip(fs, 0, 0, 4, 4, 1) {
-		t.Fatal("chroma CDEF block did not map to its luma non-skip region")
+	if fs.CDEFBlockHasNonSkip(1, 0) || fs.CDEFBlockHasNonSkip(0, 1) {
+		t.Fatal("non-skip bit escaped its luma CDEF block")
+	}
+	empty := tile.NewFrameState(8, 8)
+	if empty.CDEFBlockHasNonSkip(0, 0) || !cdefBlockHasNonSkip(empty, 0, 0, 8, 8, 0) {
+		t.Fatal("uncommitted block did not preserve best-effort scan behavior")
+	}
+}
+
+var benchmarkCDEFNonSkipSink int
+
+func BenchmarkCDEFNonSkipLookup1080p(b *testing.B) {
+	fs := tile.NewFrameState(1920, 1080)
+	for by := 0; by < fs.H8; by++ {
+		for bx := 0; bx < fs.W8; bx++ {
+			fs.SetBlockState(bx*8, by*8, 8, 8, tile.Av1Block{Skip: (bx+by)&1 == 0})
+		}
+	}
+	b.ReportAllocs()
+	for _, benchmark := range []struct {
+		name string
+		fn   func(int, int) bool
+	}{
+		{name: "FourByFourGrid", fn: func(col8, row8 int) bool {
+			col4, row4 := col8*2, row8*2
+			return !fs.BlockIsSkipAt4(col4, row4) ||
+				!fs.BlockIsSkipAt4(col4+1, row4) ||
+				!fs.BlockIsSkipAt4(col4, row4+1) ||
+				!fs.BlockIsSkipAt4(col4+1, row4+1)
+		}},
+		{name: "Bitset", fn: func(col8, row8 int) bool {
+			index := row8*fs.W8 + col8
+			return fs.CDEFNonSkip[index>>6]&(uint64(1)<<uint(index&63)) != 0
+		}},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			count := 0
+			for i := 0; i < b.N; i++ {
+				for by := 0; by < fs.H8; by++ {
+					for bx := 0; bx < fs.W8; bx++ {
+						if benchmark.fn(bx, by) {
+							count++
+						}
+					}
+				}
+			}
+			benchmarkCDEFNonSkipSink = count
+		})
 	}
 }
 

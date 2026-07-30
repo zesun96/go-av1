@@ -70,7 +70,11 @@ type FrameState struct {
 
 	// CDEFIndex stores the decoded per-64x64 CDEF strength index. A value of
 	// -1 means no non-skip block has read the index for that CDEF unit yet.
-	CDEFIndex        []int8
+	CDEFIndex []int8
+	// CDEFNonSkip stores one bit per luma 8x8 CDEF block. Bits are set while
+	// coding blocks are committed so post-filtering does not need to rescan
+	// the denser 4x4 block grid.
+	CDEFNonSkip      []uint64
 	RestorationUnits []RestorationUnit
 
 	// AboveSegID[col4] / LeftSegID[row4] — segment_id of decoded neighbour
@@ -228,6 +232,7 @@ func NewFrameState(w, h int) *FrameState {
 			make([]int16, h4),
 		},
 		CDEFIndex:    cdefIndex,
+		CDEFNonSkip:  make([]uint64, (w8*h8+63)/64),
 		AboveSegID:   make([]uint8, w4),
 		LeftSegID:    make([]uint8, h4),
 		AboveSegPred: make([]uint8, w4),
@@ -339,6 +344,7 @@ func (fs *FrameState) Reset() {
 		clear(fs.LeftMV[component])
 	}
 	fillInt8(fs.CDEFIndex, -1)
+	clear(fs.CDEFNonSkip)
 	fs.RestorationUnits = fs.RestorationUnits[:0]
 	clear(fs.AboveSegID)
 	clear(fs.LeftSegID)
@@ -686,6 +692,9 @@ func (fs *FrameState) SetBlockState(bx, by, bw, bh int, blk Av1Block) {
 	if row4End > fs.H4 {
 		row4End = fs.H4
 	}
+	if !blk.Skip {
+		fs.markCDEFNonSkip(bx, by, bw, bh)
+	}
 	skipMode := uint8(0)
 	if blk.SkipMode {
 		skipMode = 1
@@ -813,7 +822,44 @@ func (fs *FrameState) MergeFilterState(src *FrameState) {
 			fs.CDEFIndex[i] = v
 		}
 	}
+	cdefX0 := clampInt(src.TileX0/8, 0, fs.W8)
+	cdefX1 := clampInt((src.TileX1+7)/8, 0, fs.W8)
+	cdefY0 := clampInt(src.TileY0/8, 0, fs.H8)
+	cdefY1 := clampInt((src.TileY1+7)/8, 0, fs.H8)
+	for y := cdefY0; y < cdefY1; y++ {
+		for x := cdefX0; x < cdefX1; x++ {
+			index := y*fs.W8 + x
+			bit := uint64(1) << uint(index&63)
+			if src.CDEFNonSkip[index>>6]&bit != 0 {
+				fs.CDEFNonSkip[index>>6] |= bit
+			}
+		}
+	}
 	fs.RestorationUnits = append(fs.RestorationUnits, src.RestorationUnits...)
+}
+
+func (fs *FrameState) markCDEFNonSkip(bx, by, bw, bh int) {
+	x0 := clampInt(bx/8, 0, fs.W8)
+	x1 := clampInt((bx+bw+7)/8, 0, fs.W8)
+	y0 := clampInt(by/8, 0, fs.H8)
+	y1 := clampInt((by+bh+7)/8, 0, fs.H8)
+	for y := y0; y < y1; y++ {
+		base := y * fs.W8
+		for x := x0; x < x1; x++ {
+			index := base + x
+			fs.CDEFNonSkip[index>>6] |= uint64(1) << uint(index&63)
+		}
+	}
+}
+
+// CDEFBlockHasNonSkip reports whether an 8x8 luma CDEF block contains any
+// non-skip coding block.
+func (fs *FrameState) CDEFBlockHasNonSkip(col8, row8 int) bool {
+	if fs == nil || col8 < 0 || col8 >= fs.W8 || row8 < 0 || row8 >= fs.H8 {
+		return false
+	}
+	index := row8*fs.W8 + col8
+	return fs.CDEFNonSkip[index>>6]&(uint64(1)<<uint(index&63)) != 0
 }
 
 func (fs *FrameState) BlockState(bx, by int) (Av1Block, bool) {

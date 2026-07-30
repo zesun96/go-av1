@@ -61,7 +61,6 @@ type decoderImpl struct {
 	cdefSrc                    []byte
 	cdefDirs                   []uint8
 	cdefVariances              []uint
-	cdefNonSkip                []uint8
 	restorationBoundaryScratch [3][]byte
 
 	closed bool
@@ -859,23 +858,11 @@ func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader,
 	if cap(d.cdefDirs) < dirLen {
 		d.cdefDirs = make([]uint8, dirLen)
 		d.cdefVariances = make([]uint, dirLen)
-		d.cdefNonSkip = make([]uint8, dirLen)
 	} else {
 		d.cdefDirs = d.cdefDirs[:dirLen]
 		d.cdefVariances = d.cdefVariances[:dirLen]
-		d.cdefNonSkip = d.cdefNonSkip[:dirLen]
 		clear(d.cdefDirs)
 		clear(d.cdefVariances)
-		clear(d.cdefNonSkip)
-	}
-	if fs != nil {
-		for by := 0; by < h; by += 8 {
-			for bx := 0; bx < w; bx += 8 {
-				if cdefBlockHasNonSkip(fs, bx, by, 8, 8, 0) {
-					d.cdefNonSkip[(by/8)*dirW+bx/8] = 1
-				}
-			}
-		}
 	}
 	maxPlaneLen := len(pic.Y)
 	if cap(d.cdefSrc) < maxPlaneLen {
@@ -883,17 +870,27 @@ func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader,
 	} else {
 		d.cdefSrc = d.cdefSrc[:maxPlaneLen]
 	}
+	var nonSkipBits []uint64
+	if fs != nil && !d.opts.BestEffort {
+		nonSkipBits = fs.CDEFNonSkip
+	}
+	if fs != nil && d.opts.BestEffort {
+		// A damaged frame can leave 4x4 cells uncommitted. The legacy scan
+		// treats those cells as non-skip so neutral fallback pixels are still
+		// filtered; retain that behavior outside the strict hot path.
+		nonSkipBits = nil
+	}
 
-	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, d.cdefNonSkip, dirW, d.cdefSrc)
+	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, nonSkipBits, dirW, d.cdefSrc)
 	if pic.Chroma != ChromaMonochrome && len(pic.U) > 0 {
 		cw, ch := pic.codedChromaSize()
-		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, d.cdefNonSkip, dirW, d.cdefSrc)
-		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, d.cdefNonSkip, dirW, d.cdefSrc)
+		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, nonSkipBits, dirW, d.cdefSrc)
+		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, nonSkipBits, dirW, d.cdefSrc)
 	}
 }
 
 // applyCDEFPlane applies CDEF block-by-block to one plane.
-func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, nonSkip []uint8, dirStride int, src []byte) {
+func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, nonSkipBits []uint64, dirStride int, src []byte) {
 	if len(plane) == 0 {
 		return
 	}
@@ -902,7 +899,13 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 	for by := 0; by < h; by += blockSz {
 		for bx := 0; bx < w; bx += blockSz {
 			dirIdx := (by/blockSz)*dirStride + bx/blockSz
-			if fs != nil && (dirIdx < 0 || dirIdx >= len(nonSkip) || nonSkip[dirIdx] == 0) {
+			if len(nonSkipBits) != 0 {
+				word := dirIdx >> 6
+				if word < 0 || word >= len(nonSkipBits) ||
+					nonSkipBits[word]&(uint64(1)<<uint(dirIdx&63)) == 0 {
+					continue
+				}
+			} else if fs != nil && !cdefBlockHasNonSkip(fs, bx, by, blockSz, blockSz, planeID) {
 				continue
 			}
 			preset := 0
