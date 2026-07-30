@@ -69,3 +69,42 @@ negativeNext:
 	DECQ R10
 	JNZ negativeRow
 	RET
+
+DATA ·residualRound8<>+0(SB)/8, $0x0000000800000008
+DATA ·residualRound8<>+8(SB)/8, $0x0000000800000008
+GLOBL ·residualRound8<>(SB), RODATA|NOPTR, $16
+
+// addResidual8SSE41 rounds Q4 residuals and saturating-adds eight pixels.
+TEXT ·addResidual8SSE41(SB), NOSPLIT, $0-40
+	MOVQ dst+0(FP), DI
+	MOVQ stride+8(FP), R8
+	MOVQ src+16(FP), SI
+	MOVQ w+24(FP), R9
+	MOVQ h+32(FP), R10
+	MOVO ·residualRound8<>(SB), X7
+
+residualRow:
+	XORQ CX, CX
+residualCol:
+	MOVOU (SI)(CX*4), X0
+	MOVOU 16(SI)(CX*4), X1
+	PADDL X7, X0
+	PADDL X7, X1
+	PSRAL $4, X0
+	PSRAL $4, X1
+	PACKSSLW X1, X0
+
+	MOVQ (DI)(CX*1), X2
+	PMOVZXBW X2, X2
+	PADDW X0, X2
+	PACKUSWB X2, X2
+	MOVQ X2, (DI)(CX*1)
+
+	ADDQ $8, CX
+	CMPQ CX, R9
+	JL residualCol
+	LEAQ (SI)(R9*4), SI
+	ADDQ R8, DI
+	DECQ R10
+	JNZ residualRow
+	RET

@@ -284,6 +284,18 @@ percent); the final candidate rerun measured 1.332 seconds and 90.12
 packets/s. The sampled inverse-transform cumulative share fell from
 approximately 13.7 to 8.5 percent.
 
+The general 8-bit inverse-transform output stage now rounds two groups of four
+Q4 residuals, packs them to signed words, adds eight destination pixels, and
+clips the result with SSE4.1. Width-four transforms and non-amd64 or `purego`
+builds retain the scalar loop. Across all eligible square and rectangular
+sizes, 1,600 randomized comparisons cover the complete signed 16-bit residual
+range and destination row padding. The 16x16 output-stage microbenchmark fell
+from approximately 211 to 96 ns (55 percent). A same-session end-to-end
+comparison fell from 1.368 to 1.356 seconds (0.9 percent), while the final
+candidate rerun measured 1.333 seconds and 90.05 packets/s. The former scalar
+pixel-add loop no longer appears as a standalone profile hotspot; the SIMD
+wrapper accounts for approximately 0.8 percent in the sampled run.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

@@ -56,6 +56,49 @@ func TestAddDCSSE2MatchesScalar(t *testing.T) {
 	}
 }
 
+func TestAddResidualSSE41MatchesScalar(t *testing.T) {
+	if !haveAddResidualSSE41 {
+		t.Skip("SSE4.1 unavailable")
+	}
+	rng := rand.New(rand.NewSource(92))
+	for tx := uint8(0); tx < NRectTxSizes; tx++ {
+		td := TxfmDimensions[tx]
+		w, h := int(td.W)*4, int(td.H)*4
+		if w < 8 {
+			continue
+		}
+		for iteration := 0; iteration < 100; iteration++ {
+			stride := w + 5
+			scalar := make([]byte, stride*h)
+			if _, err := rng.Read(scalar); err != nil {
+				t.Fatal(err)
+			}
+			simd := append([]byte(nil), scalar...)
+			src := make([]int32, w*h)
+			for i := range src {
+				src[i] = int32(rng.Intn(1<<16) - (1 << 15))
+			}
+			for y := 0; y < h; y++ {
+				for x := 0; x < w; x++ {
+					i := y*w + x
+					d := y*stride + x
+					scalar[d] = uint8(pixelClamp(
+						int(scalar[d])+((int(src[i])+8)>>4), 255))
+				}
+			}
+			addResidual8SSE41(&simd[0], stride, &src[0], w, h)
+			if !bytes.Equal(simd, scalar) {
+				for i := range simd {
+					if simd[i] != scalar[i] {
+						t.Fatalf("mismatch tx=%d w=%d h=%d iteration=%d i=%d scalar=%d simd=%d",
+							tx, w, h, iteration, i, scalar[i], simd[i])
+					}
+				}
+			}
+		}
+	}
+}
+
 func BenchmarkAddDC16x16(b *testing.B) {
 	const width, height, stride, dc = 16, 16, 19, -37
 	template := make([]byte, stride*height)
@@ -82,6 +125,43 @@ func BenchmarkAddDC16x16(b *testing.B) {
 		b.SetBytes(width * height)
 		for n := 0; n < b.N; n++ {
 			addDC8SSE2(&dst[0], stride, width, height, dc)
+		}
+		benchmarkTransformSink = dst[b.N%len(dst)]
+	})
+}
+
+func BenchmarkAddResidual16x16(b *testing.B) {
+	const width, height, stride = 16, 16, 19
+	template := make([]byte, stride*height)
+	src := make([]int32, width*height)
+	for i := range template {
+		template[i] = byte(i*29 + 17)
+	}
+	for i := range src {
+		src[i] = int32((i*997)&0xffff) - (1 << 15)
+	}
+	b.Run("Scalar", func(b *testing.B) {
+		dst := append([]byte(nil), template...)
+		b.ReportAllocs()
+		b.SetBytes(width * height)
+		for n := 0; n < b.N; n++ {
+			for y := 0; y < height; y++ {
+				for x := 0; x < width; x++ {
+					s := y*width + x
+					d := y*stride + x
+					dst[d] = uint8(pixelClamp(
+						int(dst[d])+((int(src[s])+8)>>4), 255))
+				}
+			}
+		}
+		benchmarkTransformSink = dst[b.N%len(dst)]
+	})
+	b.Run("SSE41", func(b *testing.B) {
+		dst := append([]byte(nil), template...)
+		b.ReportAllocs()
+		b.SetBytes(width * height)
+		for n := 0; n < b.N; n++ {
+			addResidual8SSE41(&dst[0], stride, &src[0], width, height)
 		}
 		benchmarkTransformSink = dst[b.N%len(dst)]
 	})

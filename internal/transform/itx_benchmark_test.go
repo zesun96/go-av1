@@ -47,3 +47,29 @@ func checksumBytes(data []byte) uint64 {
 	}
 	return sum
 }
+
+func BenchmarkInvDCT1D(b *testing.B) {
+	for _, tc := range []struct {
+		name   string
+		size   int
+		stride int
+		fn     func([]int32, int, int, int)
+	}{
+		{name: "DCT8/Stride1", size: 8, stride: 1, fn: InvDCT8},
+		{name: "DCT8/Stride8", size: 8, stride: 8, fn: InvDCT8},
+		{name: "DCT16/Stride1", size: 16, stride: 1, fn: InvDCT16},
+		{name: "DCT16/Stride16", size: 16, stride: 16, fn: InvDCT16},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			values := make([]int32, tc.size*tc.stride)
+			for i := 0; i < tc.size; i++ {
+				values[i*tc.stride] = int32(i*97 - 311)
+			}
+			b.ReportAllocs()
+			for n := 0; n < b.N; n++ {
+				tc.fn(values, tc.stride, itxMin, itxMax)
+			}
+			benchmarkTransformSink = byte(values[(b.N%tc.size)*tc.stride])
+		})
+	}
+}

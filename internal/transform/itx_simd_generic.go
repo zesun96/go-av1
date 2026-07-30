@@ -5,3 +5,7 @@ package transform
 func addDC8SIMD(dst []uint8, stride, w, h, dc int) bool {
 	return false
 }
+
+func addResidual8SIMD(dst []uint8, stride int, src []int32, w, h int) bool {
+	return false
+}

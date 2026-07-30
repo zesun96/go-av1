@@ -197,6 +197,10 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 	}
 
 	// Final pixel add with rounding (+8 >> 4)
+	if bitDepth == 8 && addResidual8SIMD(dst, stride, tmp, w, h) {
+		inverseTransformScratchPool.Put(tmpBuffer)
+		return
+	}
 	c = tmp
 	for y := 0; y < h; y++ {
 		rowOff := y * stride
