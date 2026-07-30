@@ -308,6 +308,20 @@ candidate rerun measured 1.335 seconds and 89.85 packets/s, or 5.45x the
 matching dav1d wall time. The sampled `FindDir` share fell from approximately
 5.3 to 2.4 percent.
 
+Non-zero frame-state resets now seed 32 bytes and grow the initialized region
+with overlap-safe copies instead of storing every byte in a scalar loop.
+`SetTxState` similarly fills one transform row at a time, hoists its boundary
+decisions, and keeps a direct single-column path for 4x4 transforms. Boundary
+tests cover fill sizes around the scalar/copy threshold, and 10,000 randomized
+transform rectangles match the previous cell-wise implementation exactly.
+The 256 KiB fill microbenchmark fell from approximately 148 to 8.7
+microseconds (94 percent), while the 64x64 transform-state benchmark fell
+from approximately 350 to 205 ns (41 percent); aligned 4x4 writes improved
+from approximately 7 to 3.1 ns. A same-session all-filter comparison reduced
+the median from 1.3146 to 1.3017 seconds (1.0 percent), increasing throughput
+from 91.28 to 92.19 packets/s. The standard seven-run result measured 1.306
+seconds and 91.91 packets/s, or 5.36x the matching dav1d wall time.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

@@ -1,11 +1,76 @@
 package tile
 
 import (
+	"math/rand"
 	"testing"
 
 	"github.com/zesun96/go-av1/internal/bitstream"
 	"github.com/zesun96/go-av1/internal/refmvs"
 )
+
+func TestSetTxStateMatchesReferenceRandom(t *testing.T) {
+	rng := rand.New(rand.NewSource(102))
+	for iteration := 0; iteration < 10_000; iteration++ {
+		w4 := 1 + rng.Intn(64)
+		h4 := 1 + rng.Intn(64)
+		initial := make([]uint8, w4*h4)
+		if _, err := rng.Read(initial); err != nil {
+			t.Fatal(err)
+		}
+		got := &FrameState{W4: w4, H4: h4, TxGrid: append([]uint8(nil), initial...)}
+		want := append([]uint8(nil), initial...)
+		bx := rng.Intn((w4+8)*4) - 16
+		by := rng.Intn((h4+8)*4) - 16
+		bw := 1 + rng.Intn(260)
+		bh := 1 + rng.Intn(260)
+		tx := uint8(rng.Intn(256))
+
+		got.SetTxState(bx, by, bw, bh, tx)
+		setTxStateReference(want, w4, h4, bx, by, bw, bh, tx)
+		for i := range want {
+			if got.TxGrid[i] != want[i] {
+				t.Fatalf("iteration=%d index=%d grid=%dx%d rect=(%d,%d %dx%d) tx=%d got=%d want=%d",
+					iteration, i, w4, h4, bx, by, bw, bh, tx, got.TxGrid[i], want[i])
+			}
+		}
+	}
+}
+
+func TestFillUint8SizesAndValues(t *testing.T) {
+	for _, size := range []int{0, 1, 15, 16, 31, 32, 33, 63, 64, 65, 255, 256, 4096} {
+		for _, value := range []uint8{0, 1, 0x40, 0xff} {
+			values := make([]uint8, size)
+			for i := range values {
+				values[i] = uint8(i*37 + 11)
+			}
+			fillUint8(values, value)
+			for i, got := range values {
+				if got != value {
+					t.Fatalf("size=%d value=%d index=%d got=%d", size, value, i, got)
+				}
+			}
+		}
+	}
+}
+
+func setTxStateReference(grid []uint8, w4, h4, bx, by, bw, bh int, tx uint8) {
+	x0 := clampInt(bx/4, 0, w4)
+	x1 := clampInt((bx+bw+3)/4, 0, w4)
+	y0 := clampInt(by/4, 0, h4)
+	y1 := clampInt((by+bh+3)/4, 0, h4)
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			entry := tx & txSizeMask
+			if x == x0 {
+				entry |= txBoundaryLeft
+			}
+			if y == y0 {
+				entry |= txBoundaryTop
+			}
+			grid[y*w4+x] = entry
+		}
+	}
+}
 
 func TestDisabledBlockTraceHasZeroAllocations(t *testing.T) {
 	fs := NewFrameState(64, 64)

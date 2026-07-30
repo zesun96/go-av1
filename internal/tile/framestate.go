@@ -372,8 +372,17 @@ func (fs *FrameState) Reset() {
 }
 
 func fillUint8(values []uint8, value uint8) {
-	for i := range values {
+	if len(values) < 32 {
+		for i := range values {
+			values[i] = value
+		}
+		return
+	}
+	for i := 0; i < 32; i++ {
 		values[i] = value
+	}
+	for filled := 32; filled < len(values); {
+		filled += copy(values[filled:], values[:filled])
 	}
 }
 
@@ -725,18 +734,27 @@ func (fs *FrameState) SetTxState(bx, by, bw, bh int, tx uint8) {
 	x1 := clampInt((bx+bw+3)/4, 0, fs.W4)
 	y0 := clampInt(by/4, 0, fs.H4)
 	y1 := clampInt((by+bh+3)/4, 0, fs.H4)
-	for y := y0; y < y1; y++ {
-		for x := x0; x < x1; x++ {
-			i := y*fs.W4 + x
-			entry := tx & txSizeMask
-			if x == x0 {
-				entry |= txBoundaryLeft
-			}
-			if y == y0 {
-				entry |= txBoundaryTop
-			}
-			fs.TxGrid[i] = entry
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
+	entry := tx & txSizeMask
+	if x1-x0 == 1 {
+		i := y0*fs.W4 + x0
+		fs.TxGrid[i] = entry | txBoundaryLeft | txBoundaryTop
+		for y := y0 + 1; y < y1; y++ {
+			i += fs.W4
+			fs.TxGrid[i] = entry | txBoundaryLeft
 		}
+		return
+	}
+	for y := y0; y < y1; y++ {
+		rowEntry := entry
+		if y == y0 {
+			rowEntry |= txBoundaryTop
+		}
+		row := fs.TxGrid[y*fs.W4+x0 : y*fs.W4+x1]
+		fillUint8(row, rowEntry)
+		row[0] |= txBoundaryLeft
 	}
 }
 
