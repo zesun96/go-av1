@@ -243,14 +243,17 @@ type Frame struct {
 	RP       []TemporalBlock // current frame's temporal blocks (row-major)
 	RPProj   []TemporalBlock // reference fields projected into this frame
 
-	// Per-block MV store (35 × RPStride entries for the current superblock row).
+	// Reserved for the dav1d-style rolling superblock-row store. It stays
+	// unallocated while block-syntax consumers use the indexed full-frame grid.
 	R       []Block
 	RStride int
 
 	// Full-frame block store used by the Go decoder while the dav1d-style
-	// row window is still being wired into block-syntax consumers.
+	// row window is still being wired into block-syntax consumers. Grid holds
+	// one-based indexes so each coded block is stored only once in Blocks.
 	GridStride int
-	Grid       []Block
+	Grid       []uint32
+	Blocks     []Block
 }
 
 // NormalizeMVPrecision applies AV1's frame-level MV precision restrictions.
@@ -290,6 +293,7 @@ func NewFrame(iw, ih int) *Frame {
 	iw4 := iw8 << 1
 	ih4 := ih8 << 1
 	rStride := iw4 + 4 // 2-pixel border each side
+	gridLen := iw4 * ih4
 	return &Frame{
 		IW4:        iw4,
 		IH4:        ih4,
@@ -298,10 +302,10 @@ func NewFrame(iw, ih int) *Frame {
 		RPStride:   iw8,
 		RP:         make([]TemporalBlock, iw8*ih8),
 		RPProj:     make([]TemporalBlock, iw8*ih8),
-		R:          make([]Block, 35*rStride),
 		RStride:    rStride,
 		GridStride: iw4,
-		Grid:       make([]Block, iw4*ih4),
+		Grid:       make([]uint32, gridLen),
+		Blocks:     make([]Block, 1, gridLen/8+1),
 	}
 }
 
@@ -446,11 +450,16 @@ func (f *Frame) PutGridBlock(bx4, by4, bw4, bh4 int, blk Block) {
 	y0 := clamp(by4, 0, f.IH4)
 	x1 := clamp(bx4+bw4, 0, f.IW4)
 	y1 := clamp(by4+bh4, 0, f.IH4)
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
 	blk.X4, blk.Y4 = int16(bx4), int16(by4)
+	blockIndex := uint32(len(f.Blocks))
+	f.Blocks = append(f.Blocks, blk)
 	for y := y0; y < y1; y++ {
 		base := y * f.GridStride
 		for x := x0; x < x1; x++ {
-			f.Grid[base+x] = blk
+			f.Grid[base+x] = blockIndex
 		}
 	}
 }
@@ -460,5 +469,9 @@ func (f *Frame) GridBlock(bx4, by4 int) (Block, bool) {
 	if f == nil || f.GridStride == 0 || bx4 < 0 || by4 < 0 || bx4 >= f.IW4 || by4 >= f.IH4 {
 		return Block{}, false
 	}
-	return f.Grid[by4*f.GridStride+bx4], true
+	blockIndex := f.Grid[by4*f.GridStride+bx4]
+	if blockIndex == 0 || int(blockIndex) >= len(f.Blocks) {
+		return Block{}, true
+	}
+	return f.Blocks[blockIndex], true
 }

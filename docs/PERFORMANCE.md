@@ -395,6 +395,20 @@ every active byte. The 120-packet nine-run median moved from 1.129 to 1.126
 seconds. WebRTC remained 599/599 byte-exact, and the complete AOM result
 remained 197 passed, zero failed, and 66 unsupported.
 
+The full-frame reference-MV grid now stores one 16-byte block record per
+coded block and a 32-bit one-based index per covered 4x4 cell. Previously it
+duplicated the complete record in every cell. The unused dav1d-style rolling
+row buffer is no longer allocated before any consumer exists for it.
+
+For 1920x1080, `NewFrame` allocation fell from 2.75 to 1.18 MB (57 percent),
+and the synthetic allocate-and-populate benchmark fell from approximately
+0.50 to 0.32 milliseconds. A same-session nine-run WebRTC comparison reduced
+the 120-packet median from 1.125 to 1.106 seconds (1.7 percent), increasing
+throughput from 106.68 to 108.53 packets/s. Across 599 frames, cumulative
+decode-loop allocation fell from 2.708 to 1.889 GB (4.52 to 3.15 MB/frame),
+a further 30.2 percent reduction. WebRTC remained 599/599 byte-exact, and the
+complete AOM result remained 197 passed, zero failed, and 66 unsupported.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

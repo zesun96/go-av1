@@ -248,8 +248,11 @@ func TestNewFrame_Basic(t *testing.T) {
 	if len(f.RP) != f.IW8*f.IH8 {
 		t.Errorf("RP len=%d want %d", len(f.RP), f.IW8*f.IH8)
 	}
-	if len(f.R) != 35*f.RStride {
-		t.Errorf("R len=%d want %d", len(f.R), 35*f.RStride)
+	if len(f.R) != 0 {
+		t.Errorf("unused rolling row store len=%d want 0", len(f.R))
+	}
+	if len(f.Blocks) != 1 {
+		t.Errorf("block metadata len=%d want sentinel only", len(f.Blocks))
 	}
 }
 
@@ -356,6 +359,16 @@ func TestFrameGridBlock(t *testing.T) {
 	}
 	if got.Ref != blk.Ref || got.MV != blk.MV || got.BS != blk.BS || got.MF != blk.MF {
 		t.Fatalf("GridBlock=%+v want %+v", got, blk)
+	}
+	if len(f.Blocks) != 2 {
+		t.Fatalf("block metadata len=%d want sentinel plus one coded block", len(f.Blocks))
+	}
+	for y := 1; y < 4; y++ {
+		for x := 2; x < 4; x++ {
+			if gotIndex := f.Grid[y*f.GridStride+x]; gotIndex != 1 {
+				t.Fatalf("grid index at (%d,%d)=%d want 1", x, y, gotIndex)
+			}
+		}
 	}
 }
 

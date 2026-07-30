@@ -36,3 +36,30 @@ func BenchmarkFindSpatialCandidates(b *testing.B) {
 	}
 	benchmarkRefMVSSink = sink
 }
+
+func BenchmarkNewFrame1080p(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		frame := NewFrame(1920, 1080)
+		benchmarkRefMVSSink = len(frame.Grid)
+	}
+}
+
+func BenchmarkPopulateFrameGrid1080p(b *testing.B) {
+	const (
+		width4  = 1920 / 4
+		height4 = 1088 / 4
+		block4  = 4
+	)
+	blk := Block{MV: MVPair{{X: 8, Y: -4}, {}}, Ref: RefPair{1, -1}, BS: 6}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		frame := NewFrame(1920, 1080)
+		for y := 0; y < height4; y += block4 {
+			for x := 0; x < width4; x += block4 {
+				frame.PutGridBlock(x, y, block4, block4, blk)
+			}
+		}
+		benchmarkRefMVSSink = len(frame.Grid)
+	}
+}
