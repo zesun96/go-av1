@@ -7,6 +7,20 @@ import (
 	"github.com/zesun96/go-av1/internal/header"
 )
 
+var paletteMissingOrder = func() [256][8]uint8 {
+	var table [256][8]uint8
+	for mask := range table {
+		n := 0
+		for color := 0; color < 8; color++ {
+			if mask&(1<<color) == 0 {
+				table[mask][n] = uint8(color)
+				n++
+			}
+		}
+	}
+	return table
+}()
+
 func bitDepthFromSeq(seq *header.SequenceHeader) int {
 	switch seq.HBD {
 	case 0:
@@ -209,10 +223,11 @@ func orderPalette(palIdx []uint8, stride, i, first, last int, order *[64][8]uint
 	base := first + (i-first)*stride
 	for j, n, off := first, 0, base; j >= last; j, n, off = j-1, n+1, off+stride-1 {
 		haveLeft := j > 0
-		mask := uint16(0)
+		mask := uint8(0)
 		oIdx := 0
+		row := &order[n]
 		add := func(v uint8) {
-			order[n][oIdx] = v
+			row[oIdx] = v
 			oIdx++
 			mask |= 1 << v
 		}
@@ -257,12 +272,8 @@ func orderPalette(palIdx []uint8, stride, i, first, last int, order *[64][8]uint
 				add(tl)
 			}
 		}
-		for bit := uint8(0); bit < 8; bit++ {
-			if mask&(1<<bit) == 0 {
-				order[n][oIdx] = bit
-				oIdx++
-			}
-		}
+		missing := &paletteMissingOrder[mask]
+		copy(row[oIdx:], missing[:8-oIdx])
 		haveTop = true
 	}
 }

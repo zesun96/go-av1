@@ -322,6 +322,19 @@ the median from 1.3146 to 1.3017 seconds (1.0 percent), increasing throughput
 from 91.28 to 92.19 packets/s. The standard seven-run result measured 1.306
 seconds and 91.91 packets/s, or 5.36x the matching dav1d wall time.
 
+Palette index ordering now completes its neighbor-derived prefix from a
+2 KiB table indexed by the eight-color used mask. This replaces eight
+branching color-presence checks per decoded palette pixel with one small
+copy. A retained reference implementation matches the optimized output for
+1,000 randomized blocks across varied widths, heights, strides, and every
+diagonal. The 64x64 ordering microbenchmark fell from approximately 67 to
+38 microseconds (43 percent). On a 599-frame palette-bearing profile,
+`orderPalette` fell from approximately 0.41 seconds (3.7 percent) to 0.08
+seconds (0.5 percent), leaving entropy symbol decoding as the main palette
+index cost. The corresponding long wall-clock A/B was inconclusive under
+heavy frequency variation: the medians differed by less than 0.1 percent,
+so no end-to-end gain is claimed for this content.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:
