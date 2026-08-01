@@ -256,6 +256,11 @@ func invTxfmAddDCT4x4(dst []uint8, stride int, coeff []int32, exactLastNonzeroCo
 
 func invTxfmAddDCT8x8(dst []uint8, stride int, coeff []int32, exactLastNonzeroCol int) {
 	var tmp [64]int32
+	if invDCT8x8SIMD(&tmp, coeff) {
+		clear(coeff)
+		addResidual8SIMD(dst, stride, tmp[:], 8, 8)
+		return
+	}
 	lastNonzeroCol := 7
 	if exactLastNonzeroCol >= 0 && exactLastNonzeroCol < lastNonzeroCol {
 		lastNonzeroCol = exactLastNonzeroCol
