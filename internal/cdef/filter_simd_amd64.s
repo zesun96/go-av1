@@ -394,10 +394,10 @@ DATA ·findDir128<>+0(SB)/8, $0x0080008000800080
 DATA ·findDir128<>+8(SB)/8, $0x0080008000800080
 GLOBL ·findDir128<>(SB), RODATA|NOPTR, $16
 
-// findDirCostsSSE41 computes the eight CDEF direction costs for one 8x8
-// block. The caller performs the small ordered maximum search so ties retain
-// the scalar implementation's lowest-direction behavior.
-TEXT ·findDirCostsSSE41(SB), NOSPLIT, $0-24
+// findDirSSE41 computes the eight CDEF direction costs for one 8x8 block,
+// selects the lowest-index maximum, and returns its opposite-direction
+// variance. Tests may request the intermediate costs through a non-nil cost.
+TEXT ·findDirSSE41(SB), NOSPLIT, $32-40
 	MOVQ src+0(FP), SI
 	MOVQ stride+8(FP), R8
 	MOVQ cost+16(FP), DI
@@ -705,6 +705,8 @@ TEXT ·findDirCostsSSE41(SB), NOSPLIT, $0-24
 	PHADDD X5, X6
 
 	// X9 = costs 0,4,2,6 and X6 = costs 1,3,5,7.
+	TESTQ DI, DI
+	JE findDirSelect
 	PEXTRD $0, X9, 0(DI)
 	PEXTRD $1, X9, 16(DI)
 	PEXTRD $2, X9, 8(DI)
@@ -713,4 +715,39 @@ TEXT ·findDirCostsSSE41(SB), NOSPLIT, $0-24
 	PEXTRD $1, X6, 12(DI)
 	PEXTRD $2, X6, 20(DI)
 	PEXTRD $3, X6, 28(DI)
+
+findDirSelect:
+	// Reorder the even costs into 0,2,4,6. The high/low interleaves
+	// then form directions 4..7 and 0..3 for opposite-cost lookup.
+	PSHUFL $0xd8, X9, X4
+	MOVO X4, X1
+	PUNPCKHLQ X6, X1
+	PUNPCKLLQ X6, X4
+
+	MOVO X9, X0
+	PMAXSD X6, X0
+	MOVO X0, X2
+	PSHUFL $0x4e, X2, X2
+	PMAXSD X2, X0
+	MOVO X0, X2
+	PSHUFL $0xb1, X2, X2
+	PMAXSD X2, X0
+
+	MOVO X0, X2
+	PSUBL X1, X2
+	MOVO X0, X3
+	PSUBL X4, X3
+	MOVOU X2, 0(SP)
+	MOVOU X3, 16(SP)
+
+	PCMPEQL X0, X1
+	PCMPEQL X0, X4
+	PACKSSLW X1, X4
+	PMOVMSKB X4, AX
+	BSFL AX, AX
+	MOVL 0(SP)(AX*2), CX
+	SHRL $10, CX
+	SHRL $1, AX
+	MOVQ AX, dir+24(FP)
+	MOVQ CX, variance+32(FP)
 	RET

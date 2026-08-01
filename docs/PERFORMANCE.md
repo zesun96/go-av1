@@ -455,6 +455,18 @@ cumulative direction-search time fell from approximately 0.48 to 0.14
 seconds. Allocation remained approximately 1.89 GB; WebRTC stayed 599/599
 byte-exact and AOM stayed at 197 passed, zero failed, and 66 unsupported.
 
+The direction-search follow-up moves ordered maximum selection and opposite
+direction variance calculation into the same SSE4.1 kernel. The optional
+eight-cost output remains available to differential tests, while production
+calls no longer materialize the cost array or scan it in Go. The low-load
+microbenchmark improved from approximately 20.1 to 19.2 ns. An 11-run
+alternating comparison reduced the 120-packet median from 1.073074 to
+1.063876 seconds (0.86 percent), increasing throughput from 111.83 to 112.80
+packets/s. The 599-frame profile placed the complete direction-search chain
+at approximately 0.12 seconds. Allocation remained approximately 1.89 GB;
+WebRTC stayed 599/599 byte-exact and AOM stayed at 197 passed, zero failed,
+and 66 unsupported.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:

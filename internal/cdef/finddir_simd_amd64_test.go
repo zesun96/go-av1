@@ -21,11 +21,16 @@ func TestFindDirSIMDCostsMatchReference(t *testing.T) {
 		}
 		base := stride + column
 		var got [8]uint32
-		findDirCostsSSE41(&img[base], stride, &got)
+		gotDir, gotVariance := findDirSSE41(&img[base], stride, &got)
 		want := findDirReferenceCosts(img, base, stride)
 		if got != want {
 			t.Fatalf("iteration=%d stride=%d column=%d\ngot  %v\nwant %v",
 				iteration, stride, column, got, want)
+		}
+		wantDir, wantVariance := findDirReference(img, base, stride)
+		if gotDir != wantDir || gotVariance != wantVariance {
+			t.Fatalf("iteration=%d result=(%d,%d), want=(%d,%d)",
+				iteration, gotDir, gotVariance, wantDir, wantVariance)
 		}
 	}
 }

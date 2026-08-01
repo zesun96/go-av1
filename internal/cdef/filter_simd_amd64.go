@@ -81,18 +81,9 @@ func findDirSIMD(img []uint8, imgBase, stride int) (dir int, variance uint, ok b
 	if !havePrimary8SSE41 || dispatch.GenericForced() {
 		return 0, 0, false
 	}
-	var cost [8]uint32
-	findDirCostsSSE41(&img[imgBase], stride, &cost)
-	bestDir := 0
-	bestCost := cost[0]
-	for n := 1; n < 8; n++ {
-		if cost[n] > bestCost {
-			bestCost = cost[n]
-			bestDir = n
-		}
-	}
-	return bestDir, uint((bestCost - cost[bestDir^4]) >> 10), true
+	dir, variance = findDirSSE41(&img[imgBase], stride, nil)
+	return dir, variance, true
 }
 
 //go:noescape
-func findDirCostsSSE41(src *uint8, stride int, cost *[8]uint32)
+func findDirSSE41(src *uint8, stride int, cost *[8]uint32) (dir int, variance uint)
