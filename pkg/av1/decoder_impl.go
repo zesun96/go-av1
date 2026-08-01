@@ -700,13 +700,17 @@ func (d *decoderImpl) traceLoopFilterEdge(plane int, direction string, x4, y4, w
 }
 
 func safeLoopFilterWidth(width, before, after int) int {
-	for _, candidate := range []int{16, 8, 6, 4} {
-		if width >= candidate {
-			radius := map[int]int{16: 7, 8: 4, 6: 3, 4: 2}[candidate]
-			if before >= radius && after >= radius {
-				return candidate
-			}
-		}
+	if width >= 16 && before >= 7 && after >= 7 {
+		return 16
+	}
+	if width >= 8 && before >= 4 && after >= 4 {
+		return 8
+	}
+	if width >= 6 && before >= 3 && after >= 3 {
+		return 6
+	}
+	if width >= 4 && before >= 2 && after >= 2 {
+		return 4
 	}
 	return 0
 }

@@ -467,6 +467,18 @@ at approximately 0.12 seconds. Allocation remained approximately 1.89 GB;
 WebRTC stayed 599/599 byte-exact and AOM stayed at 197 passed, zero failed,
 and 66 unsupported.
 
+Loop-filter edge-width clipping now uses four fixed comparisons instead of
+constructing and querying a small map for every 4x4 edge candidate. An
+exhaustive test over widths and available pixels preserves the previous table
+semantics. The microbenchmark improved from approximately 45.4 to 3.4 ns,
+about 13x. An 11-run alternating comparison reduced the 120-packet median
+from 1.070332 to 1.056340 seconds (1.31 percent), increasing throughput from
+112.11 to 113.60 packets/s. On the 599-frame profile, cumulative luma and
+chroma loop-filter time fell from approximately 1.24 to 0.84 seconds and the
+former 0.35-second clipping helper disappeared. Allocation remained
+approximately 1.89 GB; WebRTC stayed 599/599 byte-exact and AOM stayed at 197
+passed, zero failed, and 66 unsupported.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:
