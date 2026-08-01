@@ -61,6 +61,14 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 		invTxfmAddDCT8x8(dst, stride, coeff, exactLastNonzeroCol)
 		return
 	}
+	if tx == TX16x16 && txtp == DCT_DCT && bitDepth == 8 && eob >= 1 {
+		var tmp [256]int32
+		if invDCT16x16SIMD(&tmp, coeff) {
+			clear(coeff)
+			addResidual8SIMD(dst, stride, tmp[:], 16, 16)
+			return
+		}
+	}
 	invTxfmAddGeneric(dst, stride, coeff, eob, tx, shift, txtp, exactLastNonzeroCol, bitDepth)
 }
 

@@ -59,6 +59,37 @@ func invDCT8x8SIMD(tmp *[64]int32, coeff []int32) bool {
 	return true
 }
 
+func dct16Batch4SIMD(dst, src []int32) {
+	var even [64]int32
+	for position := 0; position < 8; position++ {
+		copy(even[position*8:position*8+4], src[position*32:position*32+4])
+	}
+	dct8Batch4SSE41(&even[0], &even[0])
+	for position := 0; position < 8; position++ {
+		copy(dst[position*32:position*32+4], even[position*8:position*8+4])
+	}
+	dct16OddBatch4SSE41(&dst[0], &src[0])
+}
+
+func invDCT16x16SIMD(tmp *[256]int32, coeff []int32) bool {
+	if !haveDCT8BatchSSE41 || dispatch.GenericForced() || len(coeff) < 256 {
+		return false
+	}
+	for lane := 0; lane < 16; lane += 4 {
+		dct16Batch4SIMD(tmp[lane:], coeff[lane:])
+	}
+	var transposed [256]int32
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			transposed[y*16+x] = (tmp[x*16+y] + 2) >> 2
+		}
+	}
+	for lane := 0; lane < 16; lane += 4 {
+		dct16Batch4SIMD(tmp[lane:], transposed[lane:])
+	}
+	return true
+}
+
 //go:noescape
 func addDC8SSE2(dst *uint8, stride, w, h, dc int)
 
@@ -70,3 +101,6 @@ func addResidual4x4SSE41(dst *uint8, stride int, src *int32)
 
 //go:noescape
 func dct8Batch4SSE41(dst, src *int32)
+
+//go:noescape
+func dct16OddBatch4SSE41(dst, src *int32)

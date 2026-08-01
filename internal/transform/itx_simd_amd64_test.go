@@ -131,6 +131,39 @@ func TestDCT8Batch4SSE41MatchesScalar(t *testing.T) {
 	}
 }
 
+func TestDCT16Batch4SSE41MatchesScalar(t *testing.T) {
+	if !haveDCT8BatchSSE41 {
+		t.Skip("SSE4.1 unavailable")
+	}
+	rng := rand.New(rand.NewSource(94))
+	for iteration := 0; iteration < 2000; iteration++ {
+		var src, got, want [256]int32
+		for i := range src {
+			src[i] = int32(rng.Intn(1<<16) - (1 << 15))
+		}
+		for lane := 0; lane < 16; lane++ {
+			var values [16]int32
+			for position := range values {
+				values[position] = src[position*16+lane]
+			}
+			InvDCT16(values[:], 1, -1<<15, 1<<15-1)
+			for position := range values {
+				want[position*16+lane] = values[position]
+			}
+		}
+		for lane := 0; lane < 16; lane += 4 {
+			dct16Batch4SIMD(got[lane:], src[lane:])
+		}
+		if got != want {
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("iteration=%d value=%d: SIMD=%d scalar=%d", iteration, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}
+
 func BenchmarkAddDC16x16(b *testing.B) {
 	const width, height, stride, dc = 16, 16, 19, -37
 	template := make([]byte, stride*height)
