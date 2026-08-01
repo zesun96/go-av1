@@ -479,6 +479,67 @@ former 0.35-second clipping helper disappeared. Allocation remained
 approximately 1.89 GB; WebRTC stayed 599/599 byte-exact and AOM stayed at 197
 passed, zero failed, and 66 unsupported.
 
+## Current Benchmark Status (2026-08-01)
+
+Current commit: `adff6cf044bb584df5a5d3751b7aa9d538239c55`.
+Both current comparisons used the GCC release dav1d build, one decoder
+thread, `GOMAXPROCS=1`, all in-loop filters, no film grain, two warmups, and
+nine alternating measured runs.
+
+| Input | Decoder | Original median | Current median | Current throughput | Current ratio |
+|---|---|---:|---:|---:|---:|
+| WebRTC dynamic desktop, 120 packets | go-av1 | 10.522s | 1.075s | 111.62 packets/s | 4.41x dav1d |
+| WebRTC dynamic desktop, 120 packets | dav1d | 0.319s | 0.244s | 492.67 packets/s | 1.00x |
+| AOM all-intra 352x288, 39 packets | go-av1 | 1.212s | 0.659s | 59.14 packets/s | 6.60x dav1d |
+| AOM all-intra 352x288, 39 packets | dav1d | 0.098s | 0.100s | 390.55 packets/s | 1.00x |
+
+For the representative WebRTC segment, go-av1 is now 9.79x faster than its
+original baseline: median wall time is down 89.8 percent and throughput rose
+from 11.40 to 111.62 packets/s. Relative throughput rose from approximately
+3.0 to 22.7 percent of release dav1d. Reaching the current 0.244-second dav1d
+median at one thread still requires removing another 77.3 percent of go-av1's
+current wall time.
+
+The current 120-packet memory counter reports 270.1 MB and 626,501
+allocations, or 2.25 MB and 5,220 allocations per frame. Against the original
+profile's approximate 16.0 GB and 50.6 million allocations, cumulative
+allocation volume is down 98.3 percent and allocation count is down 98.8
+percent. The complete 599-frame run reports 1.892 GB and 5.762 million
+allocations. WebRTC remains 599/599 byte-exact; the AOM differential suite
+remains 197 passed, zero failed, and 66 unsupported high-bit-depth vectors.
+
+The current 599-frame CPU profile divides approximately as follows. Inclusive
+groups overlap, so the potential savings are not additive.
+
+| Area | Current profile time | Main remaining work |
+|---|---:|---|
+| Tile entropy, syntax, and reconstruction | 7.52s cumulative | specialize MSAC/CDF paths, flatten block control flow, reduce state lookups |
+| Post-filter pipeline | 3.24s cumulative | batch edge traversal and complete SIMD coverage |
+| CDEF | 2.20s cumulative | faster combined filter, padding/layout changes, plane/stripe scheduling |
+| Coefficient decode and residual reconstruction | 1.66-1.84s cumulative | token specialization and fused residual application |
+| MSAC symbol decode | 1.07s cumulative | common-alphabet specialization and lower-overhead normalization |
+| Inverse transforms | 0.94s cumulative | SIMD 4/8/16 transforms and fused add/clip |
+| Loop filter | 0.84s cumulative | edge bitsets plus horizontal/vertical SIMD kernels |
+| Inter copy/prediction and reference search | 0.5-0.75s per major path | complete 2D/compound SIMD and compact hot metadata |
+| Runtime copies, clears, and allocation | 0.96s memmove, 0.32s clear | eliminate remaining plane/block copies and reset only active ranges |
+
+Single-thread parity will require more than isolated Go micro-optimizations.
+The decoder needs dav1d-style DSP coverage for common transforms, loop
+filters, compound prediction, restoration, and remaining CDEF paths; entropy
+and block reconstruction need fewer generic calls and bounds-checked slice
+operations; post-filters need mask/stripe traversal instead of repeated 4x4
+state queries. These changes can plausibly close a large part of the 4.41x
+gap, but exact one-thread parity effectively requires reproducing much of
+dav1d's architecture-specific kernel and dataflow design.
+
+Parallel scheduling is a separate wall-time lever. Functional tile, frame,
+and row/stripe scheduling could reach or exceed the current one-thread dav1d
+wall time on a multi-core machine before single-thread parity is reached.
+Fair comparisons must then give dav1d the same thread count. If immediate
+native dav1d-equivalent speed is more important than a pure-Go decoder, an
+optional libdav1d/cgo backend is the shortest path; it is not a performance
+improvement to the Go decoder itself.
+
 ## Measurement Rules
 
 `cmd/av1-benchcmp` enforces the following command-level methodology:
