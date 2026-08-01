@@ -229,7 +229,16 @@ func (m *MSAC) SymbolAdaptDav1d(cdf []uint16, nSymbols int) uint32 {
 			break
 		}
 	}
-	m.ctxNorm(m.dif-(uint64(v)<<(ecWinSize-16)), u-v)
+	dif := m.dif - (uint64(v) << (ecWinSize - 16))
+	rng := u - v
+	d := 15 ^ (31 ^ bits.LeadingZeros32(rng))
+	cnt := m.cnt
+	m.dif = dif << uint(d)
+	m.rng = rng << uint(d)
+	m.cnt = cnt - d
+	if uint(cnt) < uint(d) {
+		m.refill()
+	}
 	if !m.allowUpdateCDF {
 		return val
 	}
