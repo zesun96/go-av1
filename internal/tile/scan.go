@@ -122,9 +122,40 @@ var DAV1DSkipCtx = [5][5]uint8{
 // pattern-mismatch becomes the dominant error term.
 // ---------------------------------------------------------------------------
 
-// scanCache is keyed by (txClass<<8)|(lw<<4)|lh.
-var scanCache = map[uint16][]uint16{}
-var lastNonzeroColCache = map[uint8][]uint8{}
+const invalidTxSize = uint8(0xff)
+
+// Direct indexing keeps coefficient-token decoding out of Go's map runtime.
+var rectTxSizesByLogs = [N_TX_SIZES][N_TX_SIZES]uint8{
+	{transform.TX4x4, transform.RTX4x8, transform.RTX4x16, invalidTxSize, invalidTxSize},
+	{transform.RTX8x4, transform.TX8x8, transform.RTX8x16, transform.RTX8x32, invalidTxSize},
+	{transform.RTX16x4, transform.RTX16x8, transform.TX16x16, transform.RTX16x32, transform.RTX16x64},
+	{invalidTxSize, transform.RTX32x8, transform.RTX32x16, transform.TX32x32, transform.RTX32x64},
+	{invalidTxSize, invalidTxSize, transform.RTX64x16, transform.RTX64x32, transform.TX64x64},
+}
+
+var lastNonzeroCols [transform.NRectTxSizes][]uint8
+
+func init() {
+	for tx, scan := range Scans {
+		if len(scan) == 0 {
+			continue
+		}
+		height := int(transform.TxfmDimensions[tx].H) * 4
+		if height > 32 {
+			height = 32
+		}
+		rowMask := height - 1
+		cols := make([]uint8, len(scan))
+		maxCol := 0
+		for i, rc := range scan {
+			if col := int(rc) & rowMask; col > maxCol {
+				maxCol = col
+			}
+			cols[i] = uint8(maxCol)
+		}
+		lastNonzeroCols[tx] = cols
+	}
+}
 
 // GetScan returns a coefficient scan order for a transform of log2-size
 // (lw, lh) and tx_class. The returned slice has length (4<<lw)*(4<<lh).
@@ -136,15 +167,9 @@ var lastNonzeroColCache = map[uint8][]uint8{}
 // scan_16x32/scan_32x16 respectively; keep those aliases here so Largest-tx
 // streams do not fall back to raster order.
 func GetScan(lw, lh uint8, cls TxClass) []uint16 {
-	key := (uint16(cls) << 8) | (uint16(lw) << 4) | uint16(lh)
-	if s, ok := scanCache[key]; ok {
-		return s
-	}
-
 	if cls == TxClass2D {
 		if tx, ok := rectTxSizeForLogs(lw, lh); ok {
 			if exact := Scans[tx]; len(exact) != 0 {
-				scanCache[key] = exact
 				return exact
 			}
 		}
@@ -170,7 +195,6 @@ func GetScan(lw, lh uint8, cls TxClass) []uint16 {
 			}
 		}
 	}
-	scanCache[key] = out
 	return out
 }
 
@@ -182,39 +206,13 @@ func LastNonzeroColFromEOB(tx uint8, eob int) (int, bool) {
 		return 0, false
 	}
 
-	if cols, ok := lastNonzeroColCache[tx]; ok {
-		if eob >= len(cols) {
-			return len(cols) - 1, true
-		}
-		return int(cols[eob]), true
-	}
-
-	if int(tx) >= len(Scans) {
+	if int(tx) >= len(lastNonzeroCols) {
 		return 0, false
 	}
-	scan := Scans[tx]
-	if len(scan) == 0 {
+	cols := lastNonzeroCols[tx]
+	if len(cols) == 0 {
 		return 0, false
 	}
-
-	td := transform.TxfmDimensions[tx]
-	height := int(td.H) * 4
-	if height > 32 {
-		height = 32
-	}
-	rowMask := height - 1
-	cols := make([]uint8, len(scan))
-	maxCol := 0
-	for i, rc := range scan {
-		// Scan positions are packed as x*height+y. dav1d's first inverse
-		// transform pass calls the low coordinate its "column" limit.
-		col := int(rc) & rowMask
-		if col > maxCol {
-			maxCol = col
-		}
-		cols[i] = uint8(maxCol)
-	}
-	lastNonzeroColCache[tx] = cols
 	if eob >= len(cols) {
 		return len(cols) - 1, true
 	}
@@ -222,48 +220,11 @@ func LastNonzeroColFromEOB(tx uint8, eob int) (int, bool) {
 }
 
 func rectTxSizeForLogs(lw, lh uint8) (uint8, bool) {
-	switch {
-	case lw == 0 && lh == 0:
-		return transform.TX4x4, true
-	case lw == 1 && lh == 1:
-		return transform.TX8x8, true
-	case lw == 2 && lh == 2:
-		return transform.TX16x16, true
-	case lw == 3 && lh == 3:
-		return transform.TX32x32, true
-	case lw == 4 && lh == 4:
-		return transform.TX64x64, true
-	case lw == 0 && lh == 1:
-		return transform.RTX4x8, true
-	case lw == 1 && lh == 0:
-		return transform.RTX8x4, true
-	case lw == 1 && lh == 2:
-		return transform.RTX8x16, true
-	case lw == 2 && lh == 1:
-		return transform.RTX16x8, true
-	case lw == 2 && lh == 3:
-		return transform.RTX16x32, true
-	case lw == 3 && lh == 2:
-		return transform.RTX32x16, true
-	case lw == 3 && lh == 4:
-		return transform.RTX32x64, true
-	case lw == 4 && lh == 3:
-		return transform.RTX64x32, true
-	case lw == 0 && lh == 2:
-		return transform.RTX4x16, true
-	case lw == 2 && lh == 0:
-		return transform.RTX16x4, true
-	case lw == 1 && lh == 3:
-		return transform.RTX8x32, true
-	case lw == 3 && lh == 1:
-		return transform.RTX32x8, true
-	case lw == 2 && lh == 4:
-		return transform.RTX16x64, true
-	case lw == 4 && lh == 2:
-		return transform.RTX64x16, true
-	default:
+	if lw >= N_TX_SIZES || lh >= N_TX_SIZES {
 		return 0, false
 	}
+	tx := rectTxSizesByLogs[lw][lh]
+	return tx, tx != invalidTxSize
 }
 
 // ---------------------------------------------------------------------------
