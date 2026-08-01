@@ -74,3 +74,59 @@ func BenchmarkMSACSymbol8x1024(b *testing.B) {
 	}
 	benchmarkMSACSink = sink
 }
+
+func BenchmarkMSACSymbolAdapt4x1024(b *testing.B) {
+	const (
+		symbols = 4
+		samples = 1024
+	)
+	cdf := makeUniformDav1dCDF(symbols)
+	icdf := dav1dToICDF(cdf, symbols)
+	enc := newMSACEncoder()
+	for i := 0; i < samples; i++ {
+		enc.encodeCDFQ15((i*3+i/11)&(symbols-1), icdf, symbols)
+	}
+	data := enc.done()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	var sink uint64
+	for n := 0; n < b.N; n++ {
+		dec := NewMSAC(data, false)
+		adaptiveCDF := makeUniformDav1dCDF(symbols)
+		var sum uint64
+		for i := 0; i < samples; i++ {
+			sum += uint64(dec.SymbolAdaptDav1d(adaptiveCDF, symbols-1))
+		}
+		sink ^= sum
+	}
+	benchmarkMSACSink = sink
+}
+
+func BenchmarkMSACSymbolAdapt3x1024(b *testing.B) {
+	const (
+		symbols = 3
+		samples = 1024
+	)
+	cdf := makeUniformDav1dCDF(symbols)
+	icdf := dav1dToICDF(cdf, symbols)
+	enc := newMSACEncoder()
+	for i := 0; i < samples; i++ {
+		enc.encodeCDFQ15((i*2+i/11)%symbols, icdf, symbols)
+	}
+	data := enc.done()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	var sink uint64
+	for n := 0; n < b.N; n++ {
+		dec := NewMSAC(data, false)
+		adaptiveCDF := makeUniformDav1dCDF(symbols)
+		var sum uint64
+		for i := 0; i < samples; i++ {
+			sum += uint64(dec.SymbolAdaptDav1d(adaptiveCDF, symbols-1))
+		}
+		sink ^= sum
+	}
+	benchmarkMSACSink = sink
+}

@@ -223,6 +223,22 @@ func (m *MSAC) SymbolAdaptDav1d(cdf []uint16, nSymbols int) uint32 {
 	c := uint32(m.dif >> (ecWinSize - 16))
 	r := m.rng >> 8
 	cdfBase := unsafe.Pointer(unsafe.SliceData(cdf))
+	if nSymbols == 2 && haveSymbolAdaptSmallAMD64 {
+		cnt := m.cnt
+		val, shift := symbolAdapt2AMD64(m, (*uint16)(cdfBase))
+		if uint(cnt) < uint(shift) {
+			m.refill()
+		}
+		return val
+	}
+	if nSymbols == 3 && haveSymbolAdaptSmallAMD64 {
+		cnt := m.cnt
+		val, shift := symbolAdapt3AMD64(m, (*uint16)(cdfBase))
+		if uint(cnt) < uint(shift) {
+			m.refill()
+		}
+		return val
+	}
 	u, v := uint32(0), m.rng
 	val := uint32(0xFFFFFFFF)
 	for {

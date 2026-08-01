@@ -70,6 +70,17 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
 - Result: about 0.07% improvement.
 - Reason: tap setup was not a material part of total CDEF time.
 
+### AVX2 two-row combined CDEF
+
+- Result: approximately 410 ns per 8x8 block versus 381 ns for the retained
+  SSE4.1 kernel, a 7-8% microbenchmark regression.
+- Reason: each neighbor vector required assembling two non-contiguous 12-wide
+  scratch rows into separate 128-bit YMM lanes, followed by lane extraction
+  for the two destination rows. That shuffle/load cost exceeded the benefit
+  of processing twice as many arithmetic lanes.
+- Revisit only after changing the CDEF scratch layout so paired rows or paired
+  blocks are already contiguous in SIMD-friendly lanes.
+
 ### Plane-wide padded CDEF source
 
 - Result: 1.805 s versus a 1.802 s same-session baseline in the earlier
