@@ -1,6 +1,9 @@
 package bitstream
 
-import "math/bits"
+import (
+	"math/bits"
+	"unsafe"
+)
 
 // MSAC implements the AV1 multi-symbol arithmetic decoder (Section 9.4 of
 // the specification). It is a 1:1 port of dav1d/src/msac.c with a 64-bit
@@ -211,18 +214,21 @@ func (m *MSAC) SymbolAdapt(cdf []uint16, n int) uint32 {
 // SymbolAdaptDav1d decodes a native dav1d inverse CDF. nSymbols is the
 // maximum symbol value, cdf[0:nSymbols] are probability entries, and
 // cdf[nSymbols] is the adaptation counter. The result is in [0,nSymbols].
+//
+//go:nosplit
 func (m *MSAC) SymbolAdaptDav1d(cdf []uint16, nSymbols int) uint32 {
 	if nSymbols < 1 || nSymbols > 15 || len(cdf) <= nSymbols {
 		panic("bitstream: SymbolAdaptDav1d invalid CDF")
 	}
 	c := uint32(m.dif >> (ecWinSize - 16))
 	r := m.rng >> 8
+	cdfBase := unsafe.Pointer(unsafe.SliceData(cdf))
 	u, v := uint32(0), m.rng
 	val := uint32(0xFFFFFFFF)
 	for {
 		val++
 		u = v
-		v = r * uint32(cdf[val]>>ecProbShift)
+		v = r * uint32(*(*uint16)(unsafe.Add(cdfBase, uintptr(val)*2))>>ecProbShift)
 		v >>= 7 - ecProbShift
 		v += ecMinProb * (uint32(nSymbols) - val)
 		if c >= v {
@@ -242,19 +248,22 @@ func (m *MSAC) SymbolAdaptDav1d(cdf []uint16, nSymbols int) uint32 {
 	if !m.allowUpdateCDF {
 		return val
 	}
-	count := uint32(cdf[nSymbols])
+	countPtr := (*uint16)(unsafe.Add(cdfBase, uintptr(nSymbols)*2))
+	count := uint32(*countPtr)
 	rate := 4 + (count >> 4)
 	if nSymbols > 2 {
 		rate++
 	}
 	for i := uint32(0); i < val; i++ {
-		cdf[i] += uint16((32768 - uint32(cdf[i])) >> rate)
+		entry := (*uint16)(unsafe.Add(cdfBase, uintptr(i)*2))
+		*entry += uint16((32768 - uint32(*entry)) >> rate)
 	}
 	for i := val; i < uint32(nSymbols); i++ {
-		cdf[i] -= uint16(uint32(cdf[i]) >> rate)
+		entry := (*uint16)(unsafe.Add(cdfBase, uintptr(i)*2))
+		*entry -= uint16(uint32(*entry) >> rate)
 	}
 	if count < 32 {
-		cdf[nSymbols] = uint16(count + 1)
+		*countPtr = uint16(count + 1)
 	}
 	return val
 }
