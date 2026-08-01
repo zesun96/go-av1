@@ -3582,7 +3582,20 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 
 	dcTok := 0
 	if eob > 0 {
-		x, y, levelIdx, rc, ok := coeffTraversalPoint(geom, eob, scan)
+		var x, y, levelIdx, rc int
+		ok := true
+		if cls == TxClass2D {
+			if eob >= len(scan) {
+				ok = false
+			} else {
+				levelIdx = int(scan[eob])
+				x = levelIdx >> geom.shift
+				y = levelIdx & geom.mask
+				rc = levelIdx
+			}
+		} else {
+			x, y, levelIdx, rc, ok = coeffTraversalPoint(geom, eob, scan)
+		}
 		if !ok {
 			return tokState, 0
 		}
@@ -3633,7 +3646,20 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 
 		lastRC := rc
 		for i := eob - 1; i > 0; i-- {
-			xi, yi, lvlIdx, rci, ok := coeffTraversalPoint(geom, i, scan)
+			var xi, yi, lvlIdx, rci int
+			ok := true
+			if cls == TxClass2D {
+				if i >= len(scan) {
+					ok = false
+				} else {
+					lvlIdx = int(scan[i])
+					xi = lvlIdx >> geom.shift
+					yi = lvlIdx & geom.mask
+					rci = lvlIdx
+				}
+			} else {
+				xi, yi, lvlIdx, rci, ok = coeffTraversalPoint(geom, i, scan)
+			}
 			if !ok {
 				continue
 			}
