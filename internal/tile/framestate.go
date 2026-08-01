@@ -785,24 +785,32 @@ func (fs *FrameState) MergeFilterState(src *FrameState) {
 	x1 := clampInt((src.TileX1+3)/4, 0, fs.W4)
 	y0 := clampInt(src.TileY0/4, 0, fs.H4)
 	y1 := clampInt((src.TileY1+3)/4, 0, fs.H4)
-	remap := make([]uint32, len(src.Blocks)+1)
-	remapBlock := func(srcIndex uint32) uint32 {
-		if srcIndex == 0 {
-			return 0
-		}
-		if dstIndex := remap[srcIndex]; dstIndex != 0 {
-			return dstIndex
-		}
-		fs.Blocks = append(fs.Blocks, src.Blocks[srcIndex-1])
-		dstIndex := uint32(len(fs.Blocks))
-		remap[srcIndex] = dstIndex
-		return dstIndex
-	}
+	// A tile scratch state is reset before decoding each tile, so all of its
+	// block indexes are local and contiguous. Append metadata once and remap
+	// every nonzero grid entry with one fixed offset instead of allocating and
+	// probing a per-cell remap table.
+	blockBase := uint32(len(fs.Blocks))
+	fs.Blocks = append(fs.Blocks, src.Blocks...)
+	compact := fs.blockGrid32 == nil && src.blockGrid32 == nil &&
+		blockBase+uint32(len(src.Blocks)) <= maxCompactBlockIndex
 	for y := y0; y < y1; y++ {
 		dstBase := y*fs.W4 + x0
 		srcBase := y*src.W4 + x0
-		for x := 0; x < x1-x0; x++ {
-			fs.setBlockGridIndex(dstBase+x, remapBlock(src.blockGridIndex(srcBase+x)))
+		if compact {
+			for x := 0; x < x1-x0; x++ {
+				index := src.BlockGrid[srcBase+x]
+				if index != 0 {
+					fs.BlockGrid[dstBase+x] = uint16(blockBase) + index
+				}
+			}
+		} else {
+			for x := 0; x < x1-x0; x++ {
+				index := src.blockGridIndex(srcBase + x)
+				if index != 0 {
+					index += blockBase
+				}
+				fs.setBlockGridIndex(dstBase+x, index)
+			}
 		}
 		copy(fs.TxGrid[y*fs.W4+x0:y*fs.W4+x1], src.TxGrid[y*src.W4+x0:y*src.W4+x1])
 	}
@@ -813,8 +821,21 @@ func (fs *FrameState) MergeFilterState(src *FrameState) {
 	for y := cy0; y < cy1; y++ {
 		dstBase := y*fs.CW4 + cx0
 		srcBase := y*src.CW4 + cx0
-		for x := 0; x < cx1-cx0; x++ {
-			fs.setChromaBlockGridIndex(dstBase+x, remapBlock(src.chromaBlockGridIndex(srcBase+x)))
+		if compact && fs.chromaBlockGrid32 == nil && src.chromaBlockGrid32 == nil {
+			for x := 0; x < cx1-cx0; x++ {
+				index := src.ChromaBlockGrid[srcBase+x]
+				if index != 0 {
+					fs.ChromaBlockGrid[dstBase+x] = uint16(blockBase) + index
+				}
+			}
+		} else {
+			for x := 0; x < cx1-cx0; x++ {
+				index := src.chromaBlockGridIndex(srcBase + x)
+				if index != 0 {
+					index += blockBase
+				}
+				fs.setChromaBlockGridIndex(dstBase+x, index)
+			}
 		}
 	}
 	for i, v := range src.CDEFIndex {
