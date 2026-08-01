@@ -95,3 +95,19 @@ func TestChromaFilterEdgeUsesChromaOwnerGrid(t *testing.T) {
 		t.Fatalf("chroma owner boundary=(%d,%t), want (4,true)", width, ok)
 	}
 }
+
+func TestPowerOfTwoTransformOriginMatchesDivision(t *testing.T) {
+	for _, dimensions := range transform.TxfmDimensions {
+		for _, size := range []int{int(dimensions.W), int(dimensions.H)} {
+			for base := 0; base < 32; base++ {
+				for coordinate := base; coordinate < base+64; coordinate++ {
+					got := base + ((coordinate - base) & -size)
+					want := base + ((coordinate-base)/size)*size
+					if got != want {
+						t.Fatalf("size=%d base=%d coordinate=%d: got %d want %d", size, base, coordinate, got, want)
+					}
+				}
+			}
+		}
+	}
+}

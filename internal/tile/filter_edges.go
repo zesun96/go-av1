@@ -29,7 +29,14 @@ func (fs *FrameState) LumaFilterEdge(x4, y4 int, vertical bool) (int, bool) {
 	if !okA || !okB {
 		return 0, false
 	}
-	blockA, blockB := fs.blockStateAtGrid(a), fs.blockStateAtGrid(b)
+	var zeroBlock Av1Block
+	blockA, blockB := fs.blockStatePtrAtGrid(a), fs.blockStatePtrAtGrid(b)
+	if blockA == nil {
+		blockA = &zeroBlock
+	}
+	if blockB == nil {
+		blockB = &zeroBlock
+	}
 	blockEdge := blockA.X4 != blockB.X4 || blockA.Y4 != blockB.Y4
 	boundaryMask := txBoundaryTop
 	if vertical {
@@ -55,7 +62,11 @@ func (fs *FrameState) LumaFilterLevel(fhdr *header.FrameHeader, x4, y4 int, vert
 	if fs == nil || fhdr == nil || x4 < 0 || y4 < 0 || x4 >= fs.W4 || y4 >= fs.H4 {
 		return 0
 	}
-	blk := fs.blockStateAtGrid(y4*fs.W4 + x4)
+	var zeroBlock Av1Block
+	blk := fs.blockStatePtrAtGrid(y4*fs.W4 + x4)
+	if blk == nil {
+		blk = &zeroBlock
+	}
 	dir := 0
 	if !vertical {
 		dir = 1
@@ -101,41 +112,47 @@ func (fs *FrameState) ChromaFilterEdge(x4, y4 int, vertical bool) (int, bool) {
 	if fs == nil || x4 < 0 || y4 < 0 || x4 >= fs.CW4 || y4 >= fs.CH4 {
 		return 0, false
 	}
-	blockAt := func(cx4, cy4 int) Av1Block {
-		return fs.chromaBlockStateAtGrid(cy4*fs.CW4 + cx4)
+	var zeroBlock Av1Block
+	a := fs.chromaBlockStatePtrAtGrid(y4*fs.CW4 + x4)
+	if a == nil {
+		a = &zeroBlock
 	}
-	a := blockAt(x4, y4)
-	b := Av1Block{}
+	b := &zeroBlock
 	if vertical {
 		if x4 == 0 {
 			return 0, false
 		}
-		b = blockAt(x4-1, y4)
+		b = fs.chromaBlockStatePtrAtGrid(y4*fs.CW4 + x4 - 1)
 	} else {
 		if y4 == 0 {
 			return 0, false
 		}
-		b = blockAt(x4, y4-1)
+		b = fs.chromaBlockStatePtrAtGrid((y4-1)*fs.CW4 + x4)
+	}
+	if b == nil {
+		b = &zeroBlock
 	}
 	blockEdge := a.X4 != b.X4 || a.Y4 != b.Y4
-	txOrigin := func(blk Av1Block, cx4, cy4 int) (int, int) {
-		td := transform.TxfmDimensions[blk.Uvtx]
-		bx4, by4 := int(blk.X4)>>fs.SsHor, int(blk.Y4)>>fs.SsVer
-		return bx4 + ((cx4-bx4)/int(td.W))*int(td.W), by4 + ((cy4-by4)/int(td.H))*int(td.H)
-	}
-	ax, ay := txOrigin(a, x4, y4)
+	da := transform.TxfmDimensions[a.Uvtx]
+	abx4, aby4 := int(a.X4)>>fs.SsHor, int(a.Y4)>>fs.SsVer
+	aw, ah := int(da.W), int(da.H)
+	ax := abx4 + ((x4 - abx4) & -aw)
+	ay := aby4 + ((y4 - aby4) & -ah)
 	bx, by := x4, y4
 	if vertical {
 		bx--
 	} else {
 		by--
 	}
-	bx, by = txOrigin(b, bx, by)
+	db := transform.TxfmDimensions[b.Uvtx]
+	bbx4, bby4 := int(b.X4)>>fs.SsHor, int(b.Y4)>>fs.SsVer
+	bw, bh := int(db.W), int(db.H)
+	bx = bbx4 + ((bx - bbx4) & -bw)
+	by = bby4 + ((by - bby4) & -bh)
 	txEdge := ax != bx || ay != by
 	if !blockEdge && (!txEdge || (!a.Intra && a.Skip)) {
 		return 0, false
 	}
-	da, db := transform.TxfmDimensions[a.Uvtx], transform.TxfmDimensions[b.Uvtx]
 	szA, szB := int(da.H), int(db.H)
 	if vertical {
 		szA, szB = int(da.W), int(db.W)
@@ -151,7 +168,11 @@ func (fs *FrameState) ChromaFilterLevel(fhdr *header.FrameHeader, x4, y4, plane 
 	if fs == nil || fhdr == nil || x4 < 0 || y4 < 0 || x4 >= fs.CW4 || y4 >= fs.CH4 {
 		return 0
 	}
-	blk := fs.chromaBlockStateAtGrid(y4*fs.CW4 + x4)
+	var zeroBlock Av1Block
+	blk := fs.chromaBlockStatePtrAtGrid(y4*fs.CW4 + x4)
+	if blk == nil {
+		blk = &zeroBlock
+	}
 	base, deltaIdx := int(fhdr.LoopFilter.LevelU), 2
 	if plane == 2 {
 		base, deltaIdx = int(fhdr.LoopFilter.LevelV), 3

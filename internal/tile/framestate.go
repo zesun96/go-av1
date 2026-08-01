@@ -943,6 +943,21 @@ func (fs *FrameState) chromaBlockStateAtGrid(index int) Av1Block {
 	return fs.blockStateAt(fs.chromaBlockGridIndex(index))
 }
 
+func (fs *FrameState) blockStatePtr(index uint32) *Av1Block {
+	if index == 0 || int(index) > len(fs.Blocks) {
+		return nil
+	}
+	return &fs.Blocks[index-1]
+}
+
+func (fs *FrameState) blockStatePtrAtGrid(index int) *Av1Block {
+	return fs.blockStatePtr(fs.blockGridIndex(index))
+}
+
+func (fs *FrameState) chromaBlockStatePtrAtGrid(index int) *Av1Block {
+	return fs.blockStatePtr(fs.chromaBlockGridIndex(index))
+}
+
 func isSmoothIntraMode(mode uint8) bool {
 	switch mode {
 	case SmoothPred, SmoothVPred, SmoothHPred:
