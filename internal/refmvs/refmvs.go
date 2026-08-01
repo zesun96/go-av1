@@ -456,11 +456,14 @@ func (f *Frame) PutGridBlock(bx4, by4, bw4, bh4 int, blk Block) {
 	blk.X4, blk.Y4 = int16(bx4), int16(by4)
 	blockIndex := uint32(len(f.Blocks))
 	f.Blocks = append(f.Blocks, blk)
-	for y := y0; y < y1; y++ {
-		base := y * f.GridStride
-		for x := x0; x < x1; x++ {
-			f.Grid[base+x] = blockIndex
-		}
+	rowWidth := x1 - x0
+	first := f.Grid[y0*f.GridStride+x0 : y0*f.GridStride+x1]
+	for x := range first {
+		first[x] = blockIndex
+	}
+	for y := y0 + 1; y < y1; y++ {
+		base := y*f.GridStride + x0
+		copy(f.Grid[base:base+rowWidth], first)
 	}
 }
 
