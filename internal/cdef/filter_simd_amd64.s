@@ -56,6 +56,23 @@ padding_row:
 	JNZ padding_row
 	RET
 
+// paddingContiguous4x4SSE41 expands the contiguous 8x8 byte window around a
+// 4x4 block into the used portion of the 12-wide int16 scratch layout.
+TEXT ·paddingContiguous4x4SSE41(SB), NOSPLIT, $0-24
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ srcStride+16(FP), R8
+	MOVQ $8, CX
+padding4_row:
+	MOVQ (SI), X0
+	PMOVZXBW X0, X0
+	MOVOU X0, (DI)
+	ADDQ R8, SI
+	ADDQ $24, DI
+	DECQ CX
+	JNZ padding4_row
+	RET
+
 DATA ·cdefEight<>+0(SB)/8, $0x0008000800080008
 DATA ·cdefEight<>+8(SB)/8, $0x0008000800080008
 GLOBL ·cdefEight<>(SB), RODATA|NOPTR, $16

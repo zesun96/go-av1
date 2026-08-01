@@ -998,6 +998,15 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 				)
 				continue
 			}
+			if bw == 4 && bh == 4 && edges == allCDEFEdges &&
+				srcBase >= 2*stride+2 && srcBase+5*stride+5 < len(src) {
+				cdef.FilterBlock4x4FromSource(
+					plane, srcBase, stride,
+					src, srcBase, stride,
+					priStrength, secStrength, dir, damping,
+				)
+				continue
+			}
 
 			// Boundary and 4x4 blocks retain the general assembled-padding
 			// path. Build their left, top, and bottom inputs only when needed.

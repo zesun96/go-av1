@@ -28,6 +28,10 @@ func paddingContiguous8x8SIMD(tmp *[144]int16, src []uint8, srcBase, srcStride i
 	return false
 }
 
+func paddingContiguous4x4SIMD(tmp *[144]int16, src []uint8, srcBase, srcStride int) bool {
+	return false
+}
+
 func findDirSIMD(img []uint8, imgBase, stride int) (dir int, variance uint, ok bool) {
 	return 0, 0, false
 }

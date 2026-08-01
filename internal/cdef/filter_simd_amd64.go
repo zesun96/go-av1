@@ -77,6 +77,18 @@ func paddingContiguous8x8SIMD(tmp *[144]int16, src []uint8, srcBase, srcStride i
 //go:noescape
 func paddingContiguous8x8SSE41(dst *int16, src *uint8, srcStride int)
 
+func paddingContiguous4x4SIMD(tmp *[144]int16, src []uint8, srcBase, srcStride int) bool {
+	if !havePrimary8SSE41 || dispatch.GenericForced() ||
+		srcBase < 2*srcStride+2 || srcBase+5*srcStride+5 >= len(src) {
+		return false
+	}
+	paddingContiguous4x4SSE41(&tmp[0], &src[srcBase-2*srcStride-2], srcStride)
+	return true
+}
+
+//go:noescape
+func paddingContiguous4x4SSE41(dst *int16, src *uint8, srcStride int)
+
 func findDirSIMD(img []uint8, imgBase, stride int) (dir int, variance uint, ok bool) {
 	if !havePrimary8SSE41 || dispatch.GenericForced() {
 		return 0, 0, false

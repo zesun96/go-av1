@@ -119,6 +119,45 @@ func TestFilterBlock8x8FromSourceMatchesAssembledPadding(t *testing.T) {
 	}
 }
 
+func TestFilterBlock4x4FromSourceMatchesAssembledPadding(t *testing.T) {
+	const stride = 32
+	rng := rand.New(rand.NewSource(118))
+	src := make([]byte, stride*20)
+	if _, err := rng.Read(src); err != nil {
+		t.Fatal(err)
+	}
+	const bx, by = 8, 8
+	base := by*stride + bx
+	left := make([][2]byte, 4)
+	for y := range left {
+		left[y][0] = src[(by+y)*stride+bx-2]
+		left[y][1] = src[(by+y)*stride+bx-1]
+	}
+	for pri := 0; pri <= 15; pri += 3 {
+		for _, sec := range []int{0, 1, 2, 4} {
+			for dir := 0; dir < 8; dir++ {
+				want := append([]byte(nil), src...)
+				got := append([]byte(nil), src...)
+				FilterBlock(want, base, stride, left,
+					src[(by-2)*stride:], bx, stride,
+					src[(by+4)*stride:], bx, stride,
+					pri, sec, dir, 4, 4, 4, allEdges())
+				FilterBlock4x4FromSource(got, base, stride, src, base, stride,
+					pri, sec, dir, 4)
+				for y := 0; y < 4; y++ {
+					for x := 0; x < 4; x++ {
+						index := (by+y)*stride + bx + x
+						if got[index] != want[index] {
+							t.Fatalf("pri=%d sec=%d dir=%d pixel=(%d,%d) got=%d want=%d",
+								pri, sec, dir, x, y, got[index], want[index])
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func BenchmarkPadding8x8(b *testing.B) {
 	benchmarkPadding8x8(b, padding)
 }

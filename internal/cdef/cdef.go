@@ -273,6 +273,25 @@ func paddingContiguous8x8(tmp *[144]int16, src []uint8, srcBase, srcStride int) 
 	}
 }
 
+func paddingContiguous4x4(tmp *[144]int16, src []uint8, srcBase, srcStride int) {
+	if paddingContiguous4x4SIMD(tmp, src, srcBase, srcStride) {
+		return
+	}
+	srcBase -= 2*srcStride + 2
+	for y := 0; y < 8; y++ {
+		s := srcBase + y*srcStride
+		d := y * tmpStride
+		tmp[d+0] = int16(src[s+0])
+		tmp[d+1] = int16(src[s+1])
+		tmp[d+2] = int16(src[s+2])
+		tmp[d+3] = int16(src[s+3])
+		tmp[d+4] = int16(src[s+4])
+		tmp[d+5] = int16(src[s+5])
+		tmp[d+6] = int16(src[s+6])
+		tmp[d+7] = int16(src[s+7])
+	}
+}
+
 // ulog2 returns floor(log2(v)) for v>0.
 func ulog2(v int) int {
 	if v <= 0 {
@@ -318,6 +337,17 @@ func FilterBlock8x8FromSource(dst []uint8, dstBase, dstStride int,
 	paddingContiguous8x8(&tmpBuf, src, srcBase, srcStride)
 	filterBlockPrepared(dst, dstBase, dstStride, &tmpBuf, 2*tmpStride+2,
 		priStrength, secStrength, dir, damping, 8, 8)
+}
+
+// FilterBlock4x4FromSource applies CDEF to an interior 4x4 block whose full
+// 8x8 neighbor window is contiguous in the immutable source plane.
+func FilterBlock4x4FromSource(dst []uint8, dstBase, dstStride int,
+	src []uint8, srcBase, srcStride int,
+	priStrength, secStrength, dir, damping int) {
+	var tmpBuf [144]int16
+	paddingContiguous4x4(&tmpBuf, src, srcBase, srcStride)
+	filterBlockPrepared(dst, dstBase, dstStride, &tmpBuf, 2*tmpStride+2,
+		priStrength, secStrength, dir, damping, 4, 4)
 }
 
 func filterBlockPrepared(dst []uint8, dstBase, dstStride int,
