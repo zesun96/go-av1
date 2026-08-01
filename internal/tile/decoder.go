@@ -1601,7 +1601,8 @@ func decodeIntraBCBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		TopRightKnown: fs.RefMVTopRightKnown, TopRightAvailable: fs.RefMVTopRightAvailable,
 		BlockDims: refMVBlockDims[:],
 	}
-	found := refmvs.FindPtr(&cfg)
+	var found refmvs.SearchResult
+	refmvs.FindInto(&found, &cfg)
 	var base refmvs.MV
 	for i := 0; i < minInt(found.Count, 2); i++ {
 		if found.Candidates[i].MV[0] != (refmvs.MV{}) {
@@ -4573,8 +4574,8 @@ func singleRefInterCandidates(fs *FrameState, fhdr *header.FrameHeader, fb *Fram
 	if fb != nil && (refSlot < 0 || refSlot >= len(fb.Refs) || fb.Refs[refSlot] == nil) {
 		return 0, stack
 	}
-	found, ok := singleRefSearch(fs, fhdr, fb, refSlot, refFrame, bx, by, bw, bh)
-	if !ok {
+	var found refmvs.SearchResult
+	if !singleRefSearch(&found, fs, fhdr, fb, refSlot, refFrame, bx, by, bw, bh) {
 		return 0, stack
 	}
 	if refFrame <= 0 {
@@ -4883,7 +4884,7 @@ func decodeCompoundMotionSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 					bx, by, i, spatial.NearestCount, c.MV[0].Y, c.MV[0].X, c.MV[1].Y, c.MV[1].X, c.Weight)
 			}
 		}
-		pairResult = refmvs.FindPtr(&searchCfg)
+		refmvs.FindInto(&pairResult, &searchCfg)
 	}
 	// dav1d extends only sparse compound stacks to the two entries required by
 	// NEAR/DRL syntax. Existing normative pair candidates are never augmented.
@@ -4917,9 +4918,9 @@ func decodeCompoundMotionSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 	}
 	drlIdx := 0
 	if syntax.compMode == 7 {
-		drlIdx = decodeCompoundDRLIndex(m, ctx, fs, bx, by, pairResult, 0)
+		drlIdx = decodeCompoundDRLIndex(m, ctx, fs, bx, by, &pairResult, 0)
 	} else if syntax.compMode == 1 || syntax.compMode == 4 || syntax.compMode == 5 {
-		drlIdx = decodeCompoundDRLIndex(m, ctx, fs, bx, by, pairResult, 1)
+		drlIdx = decodeCompoundDRLIndex(m, ctx, fs, bx, by, &pairResult, 1)
 	}
 	components := [8][2]int{
 		{0, 0}, {1, 1}, {0, 2}, {2, 0}, {1, 2}, {2, 1}, {3, 3}, {2, 2},
@@ -4958,8 +4959,8 @@ func decodeCompoundMotionSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 }
 
 func decodeCompoundDRLIndex(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, bx, by int,
-	result refmvs.SearchResult, base int) int {
-	if m == nil || ctx == nil || result.Count <= 1 {
+	result *refmvs.SearchResult, base int) int {
+	if m == nil || ctx == nil || result == nil || result.Count <= 1 {
 		return base
 	}
 	var weightBuf [8]int
@@ -5323,8 +5324,8 @@ func applyNeighbourInterSyntax(syntax *singleRefInterSyntax, blk *Av1Block) bool
 }
 
 func singleRefModeContexts(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, refSlot, refFrame, bx, by, bw, bh int) (newMVCtx, globalMVCtx, refMVCtx int) {
-	result, ok := singleRefSearch(fs, fhdr, fb, refSlot, refFrame, bx, by, bw, bh)
-	if !ok {
+	var result refmvs.SearchResult
+	if !singleRefSearch(&result, fs, fhdr, fb, refSlot, refFrame, bx, by, bw, bh) {
 		return 0, 0, 0
 	}
 	if fs.Tracef != nil {
@@ -5353,15 +5354,15 @@ func singleRefModeContexts(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBu
 	return
 }
 
-func singleRefSearch(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, refSlot, refFrame, bx, by, bw, bh int) (refmvs.SearchResult, bool) {
+func singleRefSearch(result *refmvs.SearchResult, fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, refSlot, refFrame, bx, by, bw, bh int) bool {
 	if fs == nil || fs.MVFrame == nil || fhdr == nil || bw <= 0 || bh <= 0 {
-		return refmvs.SearchResult{}, false
+		return false
 	}
 	if refFrame <= 0 {
 		var ok bool
 		refFrame, ok = slotRefFrame(fhdr, refSlot)
 		if !ok {
-			return refmvs.SearchResult{}, false
+			return false
 		}
 	}
 	globalMV := fallbackGlobalMV(fhdr, refSlot, bx, by, bw, bh)
@@ -5441,7 +5442,8 @@ func singleRefSearch(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, ref
 				bx, by, i, spatial.NearestCount, c.MV[0].Y, c.MV[0].X, c.Weight)
 		}
 	}
-	return refmvs.FindPtr(&searchCfg), true
+	refmvs.FindInto(result, &searchCfg)
+	return true
 }
 
 func neighbourSingleRefFrame(fs *FrameState, fhdr *header.FrameHeader, bx, by int, top bool) (int, bool) {

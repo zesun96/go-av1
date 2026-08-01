@@ -41,13 +41,26 @@ func Find(cfg SearchConfig) SearchResult {
 
 // FindPtr avoids copying the relatively large SearchConfig in decoder hot paths.
 func FindPtr(cfg *SearchConfig) SearchResult {
-	if cfg == nil {
-		return SearchResult{}
+	var out SearchResult
+	FindInto(&out, cfg)
+	return out
+}
+
+// FindInto writes the search result into caller-owned storage, avoiding a
+// SearchResult copy on decoder hot paths.
+func FindInto(out *SearchResult, cfg *SearchConfig) {
+	if out == nil {
+		return
 	}
-	out := findSpatial(cfg, false)
+	*out = SearchResult{}
+	if cfg == nil {
+		return
+	}
+	findSpatialInto(out, cfg, false)
 	temporalEnabled := cfg.UseRefFrameMVs && cfg.TargetSlot >= 0 && cfg.Frame != nil && cfg.Frame.OrderBits != 0 &&
 		(cfg.Ref2 <= 0 || cfg.TargetSlot2 >= 0)
-	secondary := append([]Candidate(nil), out.Candidates[out.NearestCount:out.Count]...)
+	var secondary [8]Candidate
+	secondaryCount := copy(secondary[:], out.Candidates[out.NearestCount:out.Count])
 	if temporalEnabled {
 		out.Count = out.NearestCount
 	}
@@ -79,7 +92,7 @@ func FindPtr(cfg *SearchConfig) SearchResult {
 		}
 	}
 	if temporalEnabled {
-		for _, cand := range secondary {
+		for _, cand := range secondary[:secondaryCount] {
 			out.Count = AddCandidate(out.Candidates[:], out.Count, cand.MV, cand.Weight)
 		}
 		SortCandidates(out.Candidates[:], out.NearestCount)
@@ -89,12 +102,11 @@ func FindPtr(cfg *SearchConfig) SearchResult {
 		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
 	}
 	if cfg.Ref2 > 0 {
-		appendCompoundExtendedCandidates(&out, cfg)
+		appendCompoundExtendedCandidates(out, cfg)
 	} else {
-		appendSingleExtendedCandidates(&out, cfg)
+		appendSingleExtendedCandidates(out, cfg)
 	}
-	clampCandidates(&out, cfg)
-	return out
+	clampCandidates(out, cfg)
 }
 
 func appendCompoundExtendedCandidates(out *SearchResult, cfg *SearchConfig) {
@@ -403,13 +415,18 @@ func projectTemporalAt(current *Frame, targetSlot, x8, y8 int) (MV, bool) {
 // FindSpatial builds dav1d's nearest spatial range. Row scanning precedes
 // column scanning, so stable sorting preserves row-first ties.
 func FindSpatial(cfg SearchConfig) SearchResult {
-	return findSpatial(&cfg, true)
+	var out SearchResult
+	findSpatialInto(&out, &cfg, true)
+	return out
 }
 
-func findSpatial(cfg *SearchConfig, sortSecondary bool) SearchResult {
-	var out SearchResult
+func findSpatialInto(out *SearchResult, cfg *SearchConfig, sortSecondary bool) {
+	if out == nil {
+		return
+	}
+	*out = SearchResult{}
 	if cfg.Frame == nil || cfg.Bw4 <= 0 || cfg.Bh4 <= 0 || len(cfg.BlockDims) == 0 {
-		return out
+		return
 	}
 	tileX1, tileY1 := cfg.TileX1, cfg.TileY1
 	if tileX1 <= cfg.TileX0 {
@@ -428,7 +445,7 @@ func findSpatial(cfg *SearchConfig, sortSecondary bool) SearchResult {
 		if cfg.Bw4 >= 16 {
 			step = 4
 		}
-		nRows = scanSpatialRow(&out, cfg, cfg.Bx4, cfg.By4-1, cfg.Bw4, w4, maxRows, step, true)
+		nRows = scanSpatialRow(out, cfg, cfg.Bx4, cfg.By4-1, cfg.Bw4, w4, maxRows, step, true)
 	}
 	if cfg.Bx4 > cfg.TileX0 {
 		maxCols = minSearch((cfg.Bx4-cfg.TileX0+1)>>1, 2+boolSearch(cfg.Bw4 > 1))
@@ -436,20 +453,19 @@ func findSpatial(cfg *SearchConfig, sortSecondary bool) SearchResult {
 		if cfg.Bh4 >= 16 {
 			step = 4
 		}
-		nCols = scanSpatialCol(&out, cfg, cfg.Bx4-1, cfg.By4, cfg.Bh4, h4, maxCols, step, true)
+		nCols = scanSpatialCol(out, cfg, cfg.Bx4-1, cfg.By4, cfg.Bh4, h4, maxCols, step, true)
 	}
-	appendTopRight(&out, cfg)
+	appendTopRight(out, cfg)
 	nearestCount := out.Count
 	out.NearestCount = nearestCount
 	for i := 0; i < out.NearestCount; i++ {
 		out.Candidates[i].Weight += 640
 	}
-	appendSecondarySpatial(&out, cfg, nRows, nCols, maxRows, maxCols, w4, h4)
+	appendSecondarySpatial(out, cfg, nRows, nCols, maxRows, maxCols, w4, h4)
 	if sortSecondary {
 		SortCandidates(out.Candidates[:], out.NearestCount)
 		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
 	}
-	return out
 }
 
 func addSpatialCandidate(out *SearchResult, cfg *SearchConfig, blk Block, weight int, row, direct, trackNewMV bool) {
