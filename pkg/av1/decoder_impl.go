@@ -546,8 +546,10 @@ func (d *decoderImpl) postFilter(pic *Picture, fhdr *header.FrameHeader, filterS
 	if d.opts.InloopFilters&InloopFilterDeblock != 0 {
 		run("deblock", func() { d.applyLoopFilterWithState(pic, fhdr, filterState) })
 	}
+	restorationActive := d.opts.InloopFilters&InloopFilterRestoration != 0 &&
+		filterState != nil && len(filterState.RestorationUnits) != 0
 	var restorationBoundary [3][]byte
-	if d.opts.InloopFilters&InloopFilterRestoration != 0 {
+	if restorationActive {
 		for plane, samples := range [][]byte{pic.Y, pic.U, pic.V} {
 			if cap(d.restorationBoundaryScratch[plane]) < len(samples) {
 				d.restorationBoundaryScratch[plane] = make([]byte, len(samples))
@@ -561,7 +563,7 @@ func (d *decoderImpl) postFilter(pic *Picture, fhdr *header.FrameHeader, filterS
 	if d.opts.InloopFilters&InloopFilterCDEF != 0 {
 		run("cdef", func() { d.applyCDEFWithState(pic, fhdr, filterState) })
 	}
-	if d.opts.InloopFilters&InloopFilterRestoration != 0 {
+	if restorationActive {
 		run("restoration", func() { d.applyRestoration(pic, fhdr, filterState, restorationBoundary) })
 	}
 }
