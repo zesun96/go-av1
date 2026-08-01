@@ -3283,30 +3283,6 @@ func readGolomb(m *bitstream.MSAC) uint32 {
 	return val - 1
 }
 
-// getLoCtx2D mirrors dav1d get_lo_ctx for TX_CLASS_2D. Returns (ctx, hi_mag).
-func getLoCtx2D(levels []uint8, base int, stride int, ctxOff *[5][5]uint8, x, y int) (int, int) {
-	mag := int(levels[base+0*stride+1]) + int(levels[base+1*stride+0])
-	mag += int(levels[base+1*stride+1])
-	hiMag := mag
-	mag += int(levels[base+0*stride+2]) + int(levels[base+2*stride+0])
-	xi := x
-	yi := y
-	if xi > 4 {
-		xi = 4
-	}
-	if yi > 4 {
-		yi = 4
-	}
-	offset := int(ctxOff[yi][xi])
-	var add int
-	if mag > 512 {
-		add = 4
-	} else {
-		add = (mag + 64) >> 7
-	}
-	return offset + add, hiMag
-}
-
 // getLoCtx1D mirrors dav1d get_lo_ctx for TX_CLASS_H/V.
 func getLoCtx1D(levels []uint8, base, stride, y int) (int, int) {
 	mag := int(levels[base+0*stride+1]) + int(levels[base+1*stride+0])
@@ -3665,7 +3641,23 @@ func decodeCoeffTokens(m *bitstream.MSAC, ctx *TileCtx, td transform.TxfmDim, ch
 			}
 			var loCtx, hiMag int
 			if cls == TxClass2D {
-				loCtx, hiMag = getLoCtx2D(levels, lvlIdx, geom.stride, ctxOff, xi, yi)
+				stride := geom.stride
+				mag := int(levels[lvlIdx+1]) + int(levels[lvlIdx+stride])
+				mag += int(levels[lvlIdx+stride+1])
+				hiMag = mag
+				mag += int(levels[lvlIdx+2]) + int(levels[lvlIdx+2*stride])
+				offX, offY := xi, yi
+				if offX > 4 {
+					offX = 4
+				}
+				if offY > 4 {
+					offY = 4
+				}
+				add := (mag + 64) >> 7
+				if add > 4 {
+					add = 4
+				}
+				loCtx = int(ctxOff[offY][offX]) + add
 			} else {
 				loCtx, hiMag = getLoCtx1D(levels, lvlIdx, geom.stride, yi)
 			}
