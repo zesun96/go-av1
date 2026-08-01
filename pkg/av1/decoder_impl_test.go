@@ -601,6 +601,45 @@ func TestCDEFZeroIndexBitsStillUsesPresetZero(t *testing.T) {
 	}
 }
 
+func TestLoadCDEFStripePreservesOriginalTopRows(t *testing.T) {
+	const (
+		stride  = 20
+		height  = 24
+		blockSz = 8
+	)
+	plane := make([]byte, stride*height)
+	for y := 0; y < height; y++ {
+		for x := 0; x < stride; x++ {
+			plane[y*stride+x] = byte(y*7 + x)
+		}
+	}
+	stripe := make([]byte, (blockSz+4)*stride)
+	loadCDEFStripe(stripe, plane, stride, height, 0, blockSz)
+
+	// Simulate CDEF overwriting the first block row before the next stripe is
+	// loaded. Rows 6 and 7 must still come from the immutable stripe copy.
+	clear(plane[:blockSz*stride])
+	loadCDEFStripe(stripe, plane, stride, height, blockSz, blockSz)
+	for row := 0; row < 2; row++ {
+		globalY := blockSz - 2 + row
+		for x := 0; x < stride; x++ {
+			want := byte(globalY*7 + x)
+			if got := stripe[row*stride+x]; got != want {
+				t.Fatalf("top row %d x=%d: got %d want %d", globalY, x, got, want)
+			}
+		}
+	}
+	for row := 0; row < blockSz+2; row++ {
+		globalY := blockSz + row
+		for x := 0; x < stride; x++ {
+			want := byte(globalY*7 + x)
+			if got := stripe[(row+2)*stride+x]; got != want {
+				t.Fatalf("active row %d x=%d: got %d want %d", globalY, x, got, want)
+			}
+		}
+	}
+}
+
 func loopFilterTestPicture() *Picture {
 	p := &Picture{Width: 8, Height: 8, StrideY: 8, StrideUV: 4, Chroma: Chroma420}
 	p.Y = make([]byte, 64)

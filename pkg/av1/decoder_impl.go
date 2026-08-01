@@ -922,6 +922,15 @@ func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader,
 	if chromaLen := len(pic.U) + len(pic.V); chromaLen > maxPlaneLen {
 		maxPlaneLen = chromaLen
 	}
+	// CDEF keeps only one immutable block-row stripe: two source rows above,
+	// the active block rows, and two rows below. Small pictures may have less
+	// backing storage than the complete stripe geometry requires.
+	if stripeLen := 12 * pic.StrideY; stripeLen > maxPlaneLen {
+		maxPlaneLen = stripeLen
+	}
+	if stripeLen := 2 * 8 * pic.StrideUV; stripeLen > maxPlaneLen {
+		maxPlaneLen = stripeLen
+	}
 	if cap(d.cdefSrc) < maxPlaneLen {
 		d.cdefSrc = make([]byte, maxPlaneLen)
 	} else {
@@ -951,15 +960,22 @@ func applyCDEFPlane(plane, pairedPlane []byte, stride, w, h, blockSz, planeID, d
 	if len(plane) == 0 {
 		return
 	}
-	src = src[:len(plane)+len(pairedPlane)]
-	primarySrc := src[:len(plane)]
-	copy(primarySrc, plane)
+	stripeLen := (blockSz + 4) * stride
+	totalStripeLen := stripeLen
+	if len(pairedPlane) != 0 {
+		totalStripeLen += stripeLen
+	}
+	src = src[:totalStripeLen]
+	primarySrc := src[:stripeLen]
 	var pairedSrc []byte
 	if len(pairedPlane) != 0 {
-		pairedSrc = src[len(plane):]
-		copy(pairedSrc, pairedPlane)
+		pairedSrc = src[stripeLen:]
 	}
 	for by, blockRow := 0, 0; by < h; by, blockRow = by+blockSz, blockRow+1 {
+		loadCDEFStripe(primarySrc, plane, stride, h, by, blockSz)
+		if len(pairedPlane) != 0 {
+			loadCDEFStripe(pairedSrc, pairedPlane, stride, h, by, blockSz)
+		}
 		dirIdx := blockRow * dirStride
 		for bx := 0; bx < w; bx, dirIdx = bx+blockSz, dirIdx+1 {
 			if len(nonSkipBits) != 0 {
@@ -1029,7 +1045,7 @@ func applyCDEFPlane(plane, pairedPlane []byte, stride, w, h, blockSz, planeID, d
 				uvPriStrength := int(fhdr.CDEF.UVStrength[preset]) >> 2
 				var variance uint
 				if rawPriStrength != 0 || uvPriStrength != 0 {
-					dir, variance = cdef.FindDir(primarySrc, by*stride+bx, stride)
+					dir, variance = cdef.FindDir(primarySrc, 2*stride+bx, stride)
 					if dirIdx >= 0 && dirIdx < len(dirs) {
 						dirs[dirIdx] = uint8(dir)
 						variances[dirIdx] = variance
@@ -1046,18 +1062,19 @@ func applyCDEFPlane(plane, pairedPlane []byte, stride, w, h, blockSz, planeID, d
 				dir = chromaCDEFDirection(priStrength, dirIdx, dirs)
 			}
 
-			srcBase := by*stride + bx
+			dstBase := by*stride + bx
+			srcBase := 2*stride + bx
 			const allCDEFEdges = cdef.HaveTop | cdef.HaveBottom | cdef.HaveLeft | cdef.HaveRight
 			if bw == 8 && bh == 8 && edges == allCDEFEdges &&
 				srcBase >= 2*stride+2 && srcBase+9*stride+9 < len(primarySrc) {
 				cdef.FilterBlock8x8FromSource(
-					plane, srcBase, stride,
+					plane, dstBase, stride,
 					primarySrc, srcBase, stride,
 					priStrength, secStrength, dir, damping,
 				)
 				if len(pairedPlane) != 0 {
 					cdef.FilterBlock8x8FromSource(
-						pairedPlane, srcBase, stride,
+						pairedPlane, dstBase, stride,
 						pairedSrc, srcBase, stride,
 						priStrength, secStrength, dir, damping,
 					)
@@ -1067,13 +1084,13 @@ func applyCDEFPlane(plane, pairedPlane []byte, stride, w, h, blockSz, planeID, d
 			if bw == 4 && bh == 4 && edges == allCDEFEdges &&
 				srcBase >= 2*stride+2 && srcBase+5*stride+5 < len(primarySrc) {
 				cdef.FilterBlock4x4FromSource(
-					plane, srcBase, stride,
+					plane, dstBase, stride,
 					primarySrc, srcBase, stride,
 					priStrength, secStrength, dir, damping,
 				)
 				if len(pairedPlane) != 0 {
 					cdef.FilterBlock4x4FromSource(
-						pairedPlane, srcBase, stride,
+						pairedPlane, dstBase, stride,
 						pairedSrc, srcBase, stride,
 						priStrength, secStrength, dir, damping,
 					)
@@ -1081,44 +1098,52 @@ func applyCDEFPlane(plane, pairedPlane []byte, stride, w, h, blockSz, planeID, d
 				continue
 			}
 
-			filterCDEFBoundaryPlane(plane, primarySrc, srcBase, stride, w, h,
+			filterCDEFBoundaryPlane(plane, primarySrc, dstBase, srcBase, stride, w, h,
 				bx, by, bw, bh, priStrength, secStrength, dir, damping, edges)
 			if len(pairedPlane) != 0 {
-				filterCDEFBoundaryPlane(pairedPlane, pairedSrc, srcBase, stride, w, h,
+				filterCDEFBoundaryPlane(pairedPlane, pairedSrc, dstBase, srcBase, stride, w, h,
 					bx, by, bw, bh, priStrength, secStrength, dir, damping, edges)
 			}
 		}
 	}
 }
 
-func filterCDEFBoundaryPlane(plane, src []byte, srcBase, stride, w, h,
+func loadCDEFStripe(stripe, plane []byte, stride, h, by, blockSz int) {
+	if by > 0 {
+		copy(stripe[:2*stride], stripe[blockSz*stride:(blockSz+2)*stride])
+	}
+	rows := minInt(blockSz+2, h-by)
+	copy(stripe[2*stride:(2+rows)*stride], plane[by*stride:(by+rows)*stride])
+}
+
+func filterCDEFBoundaryPlane(plane, src []byte, dstBase, srcBase, stride, w, h,
 	bx, by, bw, bh, priStrength, secStrength, dir, damping int, edges cdef.EdgeFlags,
 ) {
 	var leftBuf [8][2]uint8
 	left := leftBuf[:bh]
 	if bx >= 2 {
 		for row := 0; row < bh; row++ {
-			y := by + row
-			if y < h {
-				left[row][0] = src[y*stride+(bx-2)]
-				left[row][1] = src[y*stride+(bx-1)]
+			if by+row < h {
+				off := srcBase + row*stride
+				left[row][0] = src[off-2]
+				left[row][1] = src[off-1]
 			}
 		}
 	}
 	var top []byte
 	topBase := 0
 	if by > 0 {
-		top = src[(by-2)*stride:]
+		top = src
 		topBase = bx
 	}
 	var bottom []byte
 	bottomBase := 0
 	if by+bh < h {
-		bottom = src[(by+bh)*stride:]
+		bottom = src[srcBase+bh*stride-bx:]
 		bottomBase = bx
 	}
 	cdef.FilterBlock(
-		plane, srcBase, stride,
+		plane, dstBase, stride,
 		left,
 		top, topBase, stride,
 		bottom, bottomBase, stride,
