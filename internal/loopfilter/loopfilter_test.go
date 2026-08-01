@@ -1,8 +1,33 @@
 package loopfilter
 
 import (
+	"math/rand"
 	"testing"
 )
+
+func TestLoopFilter4MatchesGeneric(t *testing.T) {
+	const stride = 32
+	rng := rand.New(rand.NewSource(501))
+	for iteration := 0; iteration < 10000; iteration++ {
+		template := make([]byte, stride*16)
+		if _, err := rng.Read(template); err != nil {
+			t.Fatal(err)
+		}
+		E, I, H := rng.Intn(256), rng.Intn(64), rng.Intn(4)
+		for _, steps := range [][2]int{{1, stride}, {stride, 1}} {
+			got := append([]byte(nil), template...)
+			want := append([]byte(nil), template...)
+			base := 8*stride + 8
+			loopFilter4(got, base, E, I, H, steps[0], steps[1])
+			loopFilterGeneric(want, base, E, I, H, steps[0], steps[1], 4)
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("iteration=%d steps=%v byte=%d: specialized=%d generic=%d", iteration, steps, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}
 
 // makeLUT builds a FilterLUT with all E=e, I=i for every level.
 func makeLUT(e, i uint8) *FilterLUT {

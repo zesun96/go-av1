@@ -87,6 +87,14 @@ func iabs(v int) int {
 // direction). E, I, H are the filter threshold values (already shifted for
 // 8-bit). wd selects the filter width (4, 6, 8, or 16).
 func loopFilter(dst []uint8, dstBase int, E, I, H int, stridea, strideb int, wd int) {
+	if wd == 4 {
+		loopFilter4(dst, dstBase, E, I, H, stridea, strideb)
+		return
+	}
+	loopFilterGeneric(dst, dstBase, E, I, H, stridea, strideb, wd)
+}
+
+func loopFilterGeneric(dst []uint8, dstBase int, E, I, H int, stridea, strideb int, wd int) {
 	for i := 0; i < 4; i++ {
 		p1 := int(dst[dstBase+strideb*-2])
 		p0 := int(dst[dstBase+strideb*-1])
@@ -190,6 +198,37 @@ func loopFilter(dst []uint8, dstBase int, E, I, H int, stridea, strideb int, wd 
 			}
 		}
 
+		dstBase += stridea
+	}
+}
+
+func loopFilter4(dst []uint8, dstBase int, E, I, H int, stridea, strideb int) {
+	for i := 0; i < 4; i++ {
+		p1 := int(dst[dstBase-2*strideb])
+		p0 := int(dst[dstBase-strideb])
+		q0 := int(dst[dstBase])
+		q1 := int(dst[dstBase+strideb])
+		if iabs(p1-p0) > I || iabs(q1-q0) > I ||
+			iabs(p0-q0)*2+(iabs(p1-q1)>>1) > E {
+			dstBase += stridea
+			continue
+		}
+
+		hev := iabs(p1-p0) > H || iabs(q1-q0) > H
+		f := 3 * (q0 - p0)
+		if hev {
+			f += iclip(p1-q1, -128, 127)
+		}
+		f = iclip(f, -128, 127)
+		f1 := iclip(f+4, -128, 127) >> 3
+		f2 := iclip(f+3, -128, 127) >> 3
+		dst[dstBase-strideb] = iclipPixel(p0 + f2)
+		dst[dstBase] = iclipPixel(q0 - f1)
+		if !hev {
+			f3 := (f1 + 1) >> 1
+			dst[dstBase-2*strideb] = iclipPixel(p1 + f3)
+			dst[dstBase+strideb] = iclipPixel(q1 - f3)
+		}
 		dstBase += stridea
 	}
 }
