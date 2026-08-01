@@ -932,9 +932,9 @@ func applyCDEFPlane(plane, pairedPlane []byte, stride, w, h, blockSz, planeID, d
 		pairedSrc = src[len(plane):]
 		copy(pairedSrc, pairedPlane)
 	}
-	for by := 0; by < h; by += blockSz {
-		for bx := 0; bx < w; bx += blockSz {
-			dirIdx := (by/blockSz)*dirStride + bx/blockSz
+	for by, blockRow := 0, 0; by < h; by, blockRow = by+blockSz, blockRow+1 {
+		dirIdx := blockRow * dirStride
+		for bx := 0; bx < w; bx, dirIdx = bx+blockSz, dirIdx+1 {
 			if len(nonSkipBits) != 0 {
 				word := dirIdx >> 6
 				if word < 0 || word >= len(nonSkipBits) ||
