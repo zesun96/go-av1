@@ -11,6 +11,7 @@ func BenchmarkInvTxfmAdd(b *testing.B) {
 		width int
 		shift int
 	}{
+		{name: "4x4", size: TX4x4, width: 4, shift: 0},
 		{name: "8x8", size: TX8x8, width: 8, shift: 1},
 		{name: "16x16", size: TX16x16, width: 16, shift: 2},
 	}
@@ -38,6 +39,36 @@ func BenchmarkInvTxfmAdd(b *testing.B) {
 			benchmarkTransformSink = dst[b.N%len(dst)]
 		})
 	}
+}
+
+func BenchmarkInvTxfmAddDCT4x4Generic(b *testing.B) {
+	template := make([]int32, 16)
+	for i := range template {
+		template[i] = int32((i*37)%257 - 128)
+	}
+	coeff := make([]int32, 16)
+	dst := make([]uint8, 16)
+	b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		copy(coeff, template)
+		invTxfmAddGeneric(dst, 4, coeff, 15, TX4x4, 0, DCT_DCT, -1, 8)
+	}
+	benchmarkTransformSink = dst[b.N%len(dst)]
+}
+
+func BenchmarkInvTxfmAddDCT8x8Generic(b *testing.B) {
+	template := make([]int32, 64)
+	for i := range template {
+		template[i] = int32((i*37)%257 - 128)
+	}
+	coeff := make([]int32, 64)
+	dst := make([]uint8, 64)
+	b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		copy(coeff, template)
+		invTxfmAddGeneric(dst, 8, coeff, 63, TX8x8, 1, DCT_DCT, -1, 8)
+	}
+	benchmarkTransformSink = dst[b.N%len(dst)]
 }
 
 func checksumBytes(data []byte) uint64 {

@@ -26,6 +26,64 @@ func TestPixelClamp(t *testing.T) {
 	}
 }
 
+func TestInvTxfmAddDCT4x4SpecializedMatchesGeneric(t *testing.T) {
+	rng := rand.New(rand.NewSource(401))
+	for iteration := 0; iteration < 1000; iteration++ {
+		stride := 4 + rng.Intn(13)
+		dstA := make([]byte, stride*4)
+		if _, err := rng.Read(dstA); err != nil {
+			t.Fatal(err)
+		}
+		dstB := append([]byte(nil), dstA...)
+		coeffA := make([]int32, 16)
+		for i := range coeffA {
+			coeffA[i] = int32(rng.Intn(8193) - 4096)
+		}
+		coeffB := append([]int32(nil), coeffA...)
+		invTxfmAddDCT4x4(dstA, stride, coeffA, -1)
+		invTxfmAddGeneric(dstB, stride, coeffB, 15, TX4x4, 0, DCT_DCT, -1, 8)
+		for i := range dstA {
+			if dstA[i] != dstB[i] {
+				t.Fatalf("iteration=%d pixel=%d: specialized=%d generic=%d", iteration, i, dstA[i], dstB[i])
+			}
+		}
+		for i := range coeffA {
+			if coeffA[i] != 0 || coeffB[i] != 0 {
+				t.Fatalf("iteration=%d coefficient %d not cleared", iteration, i)
+			}
+		}
+	}
+}
+
+func TestInvTxfmAddDCT8x8SpecializedMatchesGeneric(t *testing.T) {
+	rng := rand.New(rand.NewSource(402))
+	for iteration := 0; iteration < 1000; iteration++ {
+		stride := 8 + rng.Intn(17)
+		dstA := make([]byte, stride*8)
+		if _, err := rng.Read(dstA); err != nil {
+			t.Fatal(err)
+		}
+		dstB := append([]byte(nil), dstA...)
+		coeffA := make([]int32, 64)
+		for i := range coeffA {
+			coeffA[i] = int32(rng.Intn(8193) - 4096)
+		}
+		coeffB := append([]int32(nil), coeffA...)
+		invTxfmAddDCT8x8(dstA, stride, coeffA, -1)
+		invTxfmAddGeneric(dstB, stride, coeffB, 63, TX8x8, 1, DCT_DCT, -1, 8)
+		for i := range dstA {
+			if dstA[i] != dstB[i] {
+				t.Fatalf("iteration=%d pixel=%d: specialized=%d generic=%d", iteration, i, dstA[i], dstB[i])
+			}
+		}
+		for i := range coeffA {
+			if coeffA[i] != 0 || coeffB[i] != 0 {
+				t.Fatalf("iteration=%d coefficient %d not cleared", iteration, i)
+			}
+		}
+	}
+}
+
 // ---- InvTxfmAdd DC-only ---------------------------------------------------
 
 func TestInvTxfmAdd_DCOnly_4x4_DCT(t *testing.T) {

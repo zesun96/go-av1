@@ -33,8 +33,19 @@ func addResidual8SIMD(dst []uint8, stride int, src []int32, w, h int) bool {
 	return true
 }
 
+func addResidual4x4SIMD(dst []uint8, stride int, src *[16]int32) bool {
+	if !haveAddResidualSSE41 || dispatch.GenericForced() {
+		return false
+	}
+	addResidual4x4SSE41(&dst[0], stride, &src[0])
+	return true
+}
+
 //go:noescape
 func addDC8SSE2(dst *uint8, stride, w, h, dc int)
 
 //go:noescape
 func addResidual8SSE41(dst *uint8, stride int, src *int32, w, h int)
+
+//go:noescape
+func addResidual4x4SSE41(dst *uint8, stride int, src *int32)

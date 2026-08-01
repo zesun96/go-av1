@@ -53,6 +53,19 @@ func InvTxfmAdd(dst []uint8, stride int, coeff []int32, eob int,
 // has it available.
 func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob int,
 	tx uint8, shift int, txtp uint8, exactLastNonzeroCol int, bitDepth int) {
+	if tx == TX4x4 && txtp == DCT_DCT && bitDepth == 8 && eob >= 1 {
+		invTxfmAddDCT4x4(dst, stride, coeff, exactLastNonzeroCol)
+		return
+	}
+	if tx == TX8x8 && txtp == DCT_DCT && bitDepth == 8 && eob >= 1 {
+		invTxfmAddDCT8x8(dst, stride, coeff, exactLastNonzeroCol)
+		return
+	}
+	invTxfmAddGeneric(dst, stride, coeff, eob, tx, shift, txtp, exactLastNonzeroCol, bitDepth)
+}
+
+func invTxfmAddGeneric(dst []uint8, stride int, coeff []int32, eob int,
+	tx uint8, shift int, txtp uint8, exactLastNonzeroCol int, bitDepth int) {
 	if txtp == WHT_WHT {
 		InvWHT4x4(dst, stride, coeff, bitDepth)
 		return
@@ -210,6 +223,77 @@ func InvTxfmAddWithLastNonzeroCol(dst []uint8, stride int, coeff []int32, eob in
 		}
 	}
 	inverseTransformScratchPool.Put(tmpBuffer)
+}
+
+func invTxfmAddDCT4x4(dst []uint8, stride int, coeff []int32, exactLastNonzeroCol int) {
+	var tmp [16]int32
+	lastNonzeroCol := 3
+	if exactLastNonzeroCol >= 0 && exactLastNonzeroCol < lastNonzeroCol {
+		lastNonzeroCol = exactLastNonzeroCol
+	}
+	for y := 0; y <= lastNonzeroCol; y++ {
+		row := tmp[y*4 : y*4+4]
+		row[0] = coeff[y]
+		row[1] = coeff[y+4]
+		row[2] = coeff[y+8]
+		row[3] = coeff[y+12]
+		InvDCT4(row, 1, -1<<15, 1<<15-1)
+	}
+	clear(coeff)
+	for x := 0; x < 4; x++ {
+		InvDCT4(tmp[x:], 4, -1<<15, 1<<15-1)
+	}
+	if addResidual4x4SIMD(dst, stride, &tmp) {
+		return
+	}
+	for y := 0; y < 4; y++ {
+		row := y * stride
+		for x := 0; x < 4; x++ {
+			dst[row+x] = uint8(pixelClamp(int(dst[row+x])+((int(tmp[y*4+x])+8)>>4), 255))
+		}
+	}
+}
+
+func invTxfmAddDCT8x8(dst []uint8, stride int, coeff []int32, exactLastNonzeroCol int) {
+	var tmp [64]int32
+	lastNonzeroCol := 7
+	if exactLastNonzeroCol >= 0 && exactLastNonzeroCol < lastNonzeroCol {
+		lastNonzeroCol = exactLastNonzeroCol
+	}
+	for y := 0; y <= lastNonzeroCol; y++ {
+		row := tmp[y*8 : y*8+8]
+		row[0] = coeff[y]
+		row[1] = coeff[y+8]
+		row[2] = coeff[y+16]
+		row[3] = coeff[y+24]
+		row[4] = coeff[y+32]
+		row[5] = coeff[y+40]
+		row[6] = coeff[y+48]
+		row[7] = coeff[y+56]
+		InvDCT8(row, 1, -1<<15, 1<<15-1)
+	}
+	clear(coeff)
+	for i := range tmp {
+		v := (int(tmp[i]) + 1) >> 1
+		if v < -1<<15 {
+			v = -1 << 15
+		} else if v > 1<<15-1 {
+			v = 1<<15 - 1
+		}
+		tmp[i] = int32(v)
+	}
+	for x := 0; x < 8; x++ {
+		InvDCT8(tmp[x:], 8, -1<<15, 1<<15-1)
+	}
+	if addResidual8SIMD(dst, stride, tmp[:], 8, 8) {
+		return
+	}
+	for y := 0; y < 8; y++ {
+		row := y * stride
+		for x := 0; x < 8; x++ {
+			dst[row+x] = uint8(pixelClamp(int(dst[row+x])+((int(tmp[y*8+x])+8)>>4), 255))
+		}
+	}
 }
 
 // InvWHT4x4 applies the 4×4 Walsh-Hadamard inverse transform (lossless),

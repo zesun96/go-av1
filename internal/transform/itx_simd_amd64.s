@@ -108,3 +108,29 @@ residualCol:
 	DECQ R10
 	JNZ residualRow
 	RET
+
+// addResidual4x4SSE41 rounds one row of four Q4 residuals per iteration and
+// saturating-adds them to an 8-bit 4x4 destination.
+TEXT ·addResidual4x4SSE41(SB), NOSPLIT, $0-24
+	MOVQ dst+0(FP), DI
+	MOVQ stride+8(FP), R8
+	MOVQ src+16(FP), SI
+	MOVO ·residualRound8<>(SB), X7
+	MOVQ $4, CX
+residual4Row:
+	MOVOU (SI), X0
+	PADDL X7, X0
+	PSRAL $4, X0
+	PACKSSLW X0, X0
+	MOVL (DI), AX
+	MOVD AX, X1
+	PMOVZXBW X1, X1
+	PADDW X0, X1
+	PACKUSWB X1, X1
+	MOVD X1, AX
+	MOVL AX, (DI)
+	ADDQ $16, SI
+	ADDQ R8, DI
+	DECQ CX
+	JNZ residual4Row
+	RET
