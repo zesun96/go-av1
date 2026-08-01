@@ -501,25 +501,50 @@ locals avoids a non-inlined method boundary on every decoded symbol. An
 seconds (1.91 percent). Applying the same expansion to the less frequent Bool
 paths was measured and discarded because it regressed by 0.22 percent.
 
+The first larger-kernel phase adds fused 8-bit DCT_DCT paths for non-DC 4x4
+and 8x8 inverse transforms. They use fixed stack scratch, direct transposed
+coefficient loading, and a four-pixel SSE4.1 residual-add kernel; the existing
+eight-pixel residual kernel completes the 8x8 path. Randomized differential
+tests compare both fused implementations against the generic 2D driver, and
+`purego` retains scalar residual addition. The 4x4 microbenchmark fell from
+approximately 90 to 40 ns, while 8x8 fell from roughly 630--700 to 220--230
+ns in the final low-load measurement. Their combined 11-run WebRTC comparison
+reduced the median from 0.988302 to 0.970704 seconds (1.78 percent).
+
+The loop filter now dispatches width-4 edges to a fixed narrow kernel instead
+of evaluating the 6/8/16-wide flatness branches four times per edge. A 10,000
+case randomized differential test covers horizontal and vertical layouts.
+The microbenchmark fell from approximately 32--49 to 11.5 ns, and the
+end-to-end median fell from 0.978353 to 0.969188 seconds (0.94 percent).
+
+The native adaptive-symbol path now uses its validated CDF extent to perform
+unchecked pointer loads and stores, eliminating all three generated CDF bounds
+checks; the remaining check belongs to bitstream refill. Marking the compact
+hot method `nosplit` also removes its per-symbol stack guard. An 11-run
+comparison reduced the median from 0.954138 to 0.948539 seconds (0.59
+percent). A fused 16x16 Go driver was measured and discarded: its 7 percent
+microbenchmark gain became a 0.20 percent end-to-end regression, so 16x16
+requires a real vector butterfly kernel rather than a larger Go stack frame.
+
 ## Current Benchmark Status (2026-08-01)
 
-Current benchmark commit: `907d617aeefbb83ca4d903365b9d7727fb526477`.
+Current benchmark commit: `5a8931f`.
 Both current comparisons used the GCC release dav1d build, one decoder
 thread, `GOMAXPROCS=1`, all in-loop filters, no film grain, two warmups, and
 nine alternating measured runs.
 
 | Input | Decoder | Original median | Current median | Current throughput | Current ratio |
 |---|---|---:|---:|---:|---:|
-| WebRTC dynamic desktop, 120 packets | go-av1 | 10.522s | 0.999s | 120.17 packets/s | 4.12x dav1d |
-| WebRTC dynamic desktop, 120 packets | dav1d | 0.319s | 0.242s | 494.99 packets/s | 1.00x |
+| WebRTC dynamic desktop, 120 packets | go-av1 | 10.522s | 0.955s | 125.60 packets/s | 4.06x dav1d |
+| WebRTC dynamic desktop, 120 packets | dav1d | 0.319s | 0.236s | 509.42 packets/s | 1.00x |
 | AOM all-intra 352x288, 39 packets | go-av1 | 1.212s | 0.659s | 59.16 packets/s | 6.52x dav1d |
 | AOM all-intra 352x288, 39 packets | dav1d | 0.098s | 0.101s | 386.01 packets/s | 1.00x |
 
-For the representative WebRTC segment, go-av1 is now 10.53x faster than its
-original baseline: median wall time is down 90.5 percent and throughput rose
-from 11.40 to 120.17 packets/s. Relative throughput rose from approximately
-3.0 to 24.3 percent of release dav1d. Reaching the current 0.242-second dav1d
-median at one thread still requires removing another 75.8 percent of go-av1's
+For the representative WebRTC segment, go-av1 is now 11.02x faster than its
+original baseline: median wall time is down 90.9 percent and throughput rose
+from 11.40 to 125.60 packets/s. Relative throughput rose from approximately
+3.0 to 24.7 percent of release dav1d. Reaching the current 0.236-second dav1d
+median at one thread still requires removing another 75.3 percent of go-av1's
 current wall time.
 
 The current 120-packet memory counter reports 263.9 MB and 626,117
@@ -550,7 +575,7 @@ The decoder needs dav1d-style DSP coverage for common transforms, loop
 filters, compound prediction, restoration, and remaining CDEF paths; entropy
 and block reconstruction need fewer generic calls and bounds-checked slice
 operations; post-filters need mask/stripe traversal instead of repeated 4x4
-state queries. These changes can plausibly close a large part of the 4.12x
+state queries. These changes can plausibly close a large part of the 4.06x
 gap, but exact one-thread parity effectively requires reproducing much of
 dav1d's architecture-specific kernel and dataflow design.
 
