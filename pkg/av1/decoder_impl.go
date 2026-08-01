@@ -890,6 +890,9 @@ func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader,
 		clear(d.cdefVariances)
 	}
 	maxPlaneLen := len(pic.Y)
+	if chromaLen := len(pic.U) + len(pic.V); chromaLen > maxPlaneLen {
+		maxPlaneLen = chromaLen
+	}
 	if cap(d.cdefSrc) < maxPlaneLen {
 		d.cdefSrc = make([]byte, maxPlaneLen)
 	} else {
@@ -906,21 +909,27 @@ func (d *decoderImpl) applyCDEFWithState(pic *Picture, fhdr *header.FrameHeader,
 		nonSkipBits = nil
 	}
 
-	applyCDEFPlane(pic.Y, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, nonSkipBits, dirW, d.cdefSrc)
+	applyCDEFPlane(pic.Y, nil, pic.StrideY, w, h, 8, 0, damping, fs, fhdr, d.cdefDirs, d.cdefVariances, nonSkipBits, dirW, d.cdefSrc)
 	if pic.Chroma != ChromaMonochrome && len(pic.U) > 0 {
 		cw, ch := pic.codedChromaSize()
-		applyCDEFPlane(pic.U, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, nonSkipBits, dirW, d.cdefSrc)
-		applyCDEFPlane(pic.V, pic.StrideUV, cw, ch, 4, 2, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, nonSkipBits, dirW, d.cdefSrc)
+		applyCDEFPlane(pic.U, pic.V, pic.StrideUV, cw, ch, 4, 1, damping-1, fs, fhdr, d.cdefDirs, d.cdefVariances, nonSkipBits, dirW, d.cdefSrc)
 	}
 }
 
-// applyCDEFPlane applies CDEF block-by-block to one plane.
-func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, nonSkipBits []uint64, dirStride int, src []byte) {
+// applyCDEFPlane applies CDEF block-by-block. pairedPlane optionally shares
+// the same chroma geometry, strength, and direction traversal.
+func applyCDEFPlane(plane, pairedPlane []byte, stride, w, h, blockSz, planeID, damping int, fs *tile.FrameState, fhdr *header.FrameHeader, dirs []uint8, variances []uint, nonSkipBits []uint64, dirStride int, src []byte) {
 	if len(plane) == 0 {
 		return
 	}
-	src = src[:len(plane)]
-	copy(src, plane)
+	src = src[:len(plane)+len(pairedPlane)]
+	primarySrc := src[:len(plane)]
+	copy(primarySrc, plane)
+	var pairedSrc []byte
+	if len(pairedPlane) != 0 {
+		pairedSrc = src[len(plane):]
+		copy(pairedSrc, pairedPlane)
+	}
 	for by := 0; by < h; by += blockSz {
 		for bx := 0; bx < w; bx += blockSz {
 			dirIdx := (by/blockSz)*dirStride + bx/blockSz
@@ -991,7 +1000,7 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 				uvPriStrength := int(fhdr.CDEF.UVStrength[preset]) >> 2
 				var variance uint
 				if rawPriStrength != 0 || uvPriStrength != 0 {
-					dir, variance = cdef.FindDir(src, by*stride+bx, stride)
+					dir, variance = cdef.FindDir(primarySrc, by*stride+bx, stride)
 					if dirIdx >= 0 && dirIdx < len(dirs) {
 						dirs[dirIdx] = uint8(dir)
 						variances[dirIdx] = variance
@@ -1011,60 +1020,82 @@ func applyCDEFPlane(plane []byte, stride, w, h, blockSz, planeID, damping int, f
 			srcBase := by*stride + bx
 			const allCDEFEdges = cdef.HaveTop | cdef.HaveBottom | cdef.HaveLeft | cdef.HaveRight
 			if bw == 8 && bh == 8 && edges == allCDEFEdges &&
-				srcBase >= 2*stride+2 && srcBase+9*stride+9 < len(src) {
+				srcBase >= 2*stride+2 && srcBase+9*stride+9 < len(primarySrc) {
 				cdef.FilterBlock8x8FromSource(
 					plane, srcBase, stride,
-					src, srcBase, stride,
+					primarySrc, srcBase, stride,
 					priStrength, secStrength, dir, damping,
 				)
+				if len(pairedPlane) != 0 {
+					cdef.FilterBlock8x8FromSource(
+						pairedPlane, srcBase, stride,
+						pairedSrc, srcBase, stride,
+						priStrength, secStrength, dir, damping,
+					)
+				}
 				continue
 			}
 			if bw == 4 && bh == 4 && edges == allCDEFEdges &&
-				srcBase >= 2*stride+2 && srcBase+5*stride+5 < len(src) {
+				srcBase >= 2*stride+2 && srcBase+5*stride+5 < len(primarySrc) {
 				cdef.FilterBlock4x4FromSource(
 					plane, srcBase, stride,
-					src, srcBase, stride,
+					primarySrc, srcBase, stride,
 					priStrength, secStrength, dir, damping,
 				)
+				if len(pairedPlane) != 0 {
+					cdef.FilterBlock4x4FromSource(
+						pairedPlane, srcBase, stride,
+						pairedSrc, srcBase, stride,
+						priStrength, secStrength, dir, damping,
+					)
+				}
 				continue
 			}
 
-			// Boundary and 4x4 blocks retain the general assembled-padding
-			// path. Build their left, top, and bottom inputs only when needed.
-			var leftBuf [8][2]uint8
-			left := leftBuf[:bh]
-			if bx >= 2 {
-				for row := 0; row < bh; row++ {
-					y := by + row
-					if y < h {
-						left[row][0] = src[y*stride+(bx-2)]
-						left[row][1] = src[y*stride+(bx-1)]
-					}
-				}
+			filterCDEFBoundaryPlane(plane, primarySrc, srcBase, stride, w, h,
+				bx, by, bw, bh, priStrength, secStrength, dir, damping, edges)
+			if len(pairedPlane) != 0 {
+				filterCDEFBoundaryPlane(pairedPlane, pairedSrc, srcBase, stride, w, h,
+					bx, by, bw, bh, priStrength, secStrength, dir, damping, edges)
 			}
-			var top []byte
-			topBase := 0
-			if by > 0 {
-				top = src[(by-2)*stride:]
-				topBase = bx
-			}
-			var bottom []byte
-			bottomBase := 0
-			if by+bh < h {
-				bottom = src[(by+bh)*stride:]
-				bottomBase = bx
-			}
-
-			cdef.FilterBlock(
-				plane, srcBase, stride,
-				left,
-				top, topBase, stride,
-				bottom, bottomBase, stride,
-				priStrength, secStrength, dir, damping, bw, bh,
-				edges,
-			)
 		}
 	}
+}
+
+func filterCDEFBoundaryPlane(plane, src []byte, srcBase, stride, w, h,
+	bx, by, bw, bh, priStrength, secStrength, dir, damping int, edges cdef.EdgeFlags,
+) {
+	var leftBuf [8][2]uint8
+	left := leftBuf[:bh]
+	if bx >= 2 {
+		for row := 0; row < bh; row++ {
+			y := by + row
+			if y < h {
+				left[row][0] = src[y*stride+(bx-2)]
+				left[row][1] = src[y*stride+(bx-1)]
+			}
+		}
+	}
+	var top []byte
+	topBase := 0
+	if by > 0 {
+		top = src[(by-2)*stride:]
+		topBase = bx
+	}
+	var bottom []byte
+	bottomBase := 0
+	if by+bh < h {
+		bottom = src[(by+bh)*stride:]
+		bottomBase = bx
+	}
+	cdef.FilterBlock(
+		plane, srcBase, stride,
+		left,
+		top, topBase, stride,
+		bottom, bottomBase, stride,
+		priStrength, secStrength, dir, damping, bw, bh,
+		edges,
+	)
 }
 
 func chromaCDEFDirection(priStrength, dirIdx int, dirs []uint8) int {
