@@ -36,6 +36,7 @@ Thumbs.db
 # Go workspace files (per-developer)
 go.work
 go.work.sum
+.cache/*
 
 # tmp file
 cov.txt
