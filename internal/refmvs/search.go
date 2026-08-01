@@ -36,6 +36,14 @@ type SearchResult struct {
 // reference. Spatial candidates retain priority; a projected temporal sample
 // is appended to the secondary range and merged when its MV already exists.
 func Find(cfg SearchConfig) SearchResult {
+	return FindPtr(&cfg)
+}
+
+// FindPtr avoids copying the relatively large SearchConfig in decoder hot paths.
+func FindPtr(cfg *SearchConfig) SearchResult {
+	if cfg == nil {
+		return SearchResult{}
+	}
 	out := findSpatial(cfg, false)
 	temporalEnabled := cfg.UseRefFrameMVs && cfg.TargetSlot >= 0 && cfg.Frame != nil && cfg.Frame.OrderBits != 0 &&
 		(cfg.Ref2 <= 0 || cfg.TargetSlot2 >= 0)
@@ -89,7 +97,7 @@ func Find(cfg SearchConfig) SearchResult {
 	return out
 }
 
-func appendCompoundExtendedCandidates(out *SearchResult, cfg SearchConfig) {
+func appendCompoundExtendedCandidates(out *SearchResult, cfg *SearchConfig) {
 	if out == nil || out.Count >= 2 || cfg.Frame == nil || cfg.Ref <= 0 || cfg.Ref2 <= 0 {
 		return
 	}
@@ -218,7 +226,7 @@ func appendCompoundExtendedCandidates(out *SearchResult, cfg SearchConfig) {
 	out.Count = 2
 }
 
-func clampCandidates(out *SearchResult, cfg SearchConfig) {
+func clampCandidates(out *SearchResult, cfg *SearchConfig) {
 	if out == nil || cfg.Frame == nil || out.Count == 0 {
 		return
 	}
@@ -240,7 +248,7 @@ func clampCandidates(out *SearchResult, cfg SearchConfig) {
 // When fewer than two candidates match the requested logical reference, MVs
 // from the nearest top and left blocks are reused, reversing their direction
 // when the source and target references lie on opposite sides of this frame.
-func appendSingleExtendedCandidates(out *SearchResult, cfg SearchConfig) {
+func appendSingleExtendedCandidates(out *SearchResult, cfg *SearchConfig) {
 	if out == nil || out.Count >= 2 || cfg.Frame == nil || cfg.Ref <= 0 || cfg.Ref2 > 0 {
 		return
 	}
@@ -302,7 +310,7 @@ func referenceSignBias(frame *Frame, ref int8) bool {
 	return RelativeDist(frame.RefFrameOrderHints[ref-1], frame.OrderHint, frame.OrderBits) > 0
 }
 
-func temporalCandidates(cfg SearchConfig) []MV {
+func temporalCandidates(cfg *SearchConfig) []MV {
 	var out []MV
 	for _, pos := range temporalCandidatePositions(cfg) {
 		mv, ok := projectTemporalAt(cfg.Frame, cfg.TargetSlot, pos[0], pos[1])
@@ -313,7 +321,7 @@ func temporalCandidates(cfg SearchConfig) []MV {
 	return out
 }
 
-func temporalCandidatePositions(cfg SearchConfig) [][2]int {
+func temporalCandidatePositions(cfg *SearchConfig) [][2]int {
 	var out [][2]int
 	add := func(x8, y8 int) {
 		out = append(out, [2]int{x8, y8})
@@ -395,10 +403,10 @@ func projectTemporalAt(current *Frame, targetSlot, x8, y8 int) (MV, bool) {
 // FindSpatial builds dav1d's nearest spatial range. Row scanning precedes
 // column scanning, so stable sorting preserves row-first ties.
 func FindSpatial(cfg SearchConfig) SearchResult {
-	return findSpatial(cfg, true)
+	return findSpatial(&cfg, true)
 }
 
-func findSpatial(cfg SearchConfig, sortSecondary bool) SearchResult {
+func findSpatial(cfg *SearchConfig, sortSecondary bool) SearchResult {
 	var out SearchResult
 	if cfg.Frame == nil || cfg.Bw4 <= 0 || cfg.Bh4 <= 0 || len(cfg.BlockDims) == 0 {
 		return out
@@ -444,7 +452,7 @@ func findSpatial(cfg SearchConfig, sortSecondary bool) SearchResult {
 	return out
 }
 
-func addSpatialCandidate(out *SearchResult, cfg SearchConfig, blk Block, weight int, row, direct, trackNewMV bool) {
+func addSpatialCandidate(out *SearchResult, cfg *SearchConfig, blk Block, weight int, row, direct, trackNewMV bool) {
 	if out == nil || weight <= 0 || blk.MV[0].IsInvalid() {
 		return
 	}
@@ -493,7 +501,7 @@ func addSpatialCandidate(out *SearchResult, cfg SearchConfig, blk Block, weight 
 	out.Count = AddCandidate(out.Candidates[:], out.Count, mvp, weight)
 }
 
-func scanSpatialRow(out *SearchResult, cfg SearchConfig, x4, y4, bw4, w4, maxRows, step int, direct bool) int {
+func scanSpatialRow(out *SearchResult, cfg *SearchConfig, x4, y4, bw4, w4, maxRows, step int, direct bool) int {
 	blk, ok := cfg.Frame.GridBlock(x4, y4)
 	if !ok {
 		return 0
@@ -529,7 +537,7 @@ func scanSpatialRow(out *SearchResult, cfg SearchConfig, x4, y4, bw4, w4, maxRow
 	}
 }
 
-func scanSpatialCol(out *SearchResult, cfg SearchConfig, x4, y4, bh4, h4, maxCols, step int, direct bool) int {
+func scanSpatialCol(out *SearchResult, cfg *SearchConfig, x4, y4, bh4, h4, maxCols, step int, direct bool) int {
 	blk, ok := cfg.Frame.GridBlock(x4, y4)
 	if !ok {
 		return 0
@@ -565,7 +573,7 @@ func scanSpatialCol(out *SearchResult, cfg SearchConfig, x4, y4, bh4, h4, maxCol
 	}
 }
 
-func appendTopRight(out *SearchResult, cfg SearchConfig) {
+func appendTopRight(out *SearchResult, cfg *SearchConfig) {
 	if out == nil || cfg.Frame == nil || cfg.By4 <= cfg.TileY0 ||
 		cfg.Bx4+cfg.Bw4 >= cfg.Frame.IW4 || maxSearch(cfg.Bw4, cfg.Bh4) > 16 {
 		return
@@ -580,7 +588,7 @@ func appendTopRight(out *SearchResult, cfg SearchConfig) {
 	addSpatialCandidate(out, cfg, blk, 4, true, true, true)
 }
 
-func appendSecondarySpatial(out *SearchResult, cfg SearchConfig, nRows, nCols, maxRows, maxCols, w4, h4 int) {
+func appendSecondarySpatial(out *SearchResult, cfg *SearchConfig, nRows, nCols, maxRows, maxCols, w4, h4 int) {
 	if out == nil || cfg.Frame == nil {
 		return
 	}
@@ -601,7 +609,7 @@ func appendSecondarySpatial(out *SearchResult, cfg SearchConfig, nRows, nCols, m
 	}
 }
 
-func dimsForSearch(cfg SearchConfig, blk Block) (int, int, bool) {
+func dimsForSearch(cfg *SearchConfig, blk Block) (int, int, bool) {
 	if int(blk.BS) >= len(cfg.BlockDims) {
 		return 0, 0, false
 	}

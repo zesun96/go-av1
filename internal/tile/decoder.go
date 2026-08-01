@@ -1601,7 +1601,7 @@ func decodeIntraBCBlock(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 		TopRightKnown: fs.RefMVTopRightKnown, TopRightAvailable: fs.RefMVTopRightAvailable,
 		BlockDims: refMVBlockDims[:],
 	}
-	found := refmvs.Find(cfg)
+	found := refmvs.FindPtr(&cfg)
 	var base refmvs.MV
 	for i := 0; i < minInt(found.Count, 2); i++ {
 		if found.Candidates[i].MV[0] != (refmvs.MV{}) {
@@ -4883,7 +4883,7 @@ func decodeCompoundMotionSyntax(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState,
 					bx, by, i, spatial.NearestCount, c.MV[0].Y, c.MV[0].X, c.MV[1].Y, c.MV[1].X, c.Weight)
 			}
 		}
-		pairResult = refmvs.Find(searchCfg)
+		pairResult = refmvs.FindPtr(&searchCfg)
 	}
 	// dav1d extends only sparse compound stacks to the two entries required by
 	// NEAR/DRL syntax. Existing normative pair candidates are never augmented.
@@ -5441,7 +5441,7 @@ func singleRefSearch(fs *FrameState, fhdr *header.FrameHeader, fb *FrameBuf, ref
 				bx, by, i, spatial.NearestCount, c.MV[0].Y, c.MV[0].X, c.Weight)
 		}
 	}
-	return refmvs.Find(searchCfg), true
+	return refmvs.FindPtr(&searchCfg), true
 }
 
 func neighbourSingleRefFrame(fs *FrameState, fhdr *header.FrameHeader, bx, by int, top bool) (int, bool) {
