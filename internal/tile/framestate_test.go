@@ -197,6 +197,17 @@ func TestBlockGridSharesPerBlockMetadata(t *testing.T) {
 	}
 }
 
+func TestBlockStatePtrPreservesValidEmptyCell(t *testing.T) {
+	fs := NewFrameState(16, 16)
+	block, ok := fs.BlockStatePtr(4, 4)
+	if !ok || block == nil || *block != (Av1Block{}) {
+		t.Fatalf("empty cell pointer=(%+v,%t), want addressable zero block", block, ok)
+	}
+	if block, ok = fs.BlockStatePtr(-4, 4); ok || block != nil {
+		t.Fatalf("out-of-range pointer=(%+v,%t), want (nil,false)", block, ok)
+	}
+}
+
 func TestBlockGridPromotesWithoutLosingCompactIndexes(t *testing.T) {
 	fs := NewFrameState(16, 8)
 	fs.setBlockGridIndex(0, 7)

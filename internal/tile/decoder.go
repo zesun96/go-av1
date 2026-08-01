@@ -898,12 +898,12 @@ func intraCtx(fs *FrameState, bx, by int) int {
 	topIntra := 0
 	leftIntra := 0
 	if haveTop {
-		if blk, ok := fs.BlockState(bx, by-4); ok && blk.Intra {
+		if blk, ok := fs.BlockStatePtr(bx, by-4); ok && blk.Intra {
 			topIntra = 1
 		}
 	}
 	if haveLeft {
-		if blk, ok := fs.BlockState(bx-4, by); ok && blk.Intra {
+		if blk, ok := fs.BlockStatePtr(bx-4, by); ok && blk.Intra {
 			leftIntra = 1
 		}
 	}
@@ -5140,14 +5140,14 @@ func compoundInterModeContext(fs *FrameState, fhdr *header.FrameHeader,
 func compoundDirContext(fs *FrameState, fhdr *header.FrameHeader, bx, by int) int {
 	top, topOK := neighbourContextBlock(fs, bx, by, true)
 	left, leftOK := neighbourContextBlock(fs, bx, by, false)
-	ref0 := func(blk Av1Block) int {
+	ref0 := func(blk *Av1Block) int {
 		refs, n := blockRefOrders(blk, fhdr)
 		if n == 0 {
 			return -1
 		}
 		return refs[0]
 	}
-	hasUniComp := func(blk Av1Block) bool {
+	hasUniComp := func(blk *Av1Block) bool {
 		refs, n := blockRefOrders(blk, fhdr)
 		return blk.Compound && n == 2 && (refs[0] < 4) == (refs[1] < 4)
 	}
@@ -5276,19 +5276,19 @@ func deriveSingleRefInterSyntax(fs *FrameState, bx, by int) singleRefInterSyntax
 	if fs == nil {
 		return syntax
 	}
-	if blk, ok := fs.BlockState(bx, by-4); ok && !blk.Intra {
+	if blk, ok := fs.BlockStatePtr(bx, by-4); ok && !blk.Intra {
 		if applyNeighbourInterSyntax(&syntax, blk) {
 			return syntax
 		}
 	}
-	if blk, ok := fs.BlockState(bx-4, by); ok && !blk.Intra {
+	if blk, ok := fs.BlockStatePtr(bx-4, by); ok && !blk.Intra {
 		applyNeighbourInterSyntax(&syntax, blk)
 	}
 	return syntax
 }
 
-func applyNeighbourInterSyntax(syntax *singleRefInterSyntax, blk Av1Block) bool {
-	if syntax == nil || blk.Intra {
+func applyNeighbourInterSyntax(syntax *singleRefInterSyntax, blk *Av1Block) bool {
+	if syntax == nil || blk == nil || blk.Intra {
 		return false
 	}
 	if blk.RefSlot >= 0 {
@@ -5453,28 +5453,28 @@ func neighbourSingleRefFrame(fs *FrameState, fhdr *header.FrameHeader, bx, by in
 	return refs[0], n > 0
 }
 
-func neighbourContextBlock(fs *FrameState, bx, by int, top bool) (Av1Block, bool) {
+func neighbourContextBlock(fs *FrameState, bx, by int, top bool) (*Av1Block, bool) {
 	if fs == nil {
-		return Av1Block{}, false
+		return nil, false
 	}
 	if top {
 		col4 := bx >> 2
 		if by <= fs.TileY0 || col4 < 0 || col4 >= len(fs.AbovePresent) || fs.AbovePresent[col4] == 0 {
-			return Av1Block{}, false
+			return nil, false
 		}
-		return fs.BlockState(bx, by-4)
+		return fs.BlockStatePtr(bx, by-4)
 	} else {
 		row4 := by >> 2
 		if bx <= fs.TileX0 || row4 < 0 || row4 >= len(fs.LeftPresent) || fs.LeftPresent[row4] == 0 {
-			return Av1Block{}, false
+			return nil, false
 		}
-		return fs.BlockState(bx-4, by)
+		return fs.BlockStatePtr(bx-4, by)
 	}
 }
 
-func blockRefOrders(blk Av1Block, fhdr *header.FrameHeader) ([2]int, int) {
+func blockRefOrders(blk *Av1Block, fhdr *header.FrameHeader) ([2]int, int) {
 	refs := [2]int{-1, -1}
-	if blk.Intra || fhdr == nil {
+	if blk == nil || blk.Intra || fhdr == nil {
 		return refs, 0
 	}
 	refFrame := int(blk.RefFrame)
@@ -5712,8 +5712,8 @@ func decodeSingleRefFilterMode(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState, 
 }
 
 func compoundFilterCtx(fs *FrameState, dir, refSlot, bx, by int) int {
-	filter := func(blk Av1Block, ok bool) int {
-		if !ok || blk.Intra || (int(blk.RefSlot) != refSlot && (!blk.Compound || int(blk.RefSlot2) != refSlot)) {
+	filter := func(blk *Av1Block, ok bool) int {
+		if !ok || blk == nil || blk.Intra || (int(blk.RefSlot) != refSlot && (!blk.Compound || int(blk.RefSlot2) != refSlot)) {
 			return int(header.NumSwitchableFilters)
 		}
 		if dir != 0 {

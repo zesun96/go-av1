@@ -547,7 +547,7 @@ func (fs *FrameState) SegIDPredCtx(bx, by int) (uint8, int) {
 	haveTop := by > fs.TileY0
 	haveLeft := bx > fs.TileX0
 	segAt := func(x, y int) uint8 {
-		if blk, ok := fs.BlockState(x, y); ok {
+		if blk, ok := fs.BlockStatePtr(x, y); ok {
 			return blk.SegID
 		}
 		return 0
@@ -885,6 +885,25 @@ func (fs *FrameState) CDEFBlockHasNonSkip(col8, row8 int) bool {
 
 func (fs *FrameState) BlockState(bx, by int) (Av1Block, bool) {
 	return fs.BlockStateAt4(bx/4, by/4)
+}
+
+var zeroAv1Block Av1Block
+
+// BlockStatePtr returns read-only block syntax without copying Av1Block.
+// An addressable zero value preserves BlockState's valid-empty-cell behavior.
+func (fs *FrameState) BlockStatePtr(bx, by int) (*Av1Block, bool) {
+	return fs.BlockStatePtrAt4(bx/4, by/4)
+}
+
+func (fs *FrameState) BlockStatePtrAt4(col4, row4 int) (*Av1Block, bool) {
+	if col4 < 0 || col4 >= fs.W4 || row4 < 0 || row4 >= fs.H4 {
+		return nil, false
+	}
+	block := fs.blockStatePtr(fs.blockGridIndex(row4*fs.W4 + col4))
+	if block == nil {
+		block = &zeroAv1Block
+	}
+	return block, true
 }
 
 // BlockStateAt4 returns block syntax at luma 4x4-grid coordinates.

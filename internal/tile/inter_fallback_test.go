@@ -1181,11 +1181,12 @@ func TestSelectInterCandidateMode(t *testing.T) {
 
 func TestApplyNeighbourInterSyntaxSetsMotionSource(t *testing.T) {
 	syntax := singleRefInterSyntax{modeHint: interModeHintAuto, motionSource: interMotionSourceAuto, refSlot: -1}
-	ok := applyNeighbourInterSyntax(&syntax, Av1Block{
+	block := Av1Block{
 		Intra:     false,
 		InterMode: InterModeGlobalMV,
 		RefSlot:   3,
-	})
+	}
+	ok := applyNeighbourInterSyntax(&syntax, &block)
 	if !ok || syntax.motionSource != interMotionSourceGlobal || !syntax.hasRef || syntax.refSlot != 3 {
 		t.Fatalf("syntax=%+v", syntax)
 	}
