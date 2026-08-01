@@ -479,29 +479,51 @@ former 0.35-second clipping helper disappeared. Allocation remained
 approximately 1.89 GB; WebRTC stayed 599/599 byte-exact and AOM stayed at 197
 passed, zero failed, and 66 unsupported.
 
+Loop-filter block metadata queries now return pointers into the indexed block
+store instead of copying the complete syntax record at every candidate edge.
+The chroma transform-origin calculation also uses power-of-two alignment in
+place of two integer divisions, with an exhaustive equivalence test across all
+transform dimensions. An 11-run alternating comparison reduced the
+120-packet median from 1.067551 to 1.042557 seconds (2.34 percent). Full tests
+and the 120-frame dav1d differential remained exact.
+
+Interior 4x4 chroma CDEF blocks now load their contiguous 8x8 neighbor window
+directly into scratch. The amd64 implementation expands eight pixels per row
+with SSE4.1; `purego` retains an unrolled scalar fallback. This bypasses the
+general edge-aware padding path for ordinary U/V blocks. An 11-run alternating
+comparison reduced the median from 1.033100 to 1.019289 seconds (1.34
+percent). SIMD, pure-Go, full-suite, and 120-frame differential tests passed.
+
+The native adaptive-symbol MSAC path now performs range normalization in the
+same function as symbol search and CDF adaptation. Keeping arithmetic state in
+locals avoids a non-inlined method boundary on every decoded symbol. An
+11-run alternating comparison reduced the median from 1.026659 to 1.007018
+seconds (1.91 percent). Applying the same expansion to the less frequent Bool
+paths was measured and discarded because it regressed by 0.22 percent.
+
 ## Current Benchmark Status (2026-08-01)
 
-Current commit: `adff6cf044bb584df5a5d3751b7aa9d538239c55`.
+Current benchmark commit: `907d617aeefbb83ca4d903365b9d7727fb526477`.
 Both current comparisons used the GCC release dav1d build, one decoder
 thread, `GOMAXPROCS=1`, all in-loop filters, no film grain, two warmups, and
 nine alternating measured runs.
 
 | Input | Decoder | Original median | Current median | Current throughput | Current ratio |
 |---|---|---:|---:|---:|---:|
-| WebRTC dynamic desktop, 120 packets | go-av1 | 10.522s | 1.075s | 111.62 packets/s | 4.41x dav1d |
-| WebRTC dynamic desktop, 120 packets | dav1d | 0.319s | 0.244s | 492.67 packets/s | 1.00x |
-| AOM all-intra 352x288, 39 packets | go-av1 | 1.212s | 0.659s | 59.14 packets/s | 6.60x dav1d |
-| AOM all-intra 352x288, 39 packets | dav1d | 0.098s | 0.100s | 390.55 packets/s | 1.00x |
+| WebRTC dynamic desktop, 120 packets | go-av1 | 10.522s | 0.999s | 120.17 packets/s | 4.12x dav1d |
+| WebRTC dynamic desktop, 120 packets | dav1d | 0.319s | 0.242s | 494.99 packets/s | 1.00x |
+| AOM all-intra 352x288, 39 packets | go-av1 | 1.212s | 0.659s | 59.16 packets/s | 6.52x dav1d |
+| AOM all-intra 352x288, 39 packets | dav1d | 0.098s | 0.101s | 386.01 packets/s | 1.00x |
 
-For the representative WebRTC segment, go-av1 is now 9.79x faster than its
-original baseline: median wall time is down 89.8 percent and throughput rose
-from 11.40 to 111.62 packets/s. Relative throughput rose from approximately
-3.0 to 22.7 percent of release dav1d. Reaching the current 0.244-second dav1d
-median at one thread still requires removing another 77.3 percent of go-av1's
+For the representative WebRTC segment, go-av1 is now 10.53x faster than its
+original baseline: median wall time is down 90.5 percent and throughput rose
+from 11.40 to 120.17 packets/s. Relative throughput rose from approximately
+3.0 to 24.3 percent of release dav1d. Reaching the current 0.242-second dav1d
+median at one thread still requires removing another 75.8 percent of go-av1's
 current wall time.
 
-The current 120-packet memory counter reports 270.1 MB and 626,501
-allocations, or 2.25 MB and 5,220 allocations per frame. Against the original
+The current 120-packet memory counter reports 263.9 MB and 626,117
+allocations, or 2.20 MB and 5,217 allocations per frame. Against the original
 profile's approximate 16.0 GB and 50.6 million allocations, cumulative
 allocation volume is down 98.3 percent and allocation count is down 98.8
 percent. The complete 599-frame run reports 1.892 GB and 5.762 million
@@ -513,22 +535,22 @@ groups overlap, so the potential savings are not additive.
 
 | Area | Current profile time | Main remaining work |
 |---|---:|---|
-| Tile entropy, syntax, and reconstruction | 7.52s cumulative | specialize MSAC/CDF paths, flatten block control flow, reduce state lookups |
-| Post-filter pipeline | 3.24s cumulative | batch edge traversal and complete SIMD coverage |
-| CDEF | 2.20s cumulative | faster combined filter, padding/layout changes, plane/stripe scheduling |
-| Coefficient decode and residual reconstruction | 1.66-1.84s cumulative | token specialization and fused residual application |
-| MSAC symbol decode | 1.07s cumulative | common-alphabet specialization and lower-overhead normalization |
-| Inverse transforms | 0.94s cumulative | SIMD 4/8/16 transforms and fused add/clip |
-| Loop filter | 0.84s cumulative | edge bitsets plus horizontal/vertical SIMD kernels |
+| Tile entropy, syntax, and reconstruction | 7.35s cumulative | specialize MSAC/CDF paths, flatten block control flow, reduce state lookups |
+| Post-filter pipeline | 2.48s cumulative | batch edge traversal and complete SIMD coverage |
+| CDEF | 1.68s cumulative | faster combined filter and plane/stripe scheduling |
+| Coefficient decode and residual reconstruction | 1.65-1.75s cumulative | token specialization and fused residual application |
+| MSAC adaptive symbol decode | 0.94s cumulative | assembly or generated common-alphabet kernels |
+| Inverse transforms | 0.70s cumulative | SIMD 4/8/16 transforms and fused add/clip |
+| Loop filter | 0.62s cumulative | edge bitsets plus horizontal/vertical SIMD kernels |
 | Inter copy/prediction and reference search | 0.5-0.75s per major path | complete 2D/compound SIMD and compact hot metadata |
-| Runtime copies, clears, and allocation | 0.96s memmove, 0.32s clear | eliminate remaining plane/block copies and reset only active ranges |
+| Runtime copies, clears, and allocation | 0.78s memmove, 0.29s clear | eliminate remaining plane/block copies and reset only active ranges |
 
 Single-thread parity will require more than isolated Go micro-optimizations.
 The decoder needs dav1d-style DSP coverage for common transforms, loop
 filters, compound prediction, restoration, and remaining CDEF paths; entropy
 and block reconstruction need fewer generic calls and bounds-checked slice
 operations; post-filters need mask/stripe traversal instead of repeated 4x4
-state queries. These changes can plausibly close a large part of the 4.41x
+state queries. These changes can plausibly close a large part of the 4.12x
 gap, but exact one-thread parity effectively requires reproducing much of
 dav1d's architecture-specific kernel and dataflow design.
 
