@@ -600,47 +600,68 @@ func (d *decoderImpl) applyLoopFilterWithState(pic *Picture, fhdr *header.FrameH
 func (d *decoderImpl) applyChromaLoopFilter(pic *Picture, fhdr *header.FrameHeader, fs *tile.FrameState) {
 	lut := loopfilter.NewFilterLUT(int(fhdr.LoopFilter.Sharpness))
 	w, h := pic.codedChromaSize()
-	for planeNum, plane := range [][]byte{pic.U, pic.V} {
-		if len(plane) == 0 {
-			continue
-		}
-		planeID := planeNum + 1
-		for x4 := 1; x4 < fs.CW4; x4++ {
-			x := x4 * 4
-			for y4 := 0; y4 < fs.CH4 && y4*4+4 <= h; y4++ {
-				width, ok := fs.ChromaFilterEdge(x4, y4, true)
-				if !ok {
-					continue
-				}
-				width = safeLoopFilterWidth(width, x, w-x)
-				if width == 0 {
-					continue
-				}
-				level := fs.ChromaFilterLevel(fhdr, x4, y4, planeID)
+	haveU := len(pic.U) != 0 && fhdr.LoopFilter.LevelU != 0
+	haveV := len(pic.V) != 0 && fhdr.LoopFilter.LevelV != 0
+	if !haveU && !haveV {
+		return
+	}
+	for x4 := 1; x4 < fs.CW4; x4++ {
+		x := x4 * 4
+		for y4 := 0; y4 < fs.CH4 && y4*4+4 <= h; y4++ {
+			width, ok := fs.ChromaFilterEdge(x4, y4, true)
+			if !ok {
+				continue
+			}
+			width = safeLoopFilterWidth(width, x, w-x)
+			if width == 0 {
+				continue
+			}
+			base := y4*4*pic.StrideUV + x
+			if haveU {
+				level := fs.ChromaFilterLevel(fhdr, x4, y4, 1)
 				if level == 0 {
-					level = fs.ChromaFilterLevel(fhdr, x4-1, y4, planeID)
+					level = fs.ChromaFilterLevel(fhdr, x4-1, y4, 1)
 				}
-				d.traceLoopFilterEdge(planeID, "v", x4, y4, width, level)
-				loopfilter.FilterEdgeV(plane, y4*4*pic.StrideUV+x, pic.StrideUV, level, width, &lut)
+				d.traceLoopFilterEdge(1, "v", x4, y4, width, level)
+				loopfilter.FilterEdgeV(pic.U, base, pic.StrideUV, level, width, &lut)
+			}
+			if haveV {
+				level := fs.ChromaFilterLevel(fhdr, x4, y4, 2)
+				if level == 0 {
+					level = fs.ChromaFilterLevel(fhdr, x4-1, y4, 2)
+				}
+				d.traceLoopFilterEdge(2, "v", x4, y4, width, level)
+				loopfilter.FilterEdgeV(pic.V, base, pic.StrideUV, level, width, &lut)
 			}
 		}
-		for y4 := 1; y4 < fs.CH4; y4++ {
-			y := y4 * 4
-			for x4 := 0; x4 < fs.CW4 && x4*4+4 <= w; x4++ {
-				width, ok := fs.ChromaFilterEdge(x4, y4, false)
-				if !ok {
-					continue
-				}
-				width = safeLoopFilterWidth(width, y, h-y)
-				if width == 0 {
-					continue
-				}
-				level := fs.ChromaFilterLevel(fhdr, x4, y4, planeID)
+	}
+	for y4 := 1; y4 < fs.CH4; y4++ {
+		y := y4 * 4
+		for x4 := 0; x4 < fs.CW4 && x4*4+4 <= w; x4++ {
+			width, ok := fs.ChromaFilterEdge(x4, y4, false)
+			if !ok {
+				continue
+			}
+			width = safeLoopFilterWidth(width, y, h-y)
+			if width == 0 {
+				continue
+			}
+			base := y*pic.StrideUV + x4*4
+			if haveU {
+				level := fs.ChromaFilterLevel(fhdr, x4, y4, 1)
 				if level == 0 {
-					level = fs.ChromaFilterLevel(fhdr, x4, y4-1, planeID)
+					level = fs.ChromaFilterLevel(fhdr, x4, y4-1, 1)
 				}
-				d.traceLoopFilterEdge(planeID, "h", x4, y4, width, level)
-				loopfilter.FilterEdgeH(plane, y*pic.StrideUV+x4*4, pic.StrideUV, level, width, &lut)
+				d.traceLoopFilterEdge(1, "h", x4, y4, width, level)
+				loopfilter.FilterEdgeH(pic.U, base, pic.StrideUV, level, width, &lut)
+			}
+			if haveV {
+				level := fs.ChromaFilterLevel(fhdr, x4, y4, 2)
+				if level == 0 {
+					level = fs.ChromaFilterLevel(fhdr, x4, y4-1, 2)
+				}
+				d.traceLoopFilterEdge(2, "h", x4, y4, width, level)
+				loopfilter.FilterEdgeH(pic.V, base, pic.StrideUV, level, width, &lut)
 			}
 		}
 	}
