@@ -317,13 +317,23 @@ func TestAllocPictureIncludesCodedGridPadding(t *testing.T) {
 	if fb.CodedWidth != 1512 || fb.CodedHeight != 1024 || fb.CodedChromaW != 756 || fb.CodedChromaH != 512 {
 		t.Fatalf("coded geometry = %dx%d chroma=%dx%d", fb.CodedWidth, fb.CodedHeight, fb.CodedChromaW, fb.CodedChromaH)
 	}
-	for plane, values := range [][]byte{pic.Y, pic.U, pic.V} {
-		for i, value := range values {
-			if value != 128 {
-				t.Fatalf("plane=%d index=%d value=%d want 128", plane, i, value)
+	assertPadding := func(name string, values []byte, stride, width, height int) {
+		t.Helper()
+		for y := 0; y < len(values)/stride; y++ {
+			start := 0
+			if y < height {
+				start = width
+			}
+			for x := start; x < stride; x++ {
+				if value := values[y*stride+x]; value != 128 {
+					t.Fatalf("%s padding (%d,%d)=%d want 128", name, x, y, value)
+				}
 			}
 		}
 	}
+	assertPadding("Y", pic.Y, pic.StrideY, 1510, 1012)
+	assertPadding("U", pic.U, pic.StrideUV, 755, 506)
+	assertPadding("V", pic.V, pic.StrideUV, 755, 506)
 }
 
 func TestFillBytesSizesAndValues(t *testing.T) {
@@ -380,7 +390,7 @@ func BenchmarkAllocPictureRelease1080p(b *testing.B) {
 }
 
 func TestAllocPictureReinitializesPooledPlanes(t *testing.T) {
-	d := &decoderImpl{}
+	d := &decoderImpl{opts: DecoderOptions{BestEffort: true}}
 	large := &header.FrameHeader{Width: [2]int{1920, 1920}, Height: 1080}
 	small := &header.FrameHeader{Width: [2]int{321, 321}, Height: 181}
 

@@ -446,11 +446,38 @@ func (d *decoderImpl) allocPicture(fhdr *header.FrameHeader) *Picture {
 	// Seed planes with neutral grey so any block that fails to decode shows
 	// up as grey rather than pure-green (chroma=0 maps to bright green in
 	// YUV→RGB). Y=128, U=V=128 ⇒ mid-grey.
-	fillBytes(pic.Y, 128)
-	fillBytes(pic.U, 128)
-	fillBytes(pic.V, 128)
+	if d.opts.BestEffort {
+		// Damaged streams can leave visible blocks unwritten.
+		fillBytes(pic.Y, 128)
+		fillBytes(pic.U, 128)
+		fillBytes(pic.V, 128)
+	} else {
+		// Valid frames reconstruct every visible sample. Only seed padding
+		// that can be observed by edge prediction and in-loop filters.
+		fillPlanePadding(pic.Y, strideY, w, h, 128)
+		cw, ch := (w+1)>>1, (h+1)>>1
+		fillPlanePadding(pic.U, strideUV, cw, ch, 128)
+		fillPlanePadding(pic.V, strideUV, cw, ch, 128)
+	}
 	pic.Retain() // initial reference
 	return pic
+}
+
+func fillPlanePadding(plane []byte, stride, width, height int, value byte) {
+	if len(plane) == 0 || stride <= 0 {
+		return
+	}
+	rows := len(plane) / stride
+	width = max(0, min(width, stride))
+	height = max(0, min(height, rows))
+	if width < stride {
+		for y := 0; y < height; y++ {
+			fillBytes(plane[y*stride+width:(y+1)*stride], value)
+		}
+	}
+	if height < rows {
+		fillBytes(plane[height*stride:rows*stride], value)
+	}
 }
 
 func fillBytes(values []byte, value byte) {
