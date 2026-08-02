@@ -203,77 +203,90 @@ func readPalIndices(m *bitstream.MSAC, colorMapCDF *[5][8]uint16, palSz, w, h, b
 	idx := make([]uint8, bw*bh)
 	idx[0] = uint8(m.Uniform(uint32(palSz)))
 
-	var order [64][8]uint8
-	var ctx [64]uint8
 	for i := 1; i < w+h-1; i++ {
 		first := minInt(i, w-1)
 		last := maxInt(0, i-h+1)
-		orderPalette(idx, bw, i, first, last, &order, &ctx)
-		for j, n := first, 0; j >= last; j, n = j-1, n+1 {
-			colorIdx := int(m.SymbolAdaptDav1d(colorMapCDF[ctx[n]][:], palSz-1))
-			idx[(i-j)*bw+j] = order[n][colorIdx]
+		haveTop := i > first
+		for j, off := first, first+(i-first)*bw; j >= last; j, off = j-1, off+bw-1 {
+			order, mask, count, context := paletteOrderCompactAt(idx, bw, off, j > 0, haveTop)
+			colorIdx := int(m.SymbolAdaptDav1d(colorMapCDF[context][:], palSz-1))
+			if colorIdx < int(count) {
+				idx[off] = uint8(order >> uint(colorIdx*8))
+			} else {
+				idx[off] = paletteMissingOrder[mask][colorIdx-int(count)]
+			}
+			haveTop = true
 		}
 	}
 	palIdxFinish(idx, bw, bh, w, h)
 	return idx
 }
 
+func paletteOrderCompactAt(palIdx []uint8, stride, off int, haveLeft, haveTop bool) (
+	order uint32, mask, count, context uint8,
+) {
+	add := func(v uint8) {
+		order |= uint32(v) << uint(count*8)
+		count++
+		mask |= 1 << v
+	}
+	if !haveLeft {
+		add(palIdx[off-stride])
+	} else if !haveTop {
+		add(palIdx[off-1])
+	} else {
+		l := palIdx[off-1]
+		t := palIdx[off-stride]
+		tl := palIdx[off-stride-1]
+		sameTL := t == l
+		sameTTl := t == tl
+		sameLTl := l == tl
+		switch {
+		case sameTL && sameTTl && sameLTl:
+			context = 4
+			add(t)
+		case sameTL:
+			context = 3
+			add(t)
+			add(tl)
+		case sameTTl || sameLTl:
+			context = 2
+			add(tl)
+			if sameTTl {
+				add(l)
+			} else {
+				add(t)
+			}
+		default:
+			context = 1
+			if t < l {
+				add(t)
+				add(l)
+			} else {
+				add(l)
+				add(t)
+			}
+			add(tl)
+		}
+	}
+	return order, mask, count, context
+}
+
+func paletteOrderAt(palIdx []uint8, stride, off int, haveLeft, haveTop bool) (row [8]uint8, context uint8) {
+	order, mask, count, context := paletteOrderCompactAt(palIdx, stride, off, haveLeft, haveTop)
+	for i := 0; i < int(count); i++ {
+		row[i] = uint8(order >> uint(i*8))
+	}
+	missing := &paletteMissingOrder[mask]
+	copy(row[count:], missing[:8-count])
+	return row, context
+}
+
 func orderPalette(palIdx []uint8, stride, i, first, last int, order *[64][8]uint8, ctx *[64]uint8) {
 	haveTop := i > first
 	base := first + (i-first)*stride
 	for j, n, off := first, 0, base; j >= last; j, n, off = j-1, n+1, off+stride-1 {
-		haveLeft := j > 0
-		mask := uint8(0)
-		oIdx := 0
-		row := &order[n]
-		add := func(v uint8) {
-			row[oIdx] = v
-			oIdx++
-			mask |= 1 << v
-		}
-		if !haveLeft {
-			ctx[n] = 0
-			add(palIdx[off-stride])
-		} else if !haveTop {
-			ctx[n] = 0
-			add(palIdx[off-1])
-		} else {
-			l := palIdx[off-1]
-			t := palIdx[off-stride]
-			tl := palIdx[off-stride-1]
-			sameTL := t == l
-			sameTTl := t == tl
-			sameLTl := l == tl
-			switch {
-			case sameTL && sameTTl && sameLTl:
-				ctx[n] = 4
-				add(t)
-			case sameTL:
-				ctx[n] = 3
-				add(t)
-				add(tl)
-			case sameTTl || sameLTl:
-				ctx[n] = 2
-				add(tl)
-				if sameTTl {
-					add(l)
-				} else {
-					add(t)
-				}
-			default:
-				ctx[n] = 1
-				if t < l {
-					add(t)
-					add(l)
-				} else {
-					add(l)
-					add(t)
-				}
-				add(tl)
-			}
-		}
-		missing := &paletteMissingOrder[mask]
-		copy(row[oIdx:], missing[:8-oIdx])
+		order[n], ctx[n] = paletteOrderAt(palIdx, stride, off, j > 0, haveTop)
 		haveTop = true
 	}
 }

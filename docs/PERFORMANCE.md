@@ -560,6 +560,16 @@ $env:GOMAXPROCS = '1'
 Use `go build -pgo=off ./cmd/go-av1d` when an explicit non-PGO comparison is
 required. The `purego` build tag is independent of PGO and remains available.
 
+Palette index decoding now constructs each spatial colour order immediately
+before decoding that pixel. The previous implementation first materialized up
+to 64 `[8]uint8` orders plus 64 contexts for a complete diagonal, then scanned
+the diagonal again. The retained path packs only the one to three neighbour
+colours into a `uint32` and directly indexes the precomputed missing-colour
+order when required. The PGO profile reduced cumulative `readPalIndices` time
+from approximately 0.41 to 0.23 seconds (44 percent). Seven alternating
+complete-stream runs reduced the median from 6895.36 to 6785.21 ms, a 1.62
+percent improvement, with an exact 599-frame FrameMD5.
+
 ## Current Benchmark Status (2026-08-01)
 
 Current benchmark commit: `5a8931f`.

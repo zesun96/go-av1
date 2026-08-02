@@ -19,6 +19,20 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
 
 ## Rejected experiments
 
+### Immediate single-run PGO retraining after palette restructuring
+
+- Result: a fresh profile was correctly collected from a `-pgo=off` build
+  after the palette dataflow optimization, but the resulting PGO executable
+  did not beat the established default profile. Five alternating samples were
+  unusually noisy (about 4.79--6.80 s for the retained profile and 5.81--6.83
+  s for the retrained profile); their medians favored the retained profile by
+  roughly 5.3 percent.
+- Reason: one sampling run after a local source change is not sufficient to
+  replace a profile already validated on WebRTC and AOM all-intra workloads.
+  Keep the established `default.pgo` until several material hotspot changes
+  accumulate, then regenerate from multiple controlled representative runs or
+  a merged multi-workload profile.
+
 ### Fused scalar 16x16 DCT_DCT driver
 
 - Result: about 7% faster in the transform microbenchmark, but about 0.20%
