@@ -273,6 +273,25 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
   the other cases only if a different corpus shows them as material flat
   profile entries.
 
+### Fixed-size Go entry points for three/four-symbol MSAC assembly
+
+- Result: rejected despite an approximately 8--12 percent improvement in the
+  isolated four-symbol MSAC benchmark. Seven alternating 599-frame runs with
+  filters disabled regressed from a 4136.36 ms median to 4209.00 ms (1.76
+  percent); FrameMD5 remained exact.
+- The experiment bypassed generic slice validation and alphabet-size dispatch
+  by adding fixed `[3]`/`[4]` CDF wrappers around the existing assembly. With
+  the committed `default.pgo`, the new wrapper has no training samples and its
+  call/layout cost dominates the small isolated saving.
+- Revisit only as a direct coefficient-loop assembly call or together with a
+  deliberately retrained, cross-workload-validated PGO profile. A new Go
+  wrapper alone is not an end-to-end win.
+- A follow-up kept the existing PGO-trained wrapper but made the amd64 feature
+  flag a compile-time constant and checked the hot four-symbol case first.
+  Despite another microbenchmark improvement, nine alternating runs regressed
+  from 4322.67 to 4341.34 ms (0.43 percent), so this smaller dispatch rewrite
+  was also reverted.
+
 ## Current large targets
 
 The remaining plausible single-thread gains are complete 8x8/16x16 inverse
