@@ -99,27 +99,14 @@ func DecodeTileGroupWithContext(
 		}
 	}
 	var updateCtx *TileCtx
-	singleTileFrame := fhdr.Tiling.Cols == 1 && fhdr.Tiling.Rows == 1
-	var tileScratch *FrameState
-	tileScratchFresh := true
-	if !singleTileFrame {
-		tileScratch = acquireFrameState(fb.Width, fb.Height)
-		defer ReleaseFrameState(tileScratch)
-	}
 	for _, td := range tiles {
-		// Tile entropy and neighbour state is independent. Full-frame indexing
-		// is retained so block coordinates remain absolute, but no above/left
-		// context may leak across a tile boundary.
+		// Tiles are decoded serially. Durable block/filter metadata occupies
+		// disjoint tile regions and can be written directly into the frame state;
+		// syntax neighbour lookups independently enforce TileX0/TileY0, so stale
+		// above/left entries from an earlier tile are never visible across the
+		// boundary. This avoids a full-grid scratch-state remap after every tile.
 		fs := fb.FilterState
-		if !singleTileFrame {
-			fs = tileScratch
-			if tileScratchFresh {
-				tileScratchFresh = false
-			} else {
-				fs.Reset()
-			}
-			fs.SetSubsampling(seq.SsHor, seq.SsVer)
-		}
+		fs.ResetTileContexts()
 		if traceSymbols {
 			fs.Tracef = logf
 		}
@@ -151,9 +138,6 @@ func DecodeTileGroupWithContext(
 		tileCtx := base.Clone()
 		if err2 := DecodeTileWithContext(td, fhdr, seq, fb, fs, tileCtx, logf); err2 != nil {
 			return nil, fmt.Errorf("tile row=%d col=%d: %w", td.Row, td.Col, err2)
-		}
-		if fs != fb.FilterState {
-			fb.FilterState.MergeFilterState(fs)
 		}
 		absoluteTile := int(td.Row)*int(fhdr.Tiling.Cols) + int(td.Col)
 		if absoluteTile == int(fhdr.Tiling.Update) {

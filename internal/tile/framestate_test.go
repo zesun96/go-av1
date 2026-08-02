@@ -265,6 +265,40 @@ func TestFrameStateResetRestoresSentinelsAndMetadata(t *testing.T) {
 	}
 }
 
+func TestResetTileContextsPreservesDurableMetadata(t *testing.T) {
+	fs := NewFrameState(32, 32)
+	fs.AboveSkip[0] = 1
+	fs.LeftPresent[0] = 1
+	fs.AboveRef[0] = 3
+	fs.LeftTxIntra[0] = 2
+	fs.AboveLCoef[0] = 7
+	fs.RefMVTopRightKnown = true
+	fs.RefMVTopRightAvailable = true
+	fs.CDEFIndex[0] = 4
+	fs.CDEFNonSkip[0] = 1
+	fs.SetBlockState(0, 0, 8, 8, Av1Block{SegID: 5})
+	fs.SetTxState(0, 0, 8, 8, 1)
+	fs.RestorationUnits = append(fs.RestorationUnits, RestorationUnit{Plane: 1})
+
+	fs.ResetTileContexts()
+
+	if fs.AboveSkip[0] != 0 || fs.LeftPresent[0] != 0 || fs.AboveRef[0] != -1 ||
+		fs.LeftTxIntra[0] != 0xff || fs.AboveLCoef[0] != 0x40 ||
+		fs.RefMVTopRightKnown || fs.RefMVTopRightAvailable {
+		t.Fatalf("tile neighbour context was not reset")
+	}
+	if fs.CDEFIndex[0] != 4 || fs.CDEFNonSkip[0] != 1 || len(fs.RestorationUnits) != 1 {
+		t.Fatalf("durable filter metadata changed: cdef=%d non_skip=%x restoration=%d",
+			fs.CDEFIndex[0], fs.CDEFNonSkip[0], len(fs.RestorationUnits))
+	}
+	if block, ok := fs.BlockState(0, 0); !ok || block.SegID != 5 {
+		t.Fatalf("durable block metadata changed: block=%+v ok=%t", block, ok)
+	}
+	if tx, _, ok := fs.txStateAtGrid(0); !ok || tx != 1 {
+		t.Fatalf("durable transform metadata changed: tx=%d ok=%t", tx, ok)
+	}
+}
+
 func TestMergeFilterStateRemapsChromaMetadata(t *testing.T) {
 	dst := NewFrameState(128, 64)
 	src := NewFrameState(128, 64)

@@ -351,6 +351,37 @@ func (fs *FrameState) Reset() {
 	if fs == nil {
 		return
 	}
+	fs.ResetTileContexts()
+	fillInt8(fs.CDEFIndex, -1)
+	clear(fs.CDEFNonSkip)
+	fs.RestorationUnits = fs.RestorationUnits[:0]
+	fs.Blocks = fs.Blocks[:0]
+	clear(fs.BlockGrid)
+	clear(fs.ChromaBlockGrid)
+	fs.blockGrid32 = nil
+	fs.chromaBlockGrid32 = nil
+	fillUint8(fs.TxGrid, 0xff)
+	fs.Tracef = nil
+	fs.traceModeTrial = false
+	fs.traceRefMVTrial = false
+	fs.traceDRLTrial = false
+	fs.MVFrame = nil
+	fs.SsHor = 1
+	fs.SsVer = 1
+	fs.TileX0 = 0
+	fs.TileY0 = 0
+	fs.TileX1 = 0
+	fs.TileY1 = 0
+}
+
+// ResetTileContexts restores only entropy-neighbour state. Durable block,
+// transform, CDEF, and restoration metadata remains intact so serial tiles
+// can write directly into one frame state without observing prior-tile
+// above/left contexts.
+func (fs *FrameState) ResetTileContexts() {
+	if fs == nil {
+		return
+	}
 	clear(fs.AboveSkip)
 	clear(fs.LeftSkip)
 	clear(fs.AboveSkipMode)
@@ -385,9 +416,6 @@ func (fs *FrameState) Reset() {
 		clear(fs.AboveMV[component])
 		clear(fs.LeftMV[component])
 	}
-	fillInt8(fs.CDEFIndex, -1)
-	clear(fs.CDEFNonSkip)
-	fs.RestorationUnits = fs.RestorationUnits[:0]
 	clear(fs.AboveSegID)
 	clear(fs.LeftSegID)
 	clear(fs.AboveSegPred)
@@ -398,23 +426,6 @@ func (fs *FrameState) Reset() {
 		fillUint8(fs.AboveCCoef[plane], 0x40)
 		fillUint8(fs.LeftCCoef[plane], 0x40)
 	}
-	fs.Blocks = fs.Blocks[:0]
-	clear(fs.BlockGrid)
-	clear(fs.ChromaBlockGrid)
-	fs.blockGrid32 = nil
-	fs.chromaBlockGrid32 = nil
-	fillUint8(fs.TxGrid, 0xff)
-	fs.Tracef = nil
-	fs.traceModeTrial = false
-	fs.traceRefMVTrial = false
-	fs.traceDRLTrial = false
-	fs.MVFrame = nil
-	fs.SsHor = 1
-	fs.SsVer = 1
-	fs.TileX0 = 0
-	fs.TileY0 = 0
-	fs.TileX1 = 0
-	fs.TileY1 = 0
 	fs.RefMVTopRightKnown = false
 	fs.RefMVTopRightAvailable = false
 }

@@ -570,6 +570,18 @@ from approximately 0.41 to 0.23 seconds (44 percent). Seven alternating
 complete-stream runs reduced the median from 6895.36 to 6785.21 ms, a 1.62
 percent improvement, with an exact 599-frame FrameMD5.
 
+Serial multi-tile decoding now writes durable block, transform, CDEF, and
+restoration metadata directly into the frame state. Before each tile it resets
+only the Above/Left entropy-neighbour context arrays; this preserves tile
+independence while removing the full-frame scratch-state block-index remap and
+grid merge. Seven alternating 599-frame runs reduced the median from 6588.81
+to 6271.27 ms, a 5.06 percent improvement. `MergeFilterState` disappeared
+from the follow-up CPU profile and `memclr` fell from approximately 0.20 to
+0.09 seconds. Allocation count decreased from 1,266,169 to 1,261,843, while
+total allocation volume increased about one percent. The complete FrameMD5
+remained exact, and the independent single-tile AOM all-intra median remained
+flat (614.84 versus 614.77 ms).
+
 ## Current Benchmark Status (2026-08-01)
 
 Current benchmark commit: `5a8931f`.
