@@ -37,6 +37,30 @@ func BenchmarkFindSpatialCandidates(b *testing.B) {
 	benchmarkRefMVSSink = sink
 }
 
+func BenchmarkFindTemporalCandidates(b *testing.B) {
+	frame := NewFrame(1920, 1080)
+	frame.OrderHint, frame.OrderBits = 9, 5
+	frame.HighPrecision = true
+	frame.RefOrderHints[3] = 8
+	for y := 60; y < 64; y++ {
+		for x := 100; x < 104; x++ {
+			frame.RPProj[y*frame.RPStride+x] = TemporalBlock{MV: MV{X: int16(x), Y: int16(y)}, Ref: 1}
+		}
+	}
+	cfg := SearchConfig{
+		Frame: frame, UseRefFrameMVs: true, Ref: 4, TargetSlot: 3,
+		Bx4: 200, By4: 120, Bw4: 8, Bh4: 8, BlockDims: [][2]uint8{{4, 4}},
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	var result SearchResult
+	for n := 0; n < b.N; n++ {
+		FindInto(&result, &cfg)
+	}
+	benchmarkRefMVSSink = result.Count
+}
+
 func BenchmarkNewFrame1080p(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

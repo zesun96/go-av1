@@ -582,6 +582,23 @@ total allocation volume increased about one percent. The complete FrameMD5
 remained exact, and the independent single-tile AOM all-intra median remained
 flat (614.84 versus 614.77 ms).
 
+Reference-MV search now scans the strong nearest spatial range first, inserts
+temporal candidates at their final priority, and only then appends weak
+secondary spatial candidates. This removes the former eight-candidate copy
+and the duplicate `AddCandidate` pass over the secondary range. On the
+599-frame WebRTC stream with in-loop filters disabled, seven alternating runs
+reduced the median from 4215.18 to 4140.82 ms (1.76 percent); the follow-up
+profile reduced cumulative `FindInto` time from approximately 0.38 to 0.23
+seconds. FrameMD5 output remained exact.
+
+Temporal candidate positions are also projected and merged while they are
+enumerated instead of being materialized in two growable slices. The temporal
+RefMV microbenchmark fell from 616 B and 9 allocations per search to zero
+allocations, with its stable run time falling from approximately 1.54 us to
+0.86--0.98 us. This second change was neutral on the measured WebRTC stream,
+where temporal search is uncommon, but removes block-level GC pressure from
+temporal-heavy inter content.
+
 ## Current Benchmark Status (2026-08-01)
 
 Current benchmark commit: `5a8931f`.

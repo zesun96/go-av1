@@ -52,27 +52,13 @@ func FindInto(out *SearchResult, cfg *SearchConfig) {
 	if out == nil {
 		return
 	}
-	*out = SearchResult{}
 	if cfg == nil {
+		*out = SearchResult{}
 		return
 	}
-	findSpatialInto(out, cfg, false)
+	spatial, spatialOK := findNearestSpatialInto(out, cfg)
 	temporalEnabled := cfg.UseRefFrameMVs && cfg.TargetSlot >= 0 && cfg.Frame != nil && cfg.Frame.OrderBits != 0 &&
 		(cfg.Ref2 <= 0 || cfg.TargetSlot2 >= 0)
-	var secondary [8]Candidate
-	secondaryCount := copy(secondary[:], out.Candidates[out.NearestCount:out.Count])
-	if temporalEnabled {
-		out.Count = out.NearestCount
-	}
-	if temporalEnabled && cfg.Ref2 > 0 {
-		for _, pos := range temporalCandidatePositions(cfg) {
-			mv0, ok0 := projectTemporalAt(cfg.Frame, cfg.TargetSlot, pos[0], pos[1])
-			mv1, ok1 := projectTemporalAt(cfg.Frame, cfg.TargetSlot2, pos[0], pos[1])
-			if ok0 && ok1 {
-				out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv0, mv1}, 2)
-			}
-		}
-	}
 	// dav1d initializes globalmv_ctx from use_ref_frame_mvs. Without order
 	// hints temporal projection is disabled, so the context remains zero even
 	// when a decoded reference picture is available.
@@ -86,21 +72,15 @@ func FindInto(out *SearchResult, cfg *SearchConfig) {
 			dy := absSearch(int(mv.Y) - int(cfg.GlobalMV.Y))
 			out.GlobalMVContext = boolSearch(dx|dy >= 16)
 		}
-		temporal := temporalCandidates(cfg)
-		for _, mv := range temporal {
-			out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv, {}}, 2)
-		}
 	}
 	if temporalEnabled {
-		for _, cand := range secondary[:secondaryCount] {
-			out.Count = AddCandidate(out.Candidates[:], out.Count, cand.MV, cand.Weight)
-		}
-		SortCandidates(out.Candidates[:], out.NearestCount)
-		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
-	} else {
-		SortCandidates(out.Candidates[:], out.NearestCount)
-		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
+		appendTemporalCandidates(out, cfg)
 	}
+	if spatialOK {
+		appendSecondarySpatial(out, cfg, spatial.nRows, spatial.nCols, spatial.maxRows, spatial.maxCols, spatial.w4, spatial.h4)
+	}
+	SortCandidates(out.Candidates[:], out.NearestCount)
+	SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
 	if cfg.Ref2 > 0 {
 		appendCompoundExtendedCandidates(out, cfg)
 	} else {
@@ -322,21 +302,21 @@ func referenceSignBias(frame *Frame, ref int8) bool {
 	return RelativeDist(frame.RefFrameOrderHints[ref-1], frame.OrderHint, frame.OrderBits) > 0
 }
 
-func temporalCandidates(cfg *SearchConfig) []MV {
-	var out []MV
-	for _, pos := range temporalCandidatePositions(cfg) {
-		mv, ok := projectTemporalAt(cfg.Frame, cfg.TargetSlot, pos[0], pos[1])
-		if ok {
-			out = append(out, mv)
-		}
-	}
-	return out
-}
-
-func temporalCandidatePositions(cfg *SearchConfig) [][2]int {
-	var out [][2]int
+func appendTemporalCandidates(out *SearchResult, cfg *SearchConfig) {
 	add := func(x8, y8 int) {
-		out = append(out, [2]int{x8, y8})
+		mv0, ok0 := projectTemporalAt(cfg.Frame, cfg.TargetSlot, x8, y8)
+		if !ok0 {
+			return
+		}
+		if cfg.Ref2 > 0 {
+			mv1, ok1 := projectTemporalAt(cfg.Frame, cfg.TargetSlot2, x8, y8)
+			if !ok1 {
+				return
+			}
+			out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv0, mv1}, 2)
+			return
+		}
+		out.Count = AddCandidate(out.Candidates[:], out.Count, MVPair{mv0, {}}, 2)
 	}
 	bx8, by8 := cfg.Bx4>>1, cfg.By4>>1
 	w4 := minSearch(cfg.Bw4, cfg.Frame.IW4-cfg.Bx4)
@@ -355,7 +335,7 @@ func temporalCandidatePositions(cfg *SearchConfig) [][2]int {
 		}
 	}
 	if minSearch(cfg.Bw4, cfg.Bh4) < 2 || maxSearch(cfg.Bw4, cfg.Bh4) >= 16 {
-		return out
+		return
 	}
 	tileX0 := cfg.TileX0 >> 1
 	tileX1, tileY1 := cfg.TileX1>>1, cfg.TileY1>>1
@@ -380,7 +360,6 @@ func temporalCandidatePositions(cfg *SearchConfig) [][2]int {
 			add(bx8+bw8, by8+bh8-1)
 		}
 	}
-	return out
 }
 
 // FindTemporal projects one motion-field sample from a saved reference frame
@@ -416,17 +395,28 @@ func projectTemporalAt(current *Frame, targetSlot, x8, y8 int) (MV, bool) {
 // column scanning, so stable sorting preserves row-first ties.
 func FindSpatial(cfg SearchConfig) SearchResult {
 	var out SearchResult
-	findSpatialInto(&out, &cfg, true)
+	spatial, ok := findNearestSpatialInto(&out, &cfg)
+	if ok {
+		appendSecondarySpatial(&out, &cfg, spatial.nRows, spatial.nCols, spatial.maxRows, spatial.maxCols, spatial.w4, spatial.h4)
+		SortCandidates(out.Candidates[:], out.NearestCount)
+		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
+	}
 	return out
 }
 
-func findSpatialInto(out *SearchResult, cfg *SearchConfig, sortSecondary bool) {
+type spatialSearchState struct {
+	nRows, nCols     int
+	maxRows, maxCols int
+	w4, h4           int
+}
+
+func findNearestSpatialInto(out *SearchResult, cfg *SearchConfig) (spatialSearchState, bool) {
 	if out == nil {
-		return
+		return spatialSearchState{}, false
 	}
 	*out = SearchResult{}
 	if cfg.Frame == nil || cfg.Bw4 <= 0 || cfg.Bh4 <= 0 || len(cfg.BlockDims) == 0 {
-		return
+		return spatialSearchState{}, false
 	}
 	tileX1, tileY1 := cfg.TileX1, cfg.TileY1
 	if tileX1 <= cfg.TileX0 {
@@ -461,11 +451,11 @@ func findSpatialInto(out *SearchResult, cfg *SearchConfig, sortSecondary bool) {
 	for i := 0; i < out.NearestCount; i++ {
 		out.Candidates[i].Weight += 640
 	}
-	appendSecondarySpatial(out, cfg, nRows, nCols, maxRows, maxCols, w4, h4)
-	if sortSecondary {
-		SortCandidates(out.Candidates[:], out.NearestCount)
-		SortCandidates(out.Candidates[out.NearestCount:], out.Count-out.NearestCount)
-	}
+	return spatialSearchState{
+		nRows: nRows, nCols: nCols,
+		maxRows: maxRows, maxCols: maxCols,
+		w4: w4, h4: h4,
+	}, true
 }
 
 func addSpatialCandidate(out *SearchResult, cfg *SearchConfig, blk Block, weight int, row, direct, trackNewMV bool) {
