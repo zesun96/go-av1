@@ -526,6 +526,14 @@ percent). A fused 16x16 Go driver was measured and discarded: its 7 percent
 microbenchmark gain became a 0.20 percent end-to-end regression, so 16x16
 requires a real vector butterfly kernel rather than a larger Go stack frame.
 
+The direct-source combined CDEF SSE4.1 kernel now keeps its two dynamic
+primary tap vectors live across output rows and loads the fixed secondary
+weights from read-only vectors. This removes the four per-row scalar-to-vector
+broadcast sequences. Five alternating same-build microbenchmark runs reduced
+the 8x8 block time from 111.2--112.4 to 103.4--103.9 ns, about 7.3 percent.
+The complete 599-frame alternating median fell from 7378.43 to 7343.26 ms
+(0.48 percent), and the full FrameMD5 remained exact.
+
 ## Current Benchmark Status (2026-08-01)
 
 Current benchmark commit: `5a8931f`.

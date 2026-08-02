@@ -85,6 +85,35 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
 - Revisit only as part of a fused coefficient-token decoder that removes
   surrounding Go calls and context work, not as another MSAC wrapper change.
 
+### Fixed four-symbol MSAC wrapper for coefficient base tokens
+
+- Result: the fixed `[5]uint16` entry bypassed generic argument validation,
+  slice extraction, and symbol-count dispatch, and passed 2,048-step native
+  versus scalar differential tests plus the 599-frame FrameMD5 check. An
+  exact same-toolchain, same-commit five-run alternating comparison was flat:
+  6968.66 ms versus 6971.74 ms, only 0.04 percent faster.
+- A comparison against an older retained binary initially appeared about 4
+  percent faster. Rebuilding the baseline from `HEAD` made that result vanish,
+  again demonstrating that old/new executable layout is not reliable for
+  accepting small decoder changes.
+- Reason: base-token decoding is frequent, but the already-specialized
+  assembly dominates each call; removing its Go wrapper checks alone does not
+  remove enough work. Revisit only by fusing surrounding coefficient context
+  calculation or multiple token operations into the native kernel.
+
+### Split 2D and 1D coefficient AC loops
+
+- Result: moving the transform-class branch outside the reverse AC loop and
+  specializing the common 2D scan/context/high-token calculations preserved
+  the complete 599-frame FrameMD5, but regressed a same-build five-run median
+  by 1.68 percent: 7399.92 ms versus 7275.42 ms.
+- Reason: duplicating the sizeable tracing, token update, and escape handling
+  body expanded `decodeCoeffTokens`; the extra instruction footprint cost
+  more than removing its highly predictable transform-class branches.
+- Revisit only as a compact assembly fusion that also consumes context
+  samples and performs the base-token MSAC operation, not as duplicated Go
+  loops or another helper called once per coefficient.
+
 ### Expanded Bool normalization fast path
 
 - Result: about 0.22% regression.
@@ -106,6 +135,19 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
   of processing twice as many arithmetic lanes.
 - Revisit only after changing the CDEF scratch layout so paired rows or paired
   blocks are already contiguous in SIMD-friendly lanes.
+
+### AVX2 two-row direct-source combined CDEF
+
+- Result: after removing the int16 scratch entirely, a second two-row AVX2
+  implementation passed the complete direction/strength differential suite
+  but still measured approximately 216-239 ns per 8x8 block versus 194-215 ns
+  for the retained direct-source SSE4.1 kernel, a roughly 10-20% regression.
+- Reason: every one of the twelve neighbor positions still needs two
+  non-contiguous 8-byte row loads plus a lane-pack before widening to YMM.
+  Halving the arithmetic instruction count does not repay that load/pack work
+  or the AVX transition cost.
+- Revisit only with a genuinely row-paired source layout populated upstream;
+  do not attempt another kernel-side row assembly variant.
 
 ### Paired U/V 4x4 CDEF SSE4.1
 

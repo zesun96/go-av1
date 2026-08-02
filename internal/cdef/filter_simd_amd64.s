@@ -96,6 +96,14 @@ DATA ·cdefEight<>+0(SB)/8, $0x0008000800080008
 DATA ·cdefEight<>+8(SB)/8, $0x0008000800080008
 GLOBL ·cdefEight<>(SB), RODATA|NOPTR, $16
 
+DATA ·cdefTwo<>+0(SB)/8, $0x0002000200020002
+DATA ·cdefTwo<>+8(SB)/8, $0x0002000200020002
+GLOBL ·cdefTwo<>(SB), RODATA|NOPTR, $16
+
+DATA ·cdefOne<>+0(SB)/8, $0x0001000100010001
+DATA ·cdefOne<>+8(SB)/8, $0x0001000100010001
+GLOBL ·cdefOne<>(SB), RODATA|NOPTR, $16
+
 // filterPrimary8SSE41 filters eight primary-only CDEF pixels per row.
 TEXT ·filterPrimary8SSE41(SB), NOSPLIT, $0-88
 	MOVQ dst+0(FP), DI
@@ -338,6 +346,11 @@ TEXT ·filterCombined8SourceSSE41(SB), NOSPLIT, $0-104
 	BROADCAST_WORD(secThreshold+72(FP), X12)
 	MOVQ secShift+80(FP), AX
 	MOVD AX, X11
+	// The source kernel does not need the sentinel scratch registers X5/X10.
+	// Keep both primary tap vectors live across rows instead of rebuilding
+	// them for every output row.
+	BROADCAST_WORD(priTap0+56(FP), X10)
+	BROADCAST_WORD(priTap1+64(FP), X5)
 
 combinedSourceRow:
 	PMOVZXBW (DI), X9
@@ -345,24 +358,21 @@ combinedSourceRow:
 	MOVO X9, X7
 	PXOR X0, X0
 
-	BROADCAST_WORD(priTap0+56(FP), X6)
+	MOVO X10, X6
 	MOVQ 0(R9), R10
 	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X14, X13)
 	MOVQ SI, AX
 	SUBQ R10, AX
 	ACCUM_SOURCE_NEIGHBOR((AX), X14, X13)
 
-	BROADCAST_WORD(priTap1+64(FP), X6)
+	MOVO X5, X6
 	MOVQ 8(R9), R10
 	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X14, X13)
 	MOVQ SI, AX
 	SUBQ R10, AX
 	ACCUM_SOURCE_NEIGHBOR((AX), X14, X13)
 
-	MOVL $2, AX
-	MOVD AX, X6
-	PSHUFL $0, X6, X6
-	PACKSSLW X6, X6
+	MOVO ·cdefTwo<>(SB), X6
 	MOVQ 16(R9), R10
 	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X12, X11)
 	MOVQ SI, AX
@@ -374,10 +384,7 @@ combinedSourceRow:
 	SUBQ R10, AX
 	ACCUM_SOURCE_NEIGHBOR((AX), X12, X11)
 
-	MOVL $1, AX
-	MOVD AX, X6
-	PSHUFL $0, X6, X6
-	PACKSSLW X6, X6
+	MOVO ·cdefOne<>(SB), X6
 	MOVQ 32(R9), R10
 	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X12, X11)
 	MOVQ SI, AX
