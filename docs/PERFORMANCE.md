@@ -534,6 +534,29 @@ the 8x8 block time from 111.2--112.4 to 103.4--103.9 ns, about 7.3 percent.
 The complete 599-frame alternating median fell from 7378.43 to 7343.26 ms
 (0.48 percent), and the full FrameMD5 remained exact.
 
+The `go-av1d` command now carries a representative `default.pgo` profile from
+the complete 599-frame WebRTC single-thread workload. Go therefore applies
+profile-guided inlining, devirtualization, and hot-code layout automatically
+for a normal `go build ./cmd/go-av1d`. Seven alternating same-source runs
+reduced the complete-stream median from 7193.25 to 6903.61 ms, a 4.20 percent
+single-thread improvement; every PGO sample was faster than every non-PGO
+sample. The PGO executable grew by approximately 113 KB and retained the
+exact 599-frame FrameMD5.
+
+Regenerate the profile only from a non-PGO baseline, so compiler decisions do
+not recursively train on the previous profile:
+
+```powershell
+go build -pgo=off -o logs/go-av1d-profile-base.exe ./cmd/go-av1d
+$env:GOMAXPROCS = '1'
+.\logs\go-av1d-profile-base.exe `
+  -i .\cmd\webrtc-av1d\output.ivf -threads 1 `
+  -cpuprofile .\cmd\go-av1d\default.pgo
+```
+
+Use `go build -pgo=off ./cmd/go-av1d` when an explicit non-PGO comparison is
+required. The `purego` build tag is independent of PGO and remains available.
+
 ## Current Benchmark Status (2026-08-01)
 
 Current benchmark commit: `5a8931f`.
