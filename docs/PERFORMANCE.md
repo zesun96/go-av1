@@ -541,7 +541,10 @@ for a normal `go build ./cmd/go-av1d`. Seven alternating same-source runs
 reduced the complete-stream median from 7193.25 to 6903.61 ms, a 4.20 percent
 single-thread improvement; every PGO sample was faster than every non-PGO
 sample. The PGO executable grew by approximately 113 KB and retained the
-exact 599-frame FrameMD5.
+exact 599-frame FrameMD5. A separate nine-run cross-check on the 39-packet AOM
+all-intra stream improved from 651.44 to 621.78 ms (4.77 percent), confirming
+that the WebRTC-trained profile also generalizes to an intra/transform-heavy
+workload.
 
 Regenerate the profile only from a non-PGO baseline, so compiler decisions do
 not recursively train on the previous profile:
