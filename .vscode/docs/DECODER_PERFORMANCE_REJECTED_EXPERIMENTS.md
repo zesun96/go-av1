@@ -43,6 +43,22 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
 - Revisit only as part of a larger motion-compensation kernel that also avoids
   an intermediate buffer or combines adjacent blocks.
 
+### SSE2 whole-block integer motion-compensation copy
+
+- Result: a single native call copied complete 8--128 pixel-wide blocks and
+  passed randomized stride/height differential tests plus the 599-frame
+  FrameMD5. The stable 32x32 microbenchmark improved from about 160 to 104 ns,
+  but the five-run decoder median improved only 0.30 percent (7070.64 versus
+  7092.08 ms), inside session noise.
+- The follow-up profile charged 0.20 s flat to the new copy kernel while
+  `runtime.memmove` still consumed 0.32 s and cumulative inter plane copy
+  remained about 0.71 s. Most remaining memmove samples therefore belong to
+  other paths, and the native loop mostly replaced already efficient runtime
+  traffic instead of removing it.
+- Do not revisit with another copy implementation. The next inter-prediction
+  redesign must eliminate an intermediate representation/copy or batch work
+  that currently occurs in separate prediction stages.
+
 ### SSE2 compact multi-tile grid offset
 
 - Result: about 2.44% slower and initially failed zero/sentinel preservation.
@@ -113,6 +129,26 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
 - Revisit only as a compact assembly fusion that also consumes context
   samples and performs the base-token MSAC operation, not as duplicated Go
   loops or another helper called once per coefficient.
+
+### Fused 2D coefficient context and base-token MSAC assembly
+
+- Result: one amd64 kernel combined five neighbour-level loads, magnitude
+  accumulation, x/y and magnitude clamps, spatial-offset lookup, 41-way CDF
+  address calculation, four-result arithmetic decode, normalization, and CDF
+  update. A 2,048-step randomized differential test compared the magnitude,
+  context, symbol, complete MSAC state, and all CDF entries; native and purego
+  tile tests plus the 599-frame FrameMD5 all passed.
+- The same-build five-run 599-frame median regressed by 1.95 percent: 6914.68
+  ms versus 6780.11 ms. A follow-up CPU profile attributed 0.40 s flat to the
+  fused assembly and another 0.08 s to its Go/refill wrapper; cumulative
+  `decodeCoeffTokens` did not improve (about 0.76 s versus the retained 0.73 s
+  profile).
+- Reason: the larger serial kernel and multi-result ABI boundary cost more
+  than the removed Go context operations, while arithmetic decoding remains
+  inherently dependent from symbol to symbol. Do not revisit as a per-symbol
+  fusion. A future coefficient redesign must keep an entire transform/token
+  sequence native or change the surrounding representation enough to remove
+  repeated boundaries and token-chain traffic.
 
 ### Expanded Bool normalization fast path
 
