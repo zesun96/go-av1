@@ -169,6 +169,18 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
 - Revisit with a mode-by-mode compact-versus-strided differential test and a
   first-pixel decoder trace before enabling direct output for any subset.
 
+### Direct-source CDEF for low-frequency strength paths
+
+- Result: the retained direct byte-source combined primary+secondary kernel
+  was extended to primary-only and secondary-only blocks, but the 11-run
+  120-frame median regressed by 0.47 percent (754.65 ms versus 751.11 ms).
+- Reason: these strength combinations are uncommon in the measured stream;
+  their additional dispatch and assembly footprint cost more instruction
+  cache than the avoided 12x12 scratch expansion saves.
+- Keep direct-source filtering restricted to the hot combined path. Revisit
+  the other cases only if a different corpus shows them as material flat
+  profile entries.
+
 ## Current large targets
 
 The remaining plausible single-thread gains are complete 8x8/16x16 inverse

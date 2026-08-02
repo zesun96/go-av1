@@ -36,6 +36,25 @@
 	PMULLW X6, X1; \
 	PADDW X1, X0
 
+// Interior source stripes contain only valid byte pixels, so this variant can
+// widen each neighbor directly and skip the int16 scratch/sentinel handling.
+#define ACCUM_SOURCE_NEIGHBOR(addr, threshold, shift) \
+	PMOVZXBW addr, X1; \
+	PMINSW X1, X8; \
+	PMAXSW X1, X7; \
+	PSUBW X9, X1; \
+	MOVO X1, X2; \
+	PABSW X1, X1; \
+	MOVO X1, X4; \
+	PSRAW shift, X4; \
+	MOVO threshold, X3; \
+	PSUBW X4, X3; \
+	PMAXSW X15, X3; \
+	PMINSW X3, X1; \
+	PSIGNW X2, X1; \
+	PMULLW X6, X1; \
+	PADDW X1, X0
+
 // paddingContiguous8x8SSE41 expands a contiguous 12x12 byte window into the
 // 12x12 int16 CDEF scratch layout.
 TEXT ·paddingContiguous8x8SSE41(SB), NOSPLIT, $0-24
@@ -302,6 +321,97 @@ combinedStored:
 	JNZ combinedRow
 	RET
 
+// filterCombined8SourceSSE41 filters an interior block directly from its
+// immutable byte stripe, avoiding the per-block 12x12 byte-to-word expansion.
+TEXT ·filterCombined8SourceSSE41(SB), NOSPLIT, $0-104
+	MOVQ dst+0(FP), DI
+	MOVQ dstStride+8(FP), R8
+	MOVQ src+16(FP), SI
+	MOVQ srcStride+24(FP), R12
+	MOVQ offsets+32(FP), R9
+	MOVQ h+96(FP), R11
+
+	PXOR X15, X15
+	BROADCAST_WORD(priThreshold+40(FP), X14)
+	MOVQ priShift+48(FP), AX
+	MOVD AX, X13
+	BROADCAST_WORD(secThreshold+72(FP), X12)
+	MOVQ secShift+80(FP), AX
+	MOVD AX, X11
+
+combinedSourceRow:
+	PMOVZXBW (DI), X9
+	MOVO X9, X8
+	MOVO X9, X7
+	PXOR X0, X0
+
+	BROADCAST_WORD(priTap0+56(FP), X6)
+	MOVQ 0(R9), R10
+	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X14, X13)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_SOURCE_NEIGHBOR((AX), X14, X13)
+
+	BROADCAST_WORD(priTap1+64(FP), X6)
+	MOVQ 8(R9), R10
+	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X14, X13)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_SOURCE_NEIGHBOR((AX), X14, X13)
+
+	MOVL $2, AX
+	MOVD AX, X6
+	PSHUFL $0, X6, X6
+	PACKSSLW X6, X6
+	MOVQ 16(R9), R10
+	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X12, X11)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_SOURCE_NEIGHBOR((AX), X12, X11)
+	MOVQ 24(R9), R10
+	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X12, X11)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_SOURCE_NEIGHBOR((AX), X12, X11)
+
+	MOVL $1, AX
+	MOVD AX, X6
+	PSHUFL $0, X6, X6
+	PACKSSLW X6, X6
+	MOVQ 32(R9), R10
+	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X12, X11)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_SOURCE_NEIGHBOR((AX), X12, X11)
+	MOVQ 40(R9), R10
+	ACCUM_SOURCE_NEIGHBOR((SI)(R10*1), X12, X11)
+	MOVQ SI, AX
+	SUBQ R10, AX
+	ACCUM_SOURCE_NEIGHBOR((AX), X12, X11)
+
+	MOVO X0, X1
+	PSRAW $15, X1
+	PADDW X1, X0
+	PADDW ·cdefEight<>(SB), X0
+	PSRAW $4, X0
+	PADDW X9, X0
+	PMAXSW X8, X0
+	PMINSW X7, X0
+	PACKUSWB X0, X0
+	CMPQ w+88(FP), $4
+	JEQ combinedSourceStore4
+	MOVQ X0, (DI)
+	JMP combinedSourceStored
+combinedSourceStore4:
+	PEXTRD $0, X0, (DI)
+combinedSourceStored:
+
+	ADDQ R8, DI
+	ADDQ R12, SI
+	DECQ R11
+	JNZ combinedSourceRow
+	RET
+
 // filterSecondary8SSE41 filters four or eight secondary-only CDEF pixels.
 TEXT ·filterSecondary8SSE41(SB), NOSPLIT, $0-64
 	MOVQ dst+0(FP), DI
@@ -379,6 +489,7 @@ secondaryStored:
 	DECQ R11
 	JNZ secondaryRow
 	RET
+
 
 // The direction-cost layout follows dav1d's cdef_dir_8bpc implementation.
 // Copyright (c) 2018, VideoLAN and dav1d authors; BSD-2-Clause.

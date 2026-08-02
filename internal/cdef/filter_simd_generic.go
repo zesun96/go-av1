@@ -18,6 +18,13 @@ func filterCombined8SIMD(dst []uint8, dstBase, dstStride int,
 	return false
 }
 
+func filterCombined8SourceSIMD(dst []uint8, dstBase, dstStride int,
+	src []uint8, srcBase, srcStride int, offsets [cdefCombinedOffsets]int,
+	priThreshold, priShift, priTap0, priTap1,
+	secThreshold, secShift, w, h int) bool {
+	return false
+}
+
 func filterSecondary8SIMD(dst []uint8, dstBase, dstStride int,
 	tmp *[144]int16, tmpBase int, offsets [cdefSecondaryOffsets]int,
 	threshold, shift, w, h int) bool {

@@ -48,6 +48,24 @@ func filterCombined8SSE41(dst *uint8, dstStride int, src *int16,
 	priThreshold, priShift, priTap0, priTap1,
 	secThreshold, secShift, w, h int)
 
+func filterCombined8SourceSIMD(dst []uint8, dstBase, dstStride int,
+	src []uint8, srcBase, srcStride int, offsets [cdefCombinedOffsets]int,
+	priThreshold, priShift, priTap0, priTap1,
+	secThreshold, secShift, w, h int) bool {
+	if !haveCombined8SSE41 || dispatch.GenericForced() || h <= 0 {
+		return false
+	}
+	filterCombined8SourceSSE41(&dst[dstBase], dstStride, &src[srcBase], srcStride, &offsets,
+		priThreshold, priShift, priTap0, priTap1, secThreshold, secShift, w, h)
+	return true
+}
+
+//go:noescape
+func filterCombined8SourceSSE41(dst *uint8, dstStride int, src *uint8, srcStride int,
+	offsets *[cdefCombinedOffsets]int,
+	priThreshold, priShift, priTap0, priTap1,
+	secThreshold, secShift, w, h int)
+
 var haveSecondary8SSE41 = havePrimary8SSE41
 
 func filterSecondary8SIMD(dst []uint8, dstBase, dstStride int,

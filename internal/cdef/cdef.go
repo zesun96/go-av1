@@ -32,6 +32,43 @@ var cdefDirections = [12][2]int{
 	{0*12 + 1, -1*12 + 2},  // 1
 }
 
+type directionVector struct {
+	dy int
+	dx int
+}
+
+// The same direction table expressed as row/column vectors. Source-backed
+// SIMD kernels use the picture stride directly and therefore cannot use the
+// fixed 12-wide int16 scratch offsets above.
+var cdefDirectionVectors = [12][2]directionVector{
+	{{1, 0}, {2, 0}},
+	{{1, 0}, {2, -1}},
+	{{-1, 1}, {-2, 2}},
+	{{0, 1}, {-1, 2}},
+	{{0, 1}, {0, 2}},
+	{{0, 1}, {1, 2}},
+	{{1, 1}, {2, 2}},
+	{{1, 0}, {2, 1}},
+	{{1, 0}, {2, 0}},
+	{{1, 0}, {2, -1}},
+	{{-1, 1}, {-2, 2}},
+	{{0, 1}, {-1, 2}},
+}
+
+func combinedSourceOffsets(dir, stride int) [cdefCombinedOffsets]int {
+	primary := cdefDirectionVectors[dir+2]
+	secondary0 := cdefDirectionVectors[dir+4]
+	secondary1 := cdefDirectionVectors[dir]
+	return [cdefCombinedOffsets]int{
+		primary[0].dy*stride + primary[0].dx,
+		primary[1].dy*stride + primary[1].dx,
+		secondary0[0].dy*stride + secondary0[0].dx,
+		secondary1[0].dy*stride + secondary1[0].dx,
+		secondary0[1].dy*stride + secondary0[1].dx,
+		secondary1[1].dy*stride + secondary1[1].dx,
+	}
+}
+
 // sgr_x_by_x is used in SGR but also serves as a large table; here we only
 // need the CDEF-specific helpers below.
 
@@ -333,6 +370,15 @@ func FilterBlock(dst []uint8, dstBase, dstStride int,
 func FilterBlock8x8FromSource(dst []uint8, dstBase, dstStride int,
 	src []uint8, srcBase, srcStride int,
 	priStrength, secStrength, dir, damping int) {
+	if priStrength != 0 && secStrength != 0 {
+		priTap := 4 - (priStrength & 1)
+		if filterCombined8SourceSIMD(dst, dstBase, dstStride, src, srcBase, srcStride,
+			combinedSourceOffsets(dir, srcStride),
+			priStrength, imax(0, damping-ulog2(priStrength)), priTap, (priTap&3)|2,
+			secStrength, damping-ulog2(secStrength), 8, 8) {
+			return
+		}
+	}
 	var tmpBuf [144]int16
 	paddingContiguous8x8(&tmpBuf, src, srcBase, srcStride)
 	filterBlockPrepared(dst, dstBase, dstStride, &tmpBuf, 2*tmpStride+2,
@@ -344,6 +390,15 @@ func FilterBlock8x8FromSource(dst []uint8, dstBase, dstStride int,
 func FilterBlock4x4FromSource(dst []uint8, dstBase, dstStride int,
 	src []uint8, srcBase, srcStride int,
 	priStrength, secStrength, dir, damping int) {
+	if priStrength != 0 && secStrength != 0 {
+		priTap := 4 - (priStrength & 1)
+		if filterCombined8SourceSIMD(dst, dstBase, dstStride, src, srcBase, srcStride,
+			combinedSourceOffsets(dir, srcStride),
+			priStrength, imax(0, damping-ulog2(priStrength)), priTap, (priTap&3)|2,
+			secStrength, damping-ulog2(secStrength), 4, 4) {
+			return
+		}
+	}
 	var tmpBuf [144]int16
 	paddingContiguous4x4(&tmpBuf, src, srcBase, srcStride)
 	filterBlockPrepared(dst, dstBase, dstStride, &tmpBuf, 2*tmpStride+2,

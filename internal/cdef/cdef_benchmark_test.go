@@ -34,6 +34,39 @@ func BenchmarkFilterBlock8x8(b *testing.B) {
 	benchmarkCDEFSink = dst[b.N%len(dst)]
 }
 
+func BenchmarkFilterBlock8x8FromSource(b *testing.B) {
+	benchmarkFilterBlock8x8Source(b, func(dst, src []byte, base, stride int) {
+		FilterBlock8x8FromSource(dst, base, stride, src, base, stride, 8, 4, 2, 3)
+	})
+}
+
+func BenchmarkFilterBlock8x8FromSourceScratch(b *testing.B) {
+	benchmarkFilterBlock8x8Source(b, func(dst, src []byte, base, stride int) {
+		var tmp [144]int16
+		paddingContiguous8x8(&tmp, src, base, stride)
+		filterBlockPrepared(dst, base, stride, &tmp, 2*tmpStride+2, 8, 4, 2, 3, 8, 8)
+	})
+}
+
+func benchmarkFilterBlock8x8Source(b *testing.B, fn func(dst, src []byte, base, stride int)) {
+	const stride = 32
+	src := make([]byte, stride*20)
+	dst := make([]byte, len(src))
+	for i := range src {
+		src[i] = byte(i*29 + i/stride*17 + 11)
+	}
+	copy(dst, src)
+	base := 6*stride + 8
+	fn(dst, src, base, stride)
+	b.ReportAllocs()
+	b.SetBytes(64)
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		fn(dst, src, base, stride)
+	}
+	benchmarkCDEFSink = dst[base]
+}
+
 func checksumCDEF(data []uint8) uint64 {
 	var sum uint64
 	for i, value := range data {
