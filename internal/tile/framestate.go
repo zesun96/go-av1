@@ -115,6 +115,13 @@ type FrameState struct {
 	// so these buffers can be reused without pooling or synchronization.
 	coeffScratch  []int32
 	levelsScratch []uint8
+	// Intra reconstruction is sequential within a tile. Keep its short-lived
+	// edge, prediction, and CFL workspaces on the FrameState so every block
+	// does not allocate fresh backing arrays.
+	intraEdgeScratch []byte
+	intraPredScratch []byte
+	cflAcScratch     []int16
+	cflSubScratch    []int16
 
 	// Frame dimensions in 4-px units.
 	Width  int
@@ -164,6 +171,41 @@ func (fs *FrameState) coefficientScratch(coeffLen, levelsLen int) ([]int32, []ui
 	clear(coeff)
 	clear(levels)
 	return coeff, levels
+}
+
+func (fs *FrameState) intraEdgeBuffer(n int) []byte {
+	if cap(fs.intraEdgeScratch) < n {
+		fs.intraEdgeScratch = make([]byte, n)
+	}
+	buf := fs.intraEdgeScratch[:n]
+	clear(buf)
+	return buf
+}
+
+func (fs *FrameState) intraPredBuffer(n int) []byte {
+	if cap(fs.intraPredScratch) < n {
+		fs.intraPredScratch = make([]byte, n)
+	}
+	// Every intra and palette predictor writes the complete output rectangle.
+	return fs.intraPredScratch[:n]
+}
+
+func (fs *FrameState) cflAcBuffer(n int) []int16 {
+	if cap(fs.cflAcScratch) < n {
+		fs.cflAcScratch = make([]int16, n)
+	}
+	buf := fs.cflAcScratch[:n]
+	clear(buf)
+	return buf
+}
+
+func (fs *FrameState) cflSubBuffer(n int) []int16 {
+	if cap(fs.cflSubScratch) < n {
+		fs.cflSubScratch = make([]int16, n)
+	}
+	buf := fs.cflSubScratch[:n]
+	clear(buf)
+	return buf
 }
 
 // NewFrameState allocates a FrameState for a frame of size (w×h) luma pixels.

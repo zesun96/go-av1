@@ -1470,7 +1470,7 @@ func decodeIntraBlockPlaneRegion(m *bitstream.MSAC, ctx *TileCtx, fs *FrameState
 			decodePalettePlane(m, ctx, fs, fb, 2, cbx, cby, cbw, cbh, ctxCBW, ctxCBH, intraSt.txUV, intraSt.pal[2], intraSt.palIdxUV, reconSt.dqV, skip, intraSt.uvMode, reconSt.reducedTxtpSet, qidxIsZero, lossless)
 		} else if intraSt.uvMode == CFLPred {
 			cflBX, cflBY, cflBW, cflBH := cflLumaRect(seq, cbx, cby, cbw, cbh)
-			acCfl := buildCflAc(fb, seq, cflBX, cflBY, cflBW, cflBH, cbw, cbh)
+			acCfl := buildCflAcInto(fs.cflAcBuffer(cbw*cbh), fb, seq, cflBX, cflBY, cflBW, cflBH, cbw, cbh)
 			if intraSt.cflAlphaU != 0 {
 				decodeIntraPlaneCFL(m, ctx, fs, fb, 1, cbx, cby, cbw, cbh, ctxCBW, ctxCBH, intraSt.txUV, int(intraSt.cflAlphaU), reconSt.dqU, skip, intraSt.yMode, reconSt.reducedTxtpSet, fhdr, seq, qidxIsZero, lossless, acCfl)
 			} else {
@@ -2057,7 +2057,11 @@ func decodeCFLAlphas(m *bitstream.MSAC, ctx *TileCtx) (int8, int8) {
 // cbw鑴砪bh array, then subtracting the mean. The result is in row-major
 // layout, length cbw*cbh.
 func buildCflAc(fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh, cbw, cbh int) []int16 {
-	ac := make([]int16, cbw*cbh)
+	return buildCflAcInto(make([]int16, cbw*cbh), fb, seq, bx, by, bw, bh, cbw, cbh)
+}
+
+func buildCflAcInto(ac []int16, fb *FrameBuf, seq *header.SequenceHeader, bx, by, bw, bh, cbw, cbh int) []int16 {
+	ac = ac[:cbw*cbh]
 	if len(fb.Y) == 0 || cbw == 0 || cbh == 0 {
 		return ac
 	}
@@ -2227,7 +2231,7 @@ func decodeIntraPlaneCFL(
 	if bh > maxDim {
 		maxDim = bh
 	}
-	tlBuf := make([]byte, 4*maxDim+2)
+	tlBuf := fs.intraEdgeBuffer(4*maxDim + 2)
 	tl := 2 * maxDim
 	td := transform.TxfmDimensions[tx]
 	tw := int(td.W) * 4
@@ -2238,7 +2242,7 @@ func decodeIntraPlaneCFL(
 	if th > bh {
 		th = bh
 	}
-	predBuf := make([]byte, tw*th)
+	predBuf := fs.intraPredBuffer(tw * th)
 	stepX := 4
 	stepY := 4
 	if seq != nil {
@@ -2264,7 +2268,7 @@ func decodeIntraPlaneCFL(
 				false, smoothFlags, haveTop, haveLeft,
 			)
 			if cflAlpha != 0 {
-				acSlice := cflAcSubBlock(ac, bw, bh, tbx, tby, tw, th)
+				acSlice := cflAcSubBlockInto(fs.cflSubBuffer(tw*th), ac, bw, bh, tbx, tby, tw, th)
 				predictCFLBlock(predBuf, tw, tlBuf, tl, tw, th, cflAlpha, acSlice, haveTop, haveLeft)
 			} else {
 				callPreparedIntraPred(dispatchMode, packedAngle, -1, predBuf, tw, tlBuf, tl, tw, th,
@@ -2301,9 +2305,13 @@ func decodeIntraPlaneCFL(
 }
 
 // cflAcSubBlock extracts a tw鑴硉h tile (at offset tbx,tby) from a cbw鑴砪bh
-// CFL AC buffer, copying it into a freshly-allocated row-major slice.
+// CFL AC buffer, copying it into a compact row-major slice.
 func cflAcSubBlock(ac []int16, cbw, cbh, tbx, tby, tw, th int) []int16 {
-	out := make([]int16, tw*th)
+	return cflAcSubBlockInto(make([]int16, tw*th), ac, cbw, cbh, tbx, tby, tw, th)
+}
+
+func cflAcSubBlockInto(out, ac []int16, cbw, cbh, tbx, tby, tw, th int) []int16 {
+	out = out[:tw*th]
 	for y := 0; y < th; y++ {
 		sy := tby + y
 		if sy >= cbh {
@@ -2385,7 +2393,7 @@ func decodePalettePlane(
 	if th > bh {
 		th = bh
 	}
-	predBuf := make([]byte, tw*th)
+	predBuf := fs.intraPredBuffer(tw * th)
 
 	for tby := 0; tby < bh; tby += th {
 		for tbx := 0; tbx < bw; tbx += tw {
@@ -2478,7 +2486,7 @@ func decodePalettePlaneVarTx(
 			continue
 		}
 		dst := planeBuf[dstOff:]
-		predBuf := make([]byte, tw*th)
+		predBuf := fs.intraPredBuffer(tw * th)
 		predictPalette(predBuf, tw, pal, palIdx[blk.y*palStride+blk.x:], tw, th, palStride)
 		for row := 0; row < th; row++ {
 			dstRow := (by+blk.y+row)*stride + (bx + blk.x)
@@ -2806,7 +2814,7 @@ func decodeIntraPlaneVarTx(
 	if bh > maxDim {
 		maxDim = bh
 	}
-	tlBuf := make([]byte, 4*maxDim+2)
+	tlBuf := fs.intraEdgeBuffer(4*maxDim + 2)
 	tl := 2 * maxDim
 	stepX := 4
 	stepY := 4
@@ -2834,7 +2842,7 @@ func decodeIntraPlaneVarTx(
 			continue
 		}
 		dst := planeBuf[dstOff:]
-		predBuf := make([]byte, tw*th)
+		predBuf := fs.intraPredBuffer(tw * th)
 
 		haveTop, haveLeft := fs.intraAvailability(plane, bx+blk.x, by+blk.y)
 		dispatchMode, packedAngle := prepareIntraPrediction(
@@ -2951,10 +2959,12 @@ func decodeIntraPlane(
 	//   topleft[tl]                = top-left sample
 	//   topleft[tl+1..tl+2*maxDim] = top samples (left-to-right),
 	//                                extended past bw by replicating last
-	tlBuf, tl := newIntraEdgeBuffer(bw, bh, tw, th)
+	maxDim := maxInt(maxInt(bw, bh), maxInt(tw, th))
+	tl := 2 * maxDim
+	tlBuf := fs.intraEdgeBuffer(4*maxDim + 2)
 
 	// Iterate over transform blocks within the coding block.
-	predBuf := make([]byte, tw*th)
+	predBuf := fs.intraPredBuffer(tw * th)
 	stepX := 4
 	stepY := 4
 	if plane > 0 && seq != nil {

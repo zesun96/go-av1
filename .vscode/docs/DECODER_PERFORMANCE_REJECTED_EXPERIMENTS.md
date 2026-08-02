@@ -48,8 +48,16 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
 - Result: about 2.44% slower and initially failed zero/sentinel preservation.
 - Reason: per-row Go-to-assembly calls dominated, and grid index zero has
   semantic meaning.
-- Revisit only with one call covering the complete rectangle and explicit
-  sentinel tests.
+- A follow-up used one assembly call for the complete tile rectangle, passed
+  1,000 randomized stride/zero-sentinel cases, and improved its dense-grid
+  microbenchmark by more than 3x. It still regressed the exact same-build
+  end-to-end median by 2.54%; adding all-zero/all-nonzero vector fast paths
+  increased the regression to 3.22%.
+- Reason for the follow-up rejection: the real grids do not behave like the
+  dense microbenchmark, and unconditional vector destination traffic plus
+  extra branching/code footprint costs more than the scalar nonzero stores.
+- Do not revisit without a profile proving a different grid density or a
+  merge design that eliminates the destination remap pass entirely.
 
 ### MSAC 2/3-symbol manual unrolling
 
@@ -58,6 +66,24 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
   gain.
 - Revisit only with generated or assembly kernels covering the dominant CDF
   families together.
+
+### Direct native HiTok dispatch
+
+- Result: the 512-token microbenchmark improved from approximately 4.26 to
+  3.35 microseconds (21 percent), but an exact same-build 11-run decoder test
+  was flat to slightly slower (787.25 ms versus 787.26 ms).
+- An intermediate helper shared by normal 4-result symbols and HiTok could
+  not inline and regressed the normal symbol microbenchmark by about 5
+  percent; duplicating the direct assembly call removed that regression but
+  still produced no end-to-end gain.
+- Moving scalar `c/r` preparation below the native dispatch, tested alone,
+  also regressed the end-to-end median by 1.42 percent despite improving the
+  symbol microbenchmark.
+- Reason: HiTok escapes are not frequent enough in the measured stream, and
+  small source/layout changes around this already assembly-heavy path alter
+  instruction-cache behavior more than they save arithmetic.
+- Revisit only as part of a fused coefficient-token decoder that removes
+  surrounding Go calls and context work, not as another MSAC wrapper change.
 
 ### Expanded Bool normalization fast path
 
@@ -81,6 +107,21 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
 - Revisit only after changing the CDEF scratch layout so paired rows or paired
   blocks are already contiguous in SIMD-friendly lanes.
 
+### Paired U/V 4x4 CDEF SSE4.1
+
+- Result: approximately 158 ns for a paired block versus 158 ns for two
+  retained single-plane calls; an exact same-build 11-run end-to-end test
+  regressed by 0.12 percent (757.15 ms versus 756.21 ms).
+- Reason: packing four pixels from each plane filled all eight SIMD lanes, but
+  required two independent scratch/source address streams. The two padding
+  expansions and paired loads consumed the saved call overhead.
+- An initial comparison against an older executable incorrectly appeared 3.6
+  percent faster. Rebuilding the scalar-call baseline from the same source and
+  compiler configuration removed that apparent gain; do not use cross-build
+  decoder binaries for sub-five-percent acceptance decisions.
+- Revisit only if U/V padding is produced directly in one interleaved scratch
+  layout, so pairing removes memory work as well as one filter call.
+
 ### Plane-wide padded CDEF source
 
 - Result: 1.805 s versus a 1.802 s same-session baseline in the earlier
@@ -89,12 +130,44 @@ Microbenchmarks are diagnostic only. End-to-end decode time is authoritative.
   per-block filter enough.
 - Superseded by the retained row-stripe source design in commit `6ba718e`.
 
+### Skip CDEF direction-grid clearing
+
+- Result: 599-frame output remained exact and the 120-frame median initially
+  improved by 0.34 percent, but five alternating 599-frame runs regressed by
+  1.30 percent (7.217 s versus 7.125 s).
+- Reason: the removed writes are small relative to CDEF filtering, and stale
+  direction/variance state changes cache behavior without a stable wall-time
+  benefit even though all subsequently read entries are overwritten.
+
 ### Scalar width-6 loop-filter specialization
 
 - Result: no stable end-to-end improvement.
 - Reason: the remaining cost is the filtering arithmetic and edge traversal,
   not generic width dispatch.
 - Revisit as a vector kernel processing the four parallel edge lanes.
+
+### SSE2 wide-loop-filter reject precheck
+
+- Result: a synthetic rejected width-8 edge improved from approximately
+  43-47 ns to 9 ns and passed 10,000 randomized width 6/8/16 differential
+  cases. Applying it to all vertical wide edges regressed end-to-end by 0.62
+  percent; restricting it to width 16 still regressed by 0.51 percent.
+- Reason: most real candidates that reach this stage continue into the full
+  generic filter, so the SSE2 mask check becomes duplicate work.
+- Revisit only as a complete SIMD implementation that reuses its mask and
+  loaded pixels for the actual 6/8/16-wide filtering operation.
+
+### Direct intra prediction into the frame buffer
+
+- Result: rejected for correctness. Predicting full, unclipped transform
+  blocks directly into the strided destination instead of a compact scratch
+  block changed the 599-frame framemd5 beginning at decoded frame 2.
+- The public predictor entry points accept a stride, but the decoder's compact
+  prediction-and-copy sequence currently has observable semantics for at least
+  one real prediction/reconstruction path. Do not remove that copy based only
+  on the apparent API contract.
+- Revisit with a mode-by-mode compact-versus-strided differential test and a
+  first-pixel decoder trace before enabling direct output for any subset.
 
 ## Current large targets
 
